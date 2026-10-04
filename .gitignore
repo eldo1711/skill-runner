@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.env.*
+*.log
+.DS_Store
+server/seed_chrome_tabs.json
+server/seed_lab_snapshot.html

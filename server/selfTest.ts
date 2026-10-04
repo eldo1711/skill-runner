@@ -1,0 +1,328 @@
+import { chromium } from 'playwright';
+import { parseLabPageDom } from './labParser.js';
+import {
+  formatAutonomousAntigravityPrompt,
+  interpolateLabVariables,
+  resolveLatestGeminiModel,
+  synthesizeTaskShellScript,
+  transformAgyLaunchCommand,
+} from './geminiClient.js';
+import {
+  autoAcceptAntigravityPrompts,
+  inspectInteractiveElements,
+  sendPromptToAntigravity,
+} from './pageInspector.js';
+
+async function runVerificationTests() {
+  console.log('🧪 Running Cloud Skills Lab Runner Verification Suite...');
+
+  const latestModel = await resolveLatestGeminiModel();
+  console.log(`✓ Resolved latest available Gemini model: ${latestModel}`);
+  if (!latestModel.startsWith('gemini-')) {
+    throw new Error(`Expected latest model to start with gemini-, got: ${latestModel}`);
+  }
+
+  // 0. Unit-test `transformAgyLaunchCommand` (--dangerously-skip-permissions + fallback)
+  const cases: Array<[string, string]> = [
+    ['agy', 'agy --dangerously-skip-permissions || agy'],
+    ['agy .', 'agy --dangerously-skip-permissions . || agy .'],
+    [
+      'cd my-app && agy .',
+      'cd my-app && (agy --dangerously-skip-permissions . || agy .)',
+    ],
+    [
+      'antigravity --workspace /home/student',
+      'antigravity --dangerously-skip-permissions --workspace /home/student || antigravity --workspace /home/student',
+    ],
+    [
+      'gcloud services enable aiplatform.googleapis.com',
+      'gcloud services enable aiplatform.googleapis.com',
+    ],
+  ];
+
+  for (const [input, expected] of cases) {
+    const actual = transformAgyLaunchCommand(input);
+    if (actual !== expected) {
+      throw new Error(
+        `transformAgyLaunchCommand("${input}") expected "${expected}", got "${actual}"`
+      );
+    }
+  }
+  console.log(
+    '✓ transformAgyLaunchCommand verified (--dangerously-skip-permissions with automatic fallback)'
+  );
+
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await context.newPage();
+
+  // 1. Test Shadow-DOM Qwiklabs Parser on a realistic mock lab DOM (including agy launch steps)
+  await page.setContent(`
+    <!DOCTYPE html>
+    <html>
+      <head><title>Build an AI Agent with Antigravity on Google Cloud</title></head>
+      <body>
+        <h1 class="lab-preamble__title">Build an AI Agent with Antigravity on Google Cloud</h1>
+        <div class="js-timer">01:14:52</div>
+        <button>End Lab</button>
+
+        <div class="control-panel">
+          <input label="Username" value="student-04-8f92a1b3c4d5@qwiklabs.net" />
+          <input label="Password" value="kP9#mQ2$vL5" />
+          <input label="GCP Project ID" value="qwiklabs-gcp-04-a1b2c3d4e5" />
+          <a href="https://console.cloud.google.com/?project=qwiklabs-gcp-04-a1b2c3d4e5">Open Google Console</a>
+        </div>
+
+        <div class="js-lab-content-body">
+          <h2>Overview</h2>
+          <p>In this lab you will configure Vertex AI and use Antigravity in the Cloud Console.</p>
+          <p>Set your default region to us-central1 and zone to us-central1-a.</p>
+
+          <h2>Task 1. Enable APIs and Launch Antigravity</h2>
+          <ol>
+            <li>
+              Activate Cloud Shell and enable the Vertex AI API:
+              <pre>gcloud services enable aiplatform.googleapis.com --project=[PROJECT_ID]</pre>
+            </li>
+            <li>
+              In the Cloud Shell terminal, launch Antigravity in the project directory:
+              <pre>agy .</pre>
+            </li>
+            <li>
+              Open the <a href="https://console.cloud.google.com/vertex-ai?project=[PROJECT_ID]">Vertex AI Console</a> in your incognito window.
+            </li>
+          </ol>
+          <button>Check my progress</button>
+
+          <h2>Task 2. Build the Service with Antigravity in the Cloud Console</h2>
+          <ol>
+            <li>
+              In the Antigravity panel in the Cloud Console, enter the following prompt to scaffold the Cloud Run service:
+              <pre>Create a FastAPI service in main.py that queries Gemini 3.5 Flash in project [PROJECT_ID] and region [REGION].</pre>
+            </li>
+          </ol>
+          <button>Check my progress</button>
+        </div>
+
+        <!-- Simulated Antigravity IDE Chat Input & Permission Confirmation Button -->
+        <div id="antigravity-panel" style="margin-top: 20px;">
+          <textarea
+            id="antigravity-chat-box"
+            placeholder="Ask Antigravity to build or debug..."
+            style="width: 400px; height: 80px;"
+          ></textarea>
+          <button
+            id="agy-accept-btn"
+            onclick="window.__agyAccepted = true; this.style.display = 'none';"
+          >
+            Accept All
+          </button>
+        </div>
+      </body>
+    </html>
+  `);
+
+  const parsed = await parseLabPageDom(page);
+
+  console.log('✓ Lab Title:', parsed.labTitle);
+  console.log('✓ Extracted Credentials:', parsed.credentials);
+  console.log('✓ Extracted Tasks:', parsed.tasks.length);
+
+  if (parsed.credentials.username !== 'student-04-8f92a1b3c4d5@qwiklabs.net') {
+    throw new Error(`Unexpected username: ${parsed.credentials.username}`);
+  }
+  if (parsed.credentials.projectId !== 'qwiklabs-gcp-04-a1b2c3d4e5') {
+    throw new Error(`Unexpected projectId: ${parsed.credentials.projectId}`);
+  }
+  if (parsed.credentials.region !== 'us-central1') {
+    throw new Error(`Unexpected region: ${parsed.credentials.region}`);
+  }
+  if (parsed.tasks.length !== 2) {
+    throw new Error(`Expected 2 actionable tasks, got ${parsed.tasks.length}`);
+  }
+
+  // 2. Verify variable interpolation & agy launch transformation in parsed tasks
+  const rawCmd = parsed.tasks[0].steps[0].commands[0];
+  const interpolatedCmd = interpolateLabVariables(rawCmd, parsed.credentials);
+  console.log('✓ Interpolated Command:', interpolatedCmd);
+  if (
+    interpolatedCmd !==
+    'gcloud services enable aiplatform.googleapis.com --project=qwiklabs-gcp-04-a1b2c3d4e5'
+  ) {
+    throw new Error(`Variable interpolation failed: ${interpolatedCmd}`);
+  }
+
+  const agyLaunchStep = parsed.tasks[0].steps[1];
+  console.log('✓ Parsed Agy Launch Step Command:', agyLaunchStep.commands[0]);
+  if (agyLaunchStep.commands[0] !== 'agy --dangerously-skip-permissions . || agy .') {
+    throw new Error(
+      `Expected agy launch step to be wrapped with fallback, got: ${agyLaunchStep.commands[0]}`
+    );
+  }
+  if (agyLaunchStep.targetSurface !== 'cloud_shell') {
+    throw new Error(
+      `Expected agy CLI launch step surface 'cloud_shell', got '${agyLaunchStep.targetSurface}'`
+    );
+  }
+
+  // 3. Verify surface classification for Antigravity prompt step
+  const antigravityStep = parsed.tasks[1].steps[0];
+  console.log('✓ Task 2 Step 1 Surface:', antigravityStep.targetSurface);
+  if (antigravityStep.targetSurface !== 'antigravity') {
+    throw new Error(`Expected surface 'antigravity', got '${antigravityStep.targetSurface}'`);
+  }
+
+  // 4. Verify Set-of-Marks (SoM) Interactive Element Inspector
+  const elements = await inspectInteractiveElements(page);
+  console.log(`✓ Set-of-Marks Inspector found ${elements.length} interactive elements.`);
+  if (elements.length < 4) {
+    throw new Error('Expected at least 4 interactive elements on test page.');
+  }
+
+  // 5. Verify Zero-Touch Antigravity Prompt Dispatcher & Auto-Approval of Permission Buttons
+  const promptText = interpolateLabVariables(
+    antigravityStep.commands[0],
+    parsed.credentials
+  );
+  await sendPromptToAntigravity(page, promptText, (msg) =>
+    console.log('  [Antigravity Log]', msg)
+  );
+  const chatVal = await page.locator('#antigravity-chat-box').inputValue();
+  console.log('✓ Antigravity Chat Box Value:', chatVal.replace(/\n+/g, ' '));
+  if (
+    !chatVal.includes('qwiklabs-gcp-04-a1b2c3d4e5') ||
+    !chatVal.includes('us-central1') ||
+    !chatVal.includes('[Autonomous Execution Mode')
+  ) {
+    throw new Error(`Zero-touch Antigravity prompt injection failed: ${chatVal}`);
+  }
+
+  const agyAccepted = await page.evaluate(() => Boolean((window as any).__agyAccepted));
+  console.log('✓ Auto-Approved Antigravity Confirmation Button:', agyAccepted);
+  if (!agyAccepted) {
+    throw new Error('Expected autoAcceptAntigravityPrompts to click "Accept All" button.');
+  }
+
+  // 6. Verify modern partner.skills.google <ql-lab-header> + Declarative Shadow DOM parsing
+  await page.setContent(`
+    <!DOCTYPE html>
+    <html>
+      <body>
+        <ql-lab-header
+          labtitle="Accelerate Development with Antigravity: Challenge Lab"
+          labcontrolbutton='{"disabled":false,"pending":false,"running":true}'
+          labtimer='{"ticking":true,"secondsRemaining":5400,"totalDurationSeconds":5510}'
+          labdetails='[{"property":"console_url","href":"https://partner.skills.google/google_sso?relay=https%3A%2F%2Fconsole.cloud.google.com"},{"property":"username","value":"student-03-e308b0eed25e@qwiklabs.net"},{"property":"password","value":"lsYV1hgQ61Nz"},{"property":"project_id","value":"qwiklabs-gcp-02-44b374896675"}]'
+        ></ql-lab-header>
+        <div class="js-lab-content-body">
+          <h2>Task 1. Configure MCP Server</h2>
+          <ol>
+            <li>
+              Launch the Antigravity CLI:
+              <ql-code-block language="bash" templated="">
+                <template shadowrootmode="open"><pre class="bash">agy --dangerously-skip-permissions</pre></template>
+                agy --dangerously-skip-permissions
+              </ql-code-block>
+            </li>
+            <li>
+              Prompt the agent to create the Python MCP server:
+              <ql-code-block language="plaintext" templated="">
+                <template shadowrootmode="open"><pre class="plaintext">Create a Python script using python3 and Upload to gs://qwiklabs-gcp-02-44b374896675-grading/</pre></template>
+                Create a Python script using python3 and Upload to gs://{{{project_0.project_id}}}-grading/
+              </ql-code-block>
+            </li>
+          </ol>
+        </div>
+      </body>
+    </html>
+  `);
+
+  const modernParsed = await parseLabPageDom(page);
+  console.log('✓ Modern <ql-lab-header> Title:', modernParsed.labTitle);
+  console.log('✓ Modern <ql-lab-header> Credentials:', modernParsed.credentials);
+  if (
+    modernParsed.credentials.username !== 'student-03-e308b0eed25e@qwiklabs.net' ||
+    modernParsed.credentials.projectId !== 'qwiklabs-gcp-02-44b374896675' ||
+    !modernParsed.isLabStarted ||
+    modernParsed.needsLogin
+  ) {
+    throw new Error('Failed to parse <ql-lab-header> attributes properly.');
+  }
+  if (
+    modernParsed.tasks[0].steps[0].commands[0] !==
+      'agy --dangerously-skip-permissions || agy' ||
+    modernParsed.tasks[0].steps[0].targetSurface !== 'cloud_shell'
+  ) {
+    throw new Error(
+      `Unexpected step 1 in modern parser: ${JSON.stringify(modernParsed.tasks[0].steps[0])}`
+    );
+  }
+  if (
+    !modernParsed.tasks[0].steps[1].commands[0].includes('qwiklabs-gcp-02-44b374896675-grading') ||
+    modernParsed.tasks[0].steps[1].targetSurface !== 'antigravity'
+  ) {
+    throw new Error(
+      `Expected interpolated shadow <pre> and 'antigravity' surface for step 2, got: ${JSON.stringify(modernParsed.tasks[0].steps[1])}`
+    );
+  }
+
+  // 7. Verify {{{ var | default }}} template interpolation and task-level script synthesis
+  const pipedTemplate =
+    'gcloud storage cp -r gs://{{{ project_0.project_id | "your-gcp-project-id" }}}-bucket/adk_eval_challenge_lab ~/';
+  const interpolatedPiped = interpolateLabVariables(pipedTemplate, modernParsed.credentials);
+  if (
+    interpolatedPiped !==
+    'gcloud storage cp -r gs://qwiklabs-gcp-02-44b374896675-bucket/adk_eval_challenge_lab ~/'
+  ) {
+    throw new Error(`Piped template interpolation failed: ${interpolatedPiped}`);
+  }
+
+  const synthTask2 = await synthesizeTaskShellScript({
+    labTitle: 'Evaluate and Improve Agent Development Kit Agents: Challenge Lab',
+    task: {
+      number: 2,
+      title: 'Task 2. Build and run the eval set',
+      hasCheckProgress: true,
+      checkProgressStepNumber: 1,
+      rawSectionText:
+        'Add valid_transitions rubric to eval_config.json and run adk eval bigquery_agent ledger | tee eval_results.txt',
+      steps: [],
+    },
+    credentials: modernParsed.credentials,
+  });
+  if (
+    !synthTask2?.script.includes('eval_results.txt') ||
+    synthTask2.script.includes('improved_eval_results.txt')
+  ) {
+    throw new Error('Task 2 synthesis did not produce expected Task 2 eval script.');
+  }
+
+  const synthTask3 = await synthesizeTaskShellScript({
+    labTitle: 'Evaluate and Improve Agent Development Kit Agents: Challenge Lab',
+    task: {
+      number: 3,
+      title: 'Task 3. Improve the agent to fix evaluation issues',
+      hasCheckProgress: true,
+      checkProgressStepNumber: 2,
+      rawSectionText:
+        'Implement perform_consistent_transaction and check_transaction to fix valid_transitions in eval_config.json and tee improved_eval_results.txt',
+      steps: [],
+    },
+    credentials: modernParsed.credentials,
+  });
+  if (
+    !synthTask3?.script.includes('improved_eval_results.txt') ||
+    !synthTask3.script.includes('def perform_consistent_transaction')
+  ) {
+    throw new Error('Task 3 synthesis did not produce expected Task 3 agent improvement script.');
+  }
+  console.log('✓ Task-level script synthesis & piped variable interpolation verified.');
+
+  await browser.close();
+  console.log('✅ All verification tests passed!');
+}
+
+runVerificationTests().catch((err) => {
+  console.error('❌ Verification test failed:', err);
+  process.exit(1);
+});

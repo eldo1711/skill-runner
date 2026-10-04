@@ -1,0 +1,891 @@
+#!/usr/bin/env node
+/**
+ * Cloud Skills Lab Runner — On-Demand Mac Chrome Bridge Agent (macBridgeAgent.ts)
+ *
+ * - Zero local listening ports (outbound WebSocket connection to Cloud Run only)
+ * - Zero background polling (only queries Google Chrome when explicitly requested by you in the UI,
+ *   so it never interferes with SSO logins, password typing, or Passkey/TouchID prompts)
+ * - Supports live Qwiklabs "Check my progress" grading (/assessments/run_step.json) and direct
+ *   Cloud Shell SSH execution with full stdout/stderr telemetry
+ * - Can be stopped anytime via Ctrl+C in terminal or clicking "Stop Mac Bridge" in the Cloud Run web UI
+ *
+ * Usage:
+ *   node macBridgeAgent.ts
+ *   # or:
+ *   npx tsx macBridgeAgent.ts
+ */
+
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+
+const execFileAsync = promisify(execFile);
+
+const CLOUD_RUN_WS_URL =
+  process.env.CLOUD_RUN_WS_URL ||
+  'wss://cloud-skills-lab-runner-621653283297.us-central1.run.app/ws-bridge';
+
+const SNAPSHOT_DIR = path.join(os.homedir(), '.cloud-skills-lab-runner');
+const SNAPSHOT_HTML_PATH = path.join(SNAPSHOT_DIR, 'live_lab_snapshot.html');
+const SNAPSHOT_FILES_DIR = path.join(SNAPSHOT_DIR, 'live_lab_snapshot_files');
+
+async function runAppleScript(script) {
+  const { stdout } = await execFileAsync('osascript', ['-e', script], {
+    timeout: 20000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  return stdout.trim();
+}
+
+async function listUserChromeTabs() {
+  const script = `
+tell application "Google Chrome"
+  set out to ""
+  repeat with wIdx from 1 to count of windows
+    set w to window wIdx
+    set wId to id of w
+    set wMode to mode of w
+    set actIdx to active tab index of w
+    repeat with tIdx from 1 to count of tabs of w
+      set t to tab tIdx of w
+      set u to URL of t
+      set ttl to title of t
+      set out to out & (wId as string) & "|||" & (wIdx as string) & "|||" & (wMode as string) & "|||" & (actIdx as string) & "|||" & (tIdx as string) & "|||" & ttl & "|||" & u & linefeed
+    end repeat
+  end repeat
+  return out
+end tell
+`;
+  const raw = await runAppleScript(script).catch(() => '');
+  if (!raw) return [];
+
+  const tabs = [];
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const [wIdStr, wIdxStr, modeStr, actIdxStr, tIdxStr, title, url] = line.split('|||');
+    const windowId = parseInt(wIdStr, 10);
+    const windowIndex = parseInt(wIdxStr, 10) || 1;
+    const tabIndex = parseInt(tIdxStr, 10) || 1;
+    const activeIdx = parseInt(actIdxStr, 10) || 1;
+    if (!Number.isFinite(windowId) || !url) continue;
+
+    const lowerUrl = url.toLowerCase();
+    let suggestedRole = 'other';
+    if (
+      !lowerUrl.includes('accounts.google.com') &&
+      !lowerUrl.includes('login.corp.google.com') &&
+      !lowerUrl.includes('google_sso') &&
+      (lowerUrl.includes('skills.google/focuses/') ||
+        lowerUrl.includes('/labs/') ||
+        lowerUrl.includes('cloudskillsboost.google/focuses/') ||
+        lowerUrl.includes('skills.google/catalog_lab/') ||
+        lowerUrl.includes('qwiklabs.com/focuses/'))
+    ) {
+      suggestedRole = 'lab';
+    } else if (lowerUrl.includes('shell.cloud.google.com')) {
+      suggestedRole = 'cloud_shell';
+    } else if (lowerUrl.includes('console.cloud.google.com')) {
+      suggestedRole = 'console';
+    }
+
+    tabs.push({
+      key: `${windowId}:${tabIndex}`,
+      windowId,
+      windowIndex,
+      windowMode: modeStr?.toLowerCase().includes('incognito') ? 'incognito' : 'normal',
+      tabIndex,
+      title: (title || url).trim(),
+      url: url.trim(),
+      isActiveTab: tabIndex === activeIdx,
+      suggestedRole,
+    });
+  }
+
+  const rolePriority = {
+    lab: 0,
+    console: 1,
+    cloud_shell: 2,
+    other: 3,
+  };
+
+  tabs.sort((a, b) => {
+    const rDiff = (rolePriority[a.suggestedRole] ?? 3) - (rolePriority[b.suggestedRole] ?? 3);
+    if (rDiff !== 0) return rDiff;
+    if (a.windowMode !== b.windowMode) {
+      return a.windowMode === 'incognito' ? -1 : 1;
+    }
+    if (a.windowIndex !== b.windowIndex) return a.windowIndex - b.windowIndex;
+    return a.tabIndex - b.tabIndex;
+  });
+
+  return tabs;
+}
+
+async function focusUserChromeTab(windowId, tabIndex) {
+  const script = `
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${windowId}" then
+      if ${tabIndex} <= (count of tabs of w) then
+        set active tab index of w to ${tabIndex}
+      end if
+      set index of w to 1
+      activate
+      return "ok"
+    end if
+  end repeat
+  return "not_found"
+end tell
+`;
+  const res = await runAppleScript(script).catch(() => '');
+  return res === 'ok';
+}
+
+async function openOrFocusLabInUserChrome(requestedUrl) {
+  let pathKey = '';
+  try {
+    const parsed = new URL(requestedUrl);
+    if (parsed.pathname && parsed.pathname !== '/' && parsed.pathname !== '/focuses/') {
+      pathKey = parsed.pathname;
+    }
+  } catch {
+    // Ignore
+  }
+
+  const escapedUrl = requestedUrl.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const escapedPathKey = pathKey.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
+  const script = `
+tell application "Google Chrome"
+  activate
+  if "${escapedPathKey}" is not "" then
+    repeat with wIdx from 1 to count of windows
+      set w to window wIdx
+      repeat with tIdx from 1 to count of tabs of w
+        set t to tab tIdx of w
+        set u to URL of t
+        if u contains "${escapedPathKey}" then
+          set active tab index of w to tIdx
+          set index of w to 1
+          return ((id of w) as string) & "|||" & (wIdx as string) & "|||" & (tIdx as string) & "|||" & u & "|||" & (title of t)
+        end if
+      end repeat
+    end repeat
+  end if
+
+  set targetWinIdx to 1
+  repeat with wIdx from 1 to count of windows
+    set w to window wIdx
+    if (mode of w) is not "incognito" then
+      repeat with tIdx from 1 to count of tabs of w
+        set u to URL of tab tIdx of w
+        if (u contains "partner.skills.google" or u contains "skills.google" or u contains "mail.google.com" or u contains "corp.google.com") then
+          set targetWinIdx to wIdx
+          exit repeat
+        end if
+      end repeat
+    end if
+    if targetWinIdx is not 1 then exit repeat
+  end repeat
+
+  if (count of windows) is 0 then
+    make new window
+    set targetWinIdx to 1
+  end if
+
+  set targetWin to window targetWinIdx
+  set newTab to make new tab at end of tabs of targetWin with properties {URL:"${escapedUrl}"}
+  set index of targetWin to 1
+  set newTabIdx to count of tabs of targetWin
+  return ((id of targetWin) as string) & "|||1|||" & (newTabIdx as string) & "|||" & (URL of newTab) & "|||" & (title of newTab)
+end tell
+`;
+  const raw = await runAppleScript(script);
+  const [wIdStr, wStr, tStr, url, title] = raw.split('|||');
+  return {
+    windowId: parseInt(wIdStr, 10) || undefined,
+    windowIndex: parseInt(wStr, 10) || 1,
+    tabIndex: parseInt(tStr, 10) || 1,
+    url: url || requestedUrl,
+    title: title || 'Google Cloud Skills Lab',
+  };
+}
+
+async function snapshotUserChromeTabByTarget(windowId, tabIndex) {
+  fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
+  try {
+    if (fs.existsSync(SNAPSHOT_HTML_PATH)) fs.unlinkSync(SNAPSHOT_HTML_PATH);
+    if (fs.existsSync(SNAPSHOT_FILES_DIR)) {
+      fs.rmSync(SNAPSHOT_FILES_DIR, { recursive: true, force: true });
+    }
+  } catch {
+    // Ignore
+  }
+
+  const escapedSnapshotPath = SNAPSHOT_HTML_PATH.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const inMemoryJs = `(function(){try{function s(r){var h='';var c=r.childNodes;for(var i=0;i<c.length;i++){var n=c[i];if(n.nodeType===1){var t=n.tagName.toLowerCase();h+='<'+t;for(var a=0;a<n.attributes.length;a++){var at=n.attributes[a];h+=' '+at.name+'="'+at.value.replace(/"/g,'&quot;')+'"';}h+='>';if(n.shadowRoot){h+='<template shadowrootmode="open">'+s(n.shadowRoot)+'</template>';}h+=s(n)+'</'+t+'>';}else if(n.nodeType===3){h+=n.nodeValue;}}return h;}return document.documentElement.outerHTML.length>500 && document.querySelector('ql-lab-header') ? '<!DOCTYPE html><html>'+s(document.documentElement)+'</html>' : '';}catch(e){return '';}})()`;
+  const escapedInMemoryJs = inMemoryJs.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
+  const script = `
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${windowId}" then
+      if ${tabIndex} <= (count of tabs of w) then
+        set t to tab ${tabIndex} of w
+        if (loading of t) is true then
+          return ""
+        end if
+        set u to URL of t
+        if (u contains "accounts.google.com" or u contains "login.corp.google.com" or u contains "google_sso") then
+          return ""
+        end if
+        try
+          set domHtml to execute t javascript "${escapedInMemoryJs}"
+          if domHtml is not "" then
+            return u & "|||" & (title of t) & "|||" & domHtml
+          end if
+        end try
+        save t in POSIX file "${escapedSnapshotPath}"
+        return u & "|||" & (title of t)
+      end if
+    end if
+  end repeat
+  return ""
+end tell
+`;
+  const out = await runAppleScript(script).catch(() => '');
+  if (!out) return null;
+
+  const parts = out.split('|||');
+  const url = parts[0] || '';
+  const title = parts[1] || '';
+  const inlineHtml = parts.slice(2).join('|||');
+
+  if (inlineHtml && inlineHtml.length > 500) {
+    fs.writeFileSync(SNAPSHOT_HTML_PATH, inlineHtml, 'utf8');
+    return { htmlPath: SNAPSHOT_HTML_PATH, url, title };
+  }
+
+  let lastSize = 0;
+  for (let i = 0; i < 24; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    if (fs.existsSync(SNAPSHOT_HTML_PATH)) {
+      const stat = fs.statSync(SNAPSHOT_HTML_PATH);
+      if (stat.size > 2000 && stat.size === lastSize) break;
+      lastSize = stat.size;
+    }
+  }
+  try {
+    if (fs.existsSync(SNAPSHOT_FILES_DIR)) {
+      fs.rmSync(SNAPSHOT_FILES_DIR, { recursive: true, force: true });
+    }
+  } catch {
+    // Ignore
+  }
+  if (!fs.existsSync(SNAPSHOT_HTML_PATH)) return null;
+  return { htmlPath: SNAPSHOT_HTML_PATH, url: url || '', title: title || '' };
+}
+
+async function snapshotUserChromeLabTab(preferredUrl, preferredTarget) {
+  if (preferredTarget?.windowId && preferredTarget?.tabIndex) {
+    const byTarget = await snapshotUserChromeTabByTarget(
+      Number(preferredTarget.windowId),
+      Number(preferredTarget.tabIndex)
+    );
+    if (byTarget) return byTarget;
+  }
+
+  const tabs = await listUserChromeTabs();
+  const labTab = tabs.find((t) => t.suggestedRole === 'lab');
+  if (labTab) {
+    return snapshotUserChromeTabByTarget(labTab.windowId, labTab.tabIndex);
+  }
+  return null;
+}
+
+/**
+ * Triggers Qwiklabs' live assessment grader (`/assessments/run_step.json?id=${labInstanceId}&step=${stepNumber}`)
+ * inside the user's authenticated Chrome session without requiring "Allow JavaScript from Apple Events".
+ */
+async function checkProgressInUserChrome(
+  stepNumber,
+  labUrl,
+  labInstanceId,
+  windowId,
+  tabIndex
+) {
+  fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
+  const stepNo = Math.max(1, Number(stepNumber) || 1);
+
+  let targetWindowId = Number(windowId) || 0;
+  let targetTabIndex = Number(tabIndex) || 0;
+  let resolvedLabUrl = String(labUrl || '');
+
+  if (!targetWindowId || !resolvedLabUrl) {
+    const tabs = await listUserChromeTabs();
+    const labTab = tabs.find((t) => t.suggestedRole === 'lab');
+    if (labTab) {
+      if (!targetWindowId) targetWindowId = labTab.windowId;
+      if (!targetTabIndex) targetTabIndex = labTab.tabIndex;
+      if (!resolvedLabUrl) resolvedLabUrl = labTab.url;
+    }
+  }
+
+  let resolvedInstanceId = String(labInstanceId || '').trim();
+  if (!resolvedInstanceId && targetWindowId && targetTabIndex) {
+    const snap = await snapshotUserChromeTabByTarget(targetWindowId, targetTabIndex);
+    if (snap && snap.htmlPath && fs.existsSync(snap.htmlPath)) {
+      const html = fs.readFileSync(snap.htmlPath, 'utf8');
+      const m = html.match(/labinstanceid="(\d+)"/i);
+      if (m) resolvedInstanceId = m[1];
+    }
+  } else if (!resolvedInstanceId && fs.existsSync(SNAPSHOT_HTML_PATH)) {
+    const html = fs.readFileSync(SNAPSHOT_HTML_PATH, 'utf8');
+    const m = html.match(/labinstanceid="(\d+)"/i);
+    if (m) resolvedInstanceId = m[1];
+  }
+
+  if (!resolvedInstanceId || !targetWindowId) {
+    return {
+      verified: false,
+      message: 'Could not determine active Qwiklabs labinstanceid — ensure the Lab is started.',
+    };
+  }
+
+  let origin = 'https://partner.skills.google';
+  try {
+    if (resolvedLabUrl) {
+      origin = new URL(resolvedLabUrl).origin;
+    }
+  } catch {
+    // Keep default origin
+  }
+
+  const checkUrl = `${origin}/assessments/run_step.json?id=${encodeURIComponent(
+    resolvedInstanceId
+  )}&step=${stepNo}`;
+  const checkFilePath = path.join(SNAPSHOT_DIR, `ql_check_step_${stepNo}.html`);
+  try {
+    if (fs.existsSync(checkFilePath)) fs.unlinkSync(checkFilePath);
+  } catch {
+    // Ignore
+  }
+
+  const escapedCheckUrl = checkUrl.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const escapedCheckPath = checkFilePath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
+  const script = `
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${targetWindowId}" then
+      set prevIdx to active tab index of w
+      set checkTab to make new tab at end of tabs of w with properties {URL:"${escapedCheckUrl}"}
+      delay 0.8
+      repeat 40 times
+        if (loading of checkTab) is false then exit repeat
+        delay 0.25
+      end repeat
+      delay 0.4
+      save checkTab in POSIX file "${escapedCheckPath}"
+      delay 0.6
+      close checkTab
+      if prevIdx <= (count of tabs of w) then
+        set active tab index of w to prevIdx
+      end if
+      return "ok"
+    end if
+  end repeat
+  return "not_found"
+end tell
+`;
+  await runAppleScript(script).catch(() => '');
+
+  if (!fs.existsSync(checkFilePath)) {
+    return {
+      verified: false,
+      message: `Triggered Check my progress for Step #${stepNo}, but could not read grader response.`,
+    };
+  }
+
+  const rawHtml = fs.readFileSync(checkFilePath, 'utf8');
+  const preMatch = rawHtml.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+  const jsonCandidate = (preMatch ? preMatch[1] : rawHtml).trim();
+
+  try {
+    const data = JSON.parse(jsonCandidate);
+    const idx = stepNo - 1;
+    const stepCompleteList = Array.isArray(data.step_complete)
+      ? data.step_complete.map(Boolean)
+      : [];
+    const stepScoresList = Array.isArray(data.step_scores)
+      ? data.step_scores.map((v) => Number(v) || 0)
+      : [];
+    const stepPointsList = Array.isArray(data.step_points)
+      ? data.step_points.map((v) => Number(v) || 0)
+      : [];
+    const studentMessagesList = Array.isArray(data.student_messages)
+      ? data.student_messages.map((v) => String(v || '').trim())
+      : [];
+
+    const verified = Boolean(
+      stepCompleteList[idx] === true ||
+        data.step_done?.[idx] === true ||
+        data.step_completion?.[idx]?.passed === true ||
+        (stepPointsList[idx] > 0 && stepScoresList[idx] >= stepPointsList[idx])
+    );
+    const stepScore = stepScoresList[idx] ?? 0;
+    const stepMaxScore = stepPointsList[idx] ?? 0;
+    const totalScore = Number(data.total_score ?? 0);
+    const maxScore = Number(data.perfect_score ?? 100);
+    const rawMsg =
+      studentMessagesList[idx] ||
+      data.messages?.[idx] ||
+      data.step_completion?.[idx]?.message ||
+      '';
+    const message =
+      rawMsg ||
+      (verified
+        ? `Assessment Completed! (${stepScore}/${stepMaxScore} pts — Total: ${totalScore}/${maxScore})`
+        : `Assessment incomplete (${stepScore}/${stepMaxScore} pts).`);
+
+    return {
+      verified,
+      message,
+      stepScore,
+      stepMaxScore,
+      totalScore,
+      maxScore,
+      stepCompleteList,
+      stepScoresList,
+      stepPointsList,
+      studentMessagesList,
+    };
+  } catch {
+    return {
+      verified: false,
+      message: `Unable to parse Qwiklabs assessment JSON for Step #${stepNo}.`,
+    };
+  }
+}
+
+async function navigateOrOpenInUserChromeWindow(
+  windowId,
+  tabIndex,
+  url,
+  openInNewTab = false
+) {
+  const escapedUrl = url.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const script = `
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${windowId}" then
+      if ${openInNewTab ? 'true' : 'false'} or ${tabIndex === null ? 'true' : 'false'} then
+        make new tab at end of tabs of w with properties {URL:"${escapedUrl}"}
+        set active tab index of w to (count of tabs of w)
+      else
+        if ${tabIndex || 1} <= (count of tabs of w) then
+          set URL of tab ${tabIndex || 1} of w to "${escapedUrl}"
+          set active tab index of w to ${tabIndex || 1}
+        end if
+      end if
+      set index of w to 1
+      activate
+      return "ok"
+    end if
+  end repeat
+  return "not_found"
+end tell
+`;
+  const res = await runAppleScript(script).catch(() => '');
+  return res === 'ok';
+}
+
+async function setClipboardText(text) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('pbcopy');
+    proc.on('error', reject);
+    proc.on('close', () => resolve());
+    proc.stdin.write(text, 'utf8');
+    proc.stdin.end();
+  });
+}
+
+async function getClipboardText() {
+  try {
+    const { stdout } = await execFileAsync('pbpaste', [], { timeout: 3000 });
+    return stdout;
+  } catch {
+    return '';
+  }
+}
+
+async function sendTextToUserChromeTab(windowId, tabIndex, text, pressEnter = true) {
+  const focused = await focusUserChromeTab(windowId, tabIndex);
+  if (!focused) return false;
+
+  const prevClip = await getClipboardText();
+  await setClipboardText(text);
+  await new Promise((r) => setTimeout(r, 350));
+
+  const keystrokeScript = `
+tell application "Google Chrome" to activate
+delay 0.2
+tell application "System Events"
+  tell process "Google Chrome"
+    keystroke "v" using {command down}
+    ${pressEnter ? 'delay 0.25\n    key code 36' : ''}
+  end tell
+end tell
+`;
+  try {
+    await runAppleScript(keystrokeScript);
+    await new Promise((r) => setTimeout(r, 350));
+    await setClipboardText(prevClip);
+    return true;
+  } catch {
+    await setClipboardText(prevClip);
+    return false;
+  }
+}
+
+/**
+ * Isolated student gcloud configuration & direct Cloud Shell SSH execution
+ */
+const activeGcloudLogins = new Map();
+
+function getStudentGcloudConfigDir(username) {
+  const safeUser = String(username || 'default').replace(/[^a-zA-Z0-9_.-]/g, '_');
+  const dir = path.join(SNAPSHOT_DIR, `gcloud-${safeUser}`);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+async function checkStudentGcloudAuth(username, projectId) {
+  const configDir = getStudentGcloudConfigDir(username);
+  // Also check if /tmp/ql_student_gcloud is already authenticated for this user
+  for (const candidateDir of [configDir, '/tmp/ql_student_gcloud']) {
+    if (!fs.existsSync(candidateDir)) continue;
+    try {
+      const { stdout } = await execFileAsync(
+        'gcloud',
+        ['auth', 'list', '--filter=status:ACTIVE', '--format=value(account)'],
+        {
+          env: { ...process.env, CLOUDSDK_CONFIG: candidateDir },
+          timeout: 8000,
+        }
+      );
+      const activeAccount = stdout.trim();
+      if (activeAccount && activeAccount.toLowerCase() === String(username).toLowerCase()) {
+        const { stdout: tokenOut } = await execFileAsync(
+          'gcloud',
+          ['auth', 'print-access-token', '--quiet'],
+          {
+            env: { ...process.env, CLOUDSDK_CONFIG: candidateDir },
+            timeout: 8000,
+          }
+        );
+        if (tokenOut.trim().length > 10) {
+          if (projectId) {
+            await execFileAsync('gcloud', ['config', 'set', 'project', projectId, '--quiet'], {
+              env: { ...process.env, CLOUDSDK_CONFIG: candidateDir },
+              timeout: 8000,
+            }).catch(() => {});
+          }
+          return { authenticated: true, configDir: candidateDir, account: activeAccount };
+        }
+      }
+    } catch {
+      // Ignore expired or invalid config dir
+    }
+  }
+  return { authenticated: false, configDir };
+}
+
+async function startStudentGcloudAuth(username, projectId) {
+  const existing = await checkStudentGcloudAuth(username, projectId);
+  if (existing.authenticated) {
+    return { alreadyAuthenticated: true, configDir: existing.configDir };
+  }
+
+  const configDir = existing.configDir;
+  return new Promise((resolve, reject) => {
+    const args = ['auth', 'login', '--quiet'];
+    if (projectId) args.push(`--project=${projectId}`);
+
+    const proc = spawn('gcloud', args, {
+      env: { ...process.env, CLOUDSDK_CONFIG: configDir, BROWSER: '/usr/bin/true' },
+    });
+
+    let output = '';
+    let resolved = false;
+    const timer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        try {
+          proc.kill();
+        } catch {}
+        reject(new Error('Timed out waiting for gcloud auth login OAuth URL'));
+      }
+    }, 12000);
+
+    const onData = (chunk) => {
+      output += chunk.toString();
+      const match = output.match(/https:\/\/accounts\.google\.com\/o\/oauth2\/auth[^\s"]+/);
+      if (match && !resolved) {
+        resolved = true;
+        clearTimeout(timer);
+        activeGcloudLogins.set(username, { proc, configDir });
+        resolve({ alreadyAuthenticated: false, oauthUrl: match[0], configDir });
+      }
+    };
+
+    proc.stdout.on('data', onData);
+    proc.stderr.on('data', onData);
+    proc.on('error', (err) => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timer);
+        reject(err);
+      }
+    });
+  });
+}
+
+async function finishStudentGcloudAuth(username, callbackUrl) {
+  const entry = activeGcloudLogins.get(username);
+  try {
+    await fetch(callbackUrl);
+  } catch {
+    // Ignore
+  }
+  if (entry?.proc) {
+    await new Promise((r) => {
+      const t = setTimeout(r, 5000);
+      entry.proc.on('close', () => {
+        clearTimeout(t);
+        r();
+      });
+    });
+    activeGcloudLogins.delete(username);
+  }
+  return checkStudentGcloudAuth(username);
+}
+
+async function execInStudentCloudShell(username, projectId, command, timeoutMs = 180000) {
+  const authStatus = await checkStudentGcloudAuth(username, projectId);
+  if (!authStatus.authenticated) {
+    return {
+      ok: false,
+      exitCode: -1,
+      stdout: '',
+      stderr: `Student account ${username} is not yet authenticated in gcloud.`,
+    };
+  }
+
+  try {
+    const { stdout, stderr } = await execFileAsync(
+      'gcloud',
+      [
+        'cloud-shell',
+        'ssh',
+        '--authorize-session',
+        `--command=${command}`,
+        '--quiet',
+      ],
+      {
+        env: { ...process.env, CLOUDSDK_CONFIG: authStatus.configDir },
+        timeout: timeoutMs,
+        maxBuffer: 15 * 1024 * 1024,
+      }
+    );
+    return {
+      ok: true,
+      exitCode: 0,
+      stdout: stdout.trim(),
+      stderr: stderr.trim(),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      exitCode: err?.code || 1,
+      stdout: String(err?.stdout || '').trim(),
+      stderr: String(err?.stderr || err?.message || err).trim(),
+    };
+  }
+}
+
+let ws = null;
+let shuttingDown = false;
+
+async function pushTabsOnce() {
+  if (!ws || ws.readyState !== 1) return;
+  try {
+    const tabs = await listUserChromeTabs();
+    ws.send(JSON.stringify({ type: 'tabs_push', tabs }));
+    console.log(`📋 Synced ${tabs.length} open Chrome tabs with Cloud Skills Lab Runner.`);
+  } catch {
+    // Ignore
+  }
+}
+
+async function connectBridge() {
+  if (shuttingDown) return;
+  console.log(`🔗 Connecting On-Demand Mac Chrome Bridge to ${CLOUD_RUN_WS_URL}...`);
+  console.log(
+    `ℹ️  Passive Mode: Zero background polling (only runs when you click an action in the Lab Runner UI).`
+  );
+  console.log(`ℹ️  Press Ctrl+C anytime (or click "Stop Mac Bridge" in the web UI) to exit.\n`);
+
+  const WSImpl =
+    globalThis.WebSocket || (await import('ws').then((m) => m.default || m.WebSocket));
+  ws = new WSImpl(CLOUD_RUN_WS_URL);
+
+  const onOpen = async () => {
+    console.log('✅ Mac Chrome Bridge connected to Cloud Run!');
+    await pushTabsOnce();
+  };
+
+  const onMessage = async (rawEvent) => {
+    try {
+      const rawStr =
+        typeof rawEvent?.data === 'string'
+          ? rawEvent.data
+          : rawEvent?.data
+          ? Buffer.from(rawEvent.data).toString('utf8')
+          : rawEvent.toString();
+      const msg = JSON.parse(rawStr);
+
+      if (msg.type === 'shutdown') {
+        console.log('🛑 Received stop signal from Cloud Skills Lab Runner UI. Exiting cleanly...');
+        shuttingDown = true;
+        try {
+          ws.close();
+        } catch {
+          // Ignore
+        }
+        process.exit(0);
+      }
+
+      if (msg.type !== 'rpc_request' || !msg.id) return;
+
+      const { id, method, params = {} } = msg;
+      console.log(`⚡ Executing UI request: ${method}`);
+      try {
+        let result = null;
+
+        if (method === 'list_tabs') {
+          result = await listUserChromeTabs();
+        } else if (method === 'focus_tab') {
+          result = await focusUserChromeTab(Number(params.windowId), Number(params.tabIndex));
+        } else if (method === 'open_or_focus_lab') {
+          result = await openOrFocusLabInUserChrome(String(params.requestedUrl || ''));
+        } else if (method === 'snapshot_tab_by_target') {
+          const snap = await snapshotUserChromeTabByTarget(
+            Number(params.windowId),
+            Number(params.tabIndex)
+          );
+          if (snap && snap.htmlPath && fs.existsSync(snap.htmlPath)) {
+            result = {
+              htmlContent: fs.readFileSync(snap.htmlPath, 'utf8'),
+              url: snap.url,
+              title: snap.title,
+            };
+          }
+        } else if (method === 'snapshot_lab_tab') {
+          const snap = await snapshotUserChromeLabTab(
+            params.preferredUrl,
+            params.preferredTarget
+          );
+          if (snap && snap.htmlPath && fs.existsSync(snap.htmlPath)) {
+            result = {
+              htmlContent: fs.readFileSync(snap.htmlPath, 'utf8'),
+              url: snap.url,
+              title: snap.title,
+            };
+          }
+        } else if (method === 'check_progress') {
+          result = await checkProgressInUserChrome(
+            params.stepNumber,
+            params.labUrl,
+            params.labInstanceId,
+            params.windowId,
+            params.tabIndex
+          );
+        } else if (method === 'check_gcloud_auth') {
+          result = await checkStudentGcloudAuth(params.username, params.projectId);
+        } else if (method === 'start_gcloud_auth') {
+          result = await startStudentGcloudAuth(params.username, params.projectId);
+        } else if (method === 'finish_gcloud_auth') {
+          result = await finishStudentGcloudAuth(params.username, params.callbackUrl);
+        } else if (method === 'exec_cloud_shell') {
+          result = await execInStudentCloudShell(
+            params.username,
+            params.projectId,
+            params.command,
+            params.timeoutMs || 180000
+          );
+        } else if (method === 'navigate_tab') {
+          result = await navigateOrOpenInUserChromeWindow(
+            Number(params.windowId),
+            params.tabIndex !== null && params.tabIndex !== undefined
+              ? Number(params.tabIndex)
+              : null,
+            String(params.url || ''),
+            Boolean(params.openInNewTab)
+          );
+        } else if (method === 'send_text') {
+          result = await sendTextToUserChromeTab(
+            Number(params.windowId),
+            Number(params.tabIndex),
+            String(params.text || ''),
+            params.pressEnter !== false
+          );
+        } else if (method === 'shutdown') {
+          shuttingDown = true;
+          ws.send(JSON.stringify({ type: 'rpc_response', id, result: true }));
+          process.exit(0);
+        } else {
+          throw new Error(`Unknown RPC method: ${method}`);
+        }
+
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'rpc_response', id, result }));
+        }
+      } catch (err) {
+        if (ws && ws.readyState === 1) {
+          ws.send(
+            JSON.stringify({
+              type: 'rpc_response',
+              id,
+              error: err?.message || String(err),
+            })
+          );
+        }
+      }
+    } catch {
+      // Ignore malformed frame
+    }
+  };
+
+  const onClose = () => {
+    if (shuttingDown) return;
+    console.log('⚠️ Connection to Cloud Run closed. Reconnecting in 3s...');
+    setTimeout(connectBridge, 3000);
+  };
+
+  if (typeof ws.addEventListener === 'function') {
+    ws.addEventListener('open', onOpen);
+    ws.addEventListener('message', onMessage);
+    ws.addEventListener('close', onClose);
+    ws.addEventListener('error', () => {});
+  } else if (typeof ws.on === 'function') {
+    ws.on('open', onOpen);
+    ws.on('message', onMessage);
+    ws.on('close', onClose);
+    ws.on('error', () => {});
+  }
+}
+
+connectBridge();
