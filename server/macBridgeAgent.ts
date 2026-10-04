@@ -514,6 +514,24 @@ end tell
         ? `Assessment Completed! (${stepScore}/${stepMaxScore} pts — Total: ${totalScore}/${maxScore})`
         : `Assessment incomplete (${stepScore}/${stepMaxScore} pts).`);
 
+    // When a step passes, trigger a fast reload of the Lab tab in Chrome so the visual Qwiklabs score pill and checkmarks update immediately
+    if (verified && targetWindowId && targetTabIndex) {
+      const refreshLabTabScript = `
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${targetWindowId}" then
+      if ${targetTabIndex} <= (count of tabs of w) then
+        set t to tab ${targetTabIndex} of w
+        set URL of t to (URL of t)
+      end if
+      exit repeat
+    end if
+  end repeat
+end tell
+`;
+      runAppleScript(refreshLabTabScript).catch(() => {});
+    }
+
     return {
       verified,
       message,
@@ -639,7 +657,10 @@ tell application "System Events"
     if (count of windows) > 0 then
       set w to front window
       set allElems to entire contents of w
+      set idx to 0
       repeat with el in allElems
+        set idx to idx + 1
+        if idx > 350 then exit repeat
         try
           if (role of el) is "AXButton" then
             set nm to (name of el) as string
@@ -664,7 +685,10 @@ tell application "System Events"
     if (count of windows) > 0 then
       set w to front window
       set followElems to entire contents of w
+      set idx to 0
       repeat with fel in followElems
+        set idx to idx + 1
+        if idx > 350 then exit repeat
         try
           if (role of fel) is "AXButton" then
             set fnm to (name of fel) as string
@@ -711,7 +735,10 @@ tell application "System Events"
     if (count of windows) > 0 then
       set w to front window
       set allElems to entire contents of w
+      set idx to 0
       repeat with el in allElems
+        set idx to idx + 1
+        if idx > 350 then exit repeat
         try
           if (role of el) is "AXButton" then
             set nm to (name of el) as string
@@ -719,13 +746,6 @@ tell application "System Events"
               click el
               return "clicked_primary"
             end if
-          end if
-        end try
-      end repeat
-      repeat with el in allElems
-        try
-          if (role of el) is "AXButton" then
-            set nm to (name of el) as string
             if nm starts with "Start Lab" or nm is "Start" then
               return "already_ended"
             end if

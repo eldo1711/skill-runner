@@ -1035,6 +1035,30 @@ export class LabBrowserOrchestrator {
         const task = this.state.tasks[taskIdx];
         if (!task || task.status === 'completed' || task.status === 'skipped') continue;
 
+        // Pre-task live score & completion check: if this task is already verified on Qwiklabs, mark it completed and advance immediately
+        if (task.hasCheckProgress && this.state.isLabStarted) {
+          try {
+            await this.ensureLabPreviewPage();
+            const preCheck = await clickCheckMyProgress(
+              this.labPage!,
+              task.number,
+              this.state.labCurrentUrl || this.state.labUrl,
+              this.getCheckProgressOptions(task)
+            );
+            this.applyCheckResultToState(task, preCheck);
+            if (preCheck.verified) {
+              this.addLog(
+                'success',
+                'lab_window',
+                `Task #${task.number} is already verified on Qwiklabs (${task.stepScore ?? 0}/${task.stepMaxScore ?? 0} pts | Total: ${this.state.totalScore ?? 0}/${this.state.maxScore ?? 100}). Advancing...`
+              );
+              continue;
+            }
+          } catch {
+            // Ignore pre-task check error and proceed with task execution
+          }
+        }
+
         this.state.activeTaskId = task.id;
         task.status = 'running';
         this.addLog('info', 'system', `Starting Task #${task.number}: ${task.title}`);
@@ -1154,6 +1178,8 @@ export class LabBrowserOrchestrator {
               );
 
               if (checkRes.verified) {
+                await this.syncLabPageFromUserChrome().catch(() => {});
+                await this.refreshScreenshots().catch(() => {});
                 break;
               }
               previousErrorMessage = checkRes.message;
@@ -1161,6 +1187,29 @@ export class LabBrowserOrchestrator {
               if (lastSshOk) {
                 task.status = 'completed';
                 for (const s of task.steps) s.status = 'completed';
+                // Poll the first gradable task after setup tasks so totalScore stays synced continuously
+                const firstGradable = this.state.tasks.find(
+                  (t) => t.hasCheckProgress && t.checkProgressStepNumber
+                );
+                if (firstGradable && this.state.isLabStarted) {
+                  try {
+                    await this.ensureLabPreviewPage();
+                    const pollRes = await clickCheckMyProgress(
+                      this.labPage!,
+                      firstGradable.number,
+                      this.state.labCurrentUrl || this.state.labUrl,
+                      this.getCheckProgressOptions(firstGradable)
+                    );
+                    this.applyCheckResultToState(firstGradable, pollRes);
+                    this.addLog(
+                      'info',
+                      'lab_window',
+                      `Task #${task.number} setup complete — Live Lab Score: ${this.state.totalScore ?? 0}/${this.state.maxScore ?? 100} pts`
+                    );
+                  } catch {
+                    // Ignore status poll error
+                  }
+                }
                 break;
               }
               previousErrorMessage = previousScriptOutput || 'Non-zero exit code in Cloud Shell setup script';
