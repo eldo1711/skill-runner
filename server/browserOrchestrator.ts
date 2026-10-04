@@ -304,7 +304,7 @@ export class LabBrowserOrchestrator {
       this.state.isConsoleSignedIn = true;
     }
 
-    if (consoleTab && consoleTab.url) {
+    if (!this.state.credentials.projectId && consoleTab && consoleTab.url) {
       try {
         const u = new URL(consoleTab.url);
         const projFromUrl = u.searchParams.get('project');
@@ -571,8 +571,8 @@ export class LabBrowserOrchestrator {
       username: parsed.credentials.username || this.state.credentials.username,
       password: parsed.credentials.password || this.state.credentials.password,
       projectId:
-        liveConsoleProjectId ||
         parsed.credentials.projectId ||
+        liveConsoleProjectId ||
         this.state.credentials.projectId,
       consoleUrl: parsed.credentials.consoleUrl || this.state.credentials.consoleUrl,
       region: parsed.credentials.region || this.state.credentials.region,

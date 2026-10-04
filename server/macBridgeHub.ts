@@ -15,7 +15,8 @@ class MacBridgeHub {
   public registerClient(ws: WebSocket) {
     if (this.client && this.client.readyState === WebSocket.OPEN) {
       try {
-        this.client.close();
+        this.client.send(JSON.stringify({ type: 'superseded' }));
+        this.client.close(4001, 'Superseded by a newer Mac Bridge connection');
       } catch {
         // Ignore
       }

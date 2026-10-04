@@ -1040,6 +1040,7 @@ export async function execInStudentCloudShellBridge(
   fs.mkdirSync(activeConfigDir, { recursive: true });
 
   let isAuthed = false;
+  let hostAccessToken = '';
   for (const dir of candidateDirs) {
     if (!fs.existsSync(dir)) continue;
     try {
@@ -1057,6 +1058,7 @@ export async function execInStudentCloudShellBridge(
         if (tokenOut.trim().length > 10) {
           activeConfigDir = dir;
           isAuthed = true;
+          hostAccessToken = tokenOut.trim();
           break;
         }
       }
@@ -1070,7 +1072,7 @@ export async function execInStudentCloudShellBridge(
       onLog(`Authenticating isolated Cloud Shell SSH session for ${username}...`);
     }
     await new Promise<void>((resolve) => {
-      const args = ['auth', 'login', '--quiet'];
+      const args = ['auth', 'login', '--enable-gdrive-access', '--quiet'];
       if (projectId) args.push(`--project=${projectId}`);
       const proc = spawn('gcloud', args, {
         env: { ...process.env, CLOUDSDK_CONFIG: activeConfigDir, BROWSER: '/usr/bin/true' },
@@ -1098,6 +1100,14 @@ export async function execInStudentCloudShellBridge(
         resolve();
       }, 30000);
     });
+    try {
+      const { stdout: tokenOut } = await execFileAsync(
+        'gcloud',
+        ['auth', 'print-access-token', '--quiet'],
+        { env: { ...process.env, CLOUDSDK_CONFIG: activeConfigDir }, timeout: 8000 }
+      );
+      hostAccessToken = tokenOut.trim();
+    } catch {}
   }
 
   if (projectId) {
@@ -1108,9 +1118,12 @@ export async function execInStudentCloudShellBridge(
   }
 
   try {
+    const envPrefix = hostAccessToken
+      ? `export DRIVE_ACCESS_TOKEN="${hostAccessToken}"; `
+      : '';
     const { stdout, stderr } = await execFileAsync(
       'gcloud',
-      ['cloud-shell', 'ssh', '--authorize-session', `--command=${command}`, '--quiet'],
+      ['cloud-shell', 'ssh', '--authorize-session', `--command=${envPrefix}${command}`, '--quiet'],
       {
         env: { ...process.env, CLOUDSDK_CONFIG: activeConfigDir },
         timeout: timeoutMs,

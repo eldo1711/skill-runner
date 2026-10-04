@@ -226,7 +226,8 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
       }
     }
 
-    // Extract any <ql-variable> values present in the page
+    // Extract any <ql-variable> values present in the page and hydrate their light-DOM textContent
+    // so subsequent cloneNode(true) and textContent reads preserve the resolved variable values.
     const qlVars = Array.from(document.querySelectorAll('ql-variable'));
     for (const qv of qlVars) {
       const key = (qv.getAttribute('key') || '').trim();
@@ -237,6 +238,9 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
         qv.textContent ||
         ''
       ).trim();
+      if (val && !val.includes('<filled in at lab start>')) {
+        qv.textContent = val;
+      }
       if (key && val && !val.includes('<filled in at lab start>') && val !== 'Model Name' && val !== 'Model ID') {
         extraVars[key] = val;
         if (!region && key.includes('region')) region = val;
@@ -428,6 +432,14 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
           ''
         ).trim();
         qv.textContent = resolved;
+      }
+      // Preserve external HTTP(S) links inline so asset URLs (e.g., branding logos) are retained in prose
+      for (const a of Array.from(clone.querySelectorAll('a[href]'))) {
+        const href = (a.getAttribute('href') || '').trim();
+        const text = (a.textContent || '').trim();
+        if (href && /^https?:\/\//i.test(href) && !text.includes(href)) {
+          a.textContent = text ? `${text} (${href})` : href;
+        }
       }
       // Convert HTML tables into structured key: value text so configuration tables are preserved
       for (const tbl of Array.from(clone.querySelectorAll('table'))) {

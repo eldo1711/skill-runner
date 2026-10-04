@@ -1311,6 +1311,333 @@ gcloud storage cp -r ./bigquery_agent/agent.py gs://${proj}-bucket/`;
     };
   }
 
+  // Fast-path 9: Deploy Gemini Enterprise with Workspace Data Sources and Model Armor - Task 1 (Data Stores, Workspace Connectors & App)
+  if (
+    (lower.includes('cym-drive-datastore') || lower.includes('cym-inv-custom-datastore')) &&
+    (lower.includes('cym-inv-enterprise') || lower.includes('people via custom connector'))
+  ) {
+    const script = `cat << 'EOF' > /tmp/task1_gemini_enterprise_workspace.py
+import subprocess, json, urllib.request, urllib.error, time, os
+
+project_id = "${proj}" or subprocess.check_output(["gcloud", "config", "get-value", "project"], text=True).strip()
+token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+drive_token = os.environ.get("DRIVE_ACCESS_TOKEN") or token
+
+def api_call(method, url, body=None, tok=None):
+    req = urllib.request.Request(url, method=method)
+    req.add_header("Authorization", f"Bearer {tok or token}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-Goog-User-Project", project_id)
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    try:
+        with urllib.request.urlopen(req, data=data) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        err_text = e.read().decode("utf-8")
+        print(f"HTTP {e.code} on {method} {url}: {err_text[:400]}")
+        return {"error": e.code, "details": err_text}
+
+# 1. Copy GCS files and upload to Google Drive if DRIVE_ACCESS_TOKEN has Drive scope
+bucket = f"gs://{project_id}-gcs-bucket"
+os.makedirs("/tmp/ge_drive_files", exist_ok=True)
+subprocess.run(["gcloud", "storage", "cp", f"{bucket}/*", "/tmp/ge_drive_files/"], check=False)
+
+for fname, mime in [
+    ("Cymbal Q4 Sales Data by City.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    ("Cymbal Sales Analysis Report.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+]:
+    fpath = os.path.join("/tmp/ge_drive_files", fname)
+    if os.path.exists(fpath):
+        boundary = "===ge_drive_boundary==="
+        meta = json.dumps({"name": fname, "mimeType": mime}).encode("utf-8")
+        with open(fpath, "rb") as f:
+            content = f.read()
+        body = (
+            f"--{boundary}\\r\\nContent-Type: application/json; charset=UTF-8\\r\\n\\r\\n".encode("utf-8")
+            + meta
+            + f"\\r\\n--{boundary}\\r\\nContent-Type: {mime}\\r\\n\\r\\n".encode("utf-8")
+            + content
+            + f"\\r\\n--{boundary}--\\r\\n".encode("utf-8")
+        )
+        req = urllib.request.Request(
+            "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+            data=body,
+            method="POST",
+        )
+        req.add_header("Authorization", f"Bearer {drive_token}")
+        req.add_header("Content-Type", f"multipart/related; boundary={boundary}")
+        try:
+            with urllib.request.urlopen(req) as resp:
+                print("Uploaded to Google Drive:", fname, resp.read().decode("utf-8"))
+        except Exception as e:
+            print("Drive upload note:", fname, e)
+
+base_loc = f"https://discoveryengine.googleapis.com/v1alpha/projects/{project_id}/locations/global"
+default_col = f"{base_loc}/collections/default_collection"
+
+# 2. Configure Google Identity Provider (GSUITE) in global aclConfig
+api_call("PATCH", f"{base_loc}/aclConfig", {"idpConfig": {"idpType": "GSUITE"}})
+
+# 3. Create People via Custom Connector datastore (cym-inv-custom-datastore) and import NDJSON
+custom_ds_id = "cym-inv-custom-datastore"
+api_call("POST", f"{default_col}/dataStores?dataStoreId={custom_ds_id}", {
+    "displayName": custom_ds_id,
+    "industryVertical": "GENERIC",
+    "contentConfig": "THIRD_PARTY_IDENTITY_PEOPLE",
+    "solutionTypes": ["SOLUTION_TYPE_SEARCH"],
+    "aclEnabled": False
+})
+time.sleep(2)
+api_call("POST", f"{default_col}/dataStores/{custom_ds_id}/branches/0/documents:import", {
+    "gcsSource": {
+        "inputUris": [f"{bucket}/cymbal-people-correct-schema.ndjson"],
+        "dataSchema": "document"
+    },
+    "reconciliationMode": "FULL",
+    "autoGenerateIds": False
+})
+
+# 4. Create Google Workspace Connectors via setUpDataConnector
+connectors = [
+    (
+        "cym-drive-datastore",
+        "google_drive",
+        [
+            "copy_file", "create_file", "download_file_content", "get_file_metadata",
+            "get_file_permissions", "list_recent_files", "list_shared_drives",
+            "read_file_content", "search_files", "share_file", "trash_file", "update_file"
+        ],
+    ),
+    (
+        "cym-gmail-datastore",
+        "google_mail",
+        ["send_message"],
+    ),
+    (
+        "cymbal-inv-calendar",
+        "google_calendar",
+        [
+            "create_event", "delete_event", "get_event", "list_calendars",
+            "list_events", "respond_to_event", "search_events", "suggest_time", "update_event"
+        ],
+    ),
+]
+
+ds_ids = [custom_ds_id]
+cols_resp = api_call("GET", f"{base_loc}/collections")
+existing_cols = {c.get("displayName"): c["name"].split("/")[-1] for c in (cols_resp or {}).get("collections", [])}
+
+for disp_name, ds_type, actions in connectors:
+    col_id = existing_cols.get(disp_name)
+    if not col_id:
+        for suffix in ["", "-1", "-2"]:
+            cand_id = f"{disp_name}{suffix}"
+            res = api_call("POST", f"{base_loc}:setUpDataConnector", {
+                "collectionId": cand_id,
+                "collectionDisplayName": disp_name,
+                "dataConnector": {
+                    "dataSource": ds_type,
+                    "entities": [{"entityName": ds_type}],
+                    "bapConfig": {
+                        "supportedConnectorModes": ["ACTIONS"],
+                        "enabledActions": actions
+                    }
+                }
+            })
+            if "error" not in res:
+                col_id = cand_id
+                break
+        time.sleep(5)
+    if col_id:
+        ds_ids.append(f"{col_id}_{ds_type}")
+
+# 5. Create Gemini Enterprise App (cym-inv-enterprise) with all 4 data stores connected
+app_id = "cym-inv-enterprise"
+api_call("POST", f"{default_col}/engines?engineId={app_id}", {
+    "displayName": app_id,
+    "solutionType": "SOLUTION_TYPE_SEARCH",
+    "industryVertical": "GENERIC",
+    "appType": "APP_TYPE_INTRANET",
+    "dataStoreIds": ds_ids,
+    "commonConfig": {"companyName": "Cymbal"},
+    "searchEngineConfig": {
+        "searchTier": "SEARCH_TIER_ENTERPRISE",
+        "searchAddOns": ["SEARCH_ADD_ON_LLM"]
+    }
+})
+print("Task 1 Gemini Enterprise + Workspace Data Stores setup complete! DataStores:", ds_ids)
+EOF
+python3 /tmp/task1_gemini_enterprise_workspace.py`;
+    return {
+      script,
+      summary:
+        'Upload sales files to Google Drive, configure GSUITE IdP, create People custom connector + Drive/Gmail/Calendar Workspace connectors, and deploy cym-inv-enterprise app.',
+    };
+  }
+
+  // Fast-path 10: Deploy Gemini Enterprise with Workspace Data Sources and Model Armor - Task 2 (Model Armor Templates & Assistant Policy)
+  if (
+    lower.includes('cym-inv-security-template-input') ||
+    lower.includes('cym-inv-security-template-output')
+  ) {
+    const script = `cat << 'EOF' > /tmp/task2_model_armor.py
+import subprocess, json, urllib.request, urllib.error, time
+
+project_id = "${proj}" or subprocess.check_output(["gcloud", "config", "get-value", "project"], text=True).strip()
+subprocess.run(["gcloud", "services", "enable", "modelarmor.googleapis.com", "dlp.googleapis.com", f"--project={project_id}", "--quiet"], check=False)
+token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+
+def api_call(method, url, body=None):
+    req = urllib.request.Request(url, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-Goog-User-Project", project_id)
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    try:
+        with urllib.request.urlopen(req, data=data) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        err_text = e.read().decode("utf-8")
+        print(f"HTTP {e.code} on {method} {url}: {err_text[:400]}")
+        return {"error": e.code, "details": err_text}
+
+ma_base = f"https://modelarmor.us.rep.googleapis.com/v1/projects/{project_id}/locations/us"
+template_body = {
+    "filterConfig": {
+        "raiSettings": {
+            "raiFilters": [
+                {"filterType": "HATE_SPEECH", "confidenceLevel": "MEDIUM_AND_ABOVE"},
+                {"filterType": "DANGEROUS", "confidenceLevel": "LOW_AND_ABOVE"},
+                {"filterType": "HARASSMENT", "confidenceLevel": "MEDIUM_AND_ABOVE"},
+                {"filterType": "SEXUALLY_EXPLICIT", "confidenceLevel": "HIGH"}
+            ]
+        },
+        "sdpSettings": {
+            "basicConfig": {"filterEnforcement": "ENABLED"}
+        },
+        "piAndJailbreakFilterSettings": {
+            "filterEnforcement": "ENABLED",
+            "confidenceLevel": "LOW_AND_ABOVE"
+        },
+        "maliciousUriFilterSettings": {
+            "filterEnforcement": "ENABLED"
+        }
+    },
+    "templateMetadata": {
+        "MultiLanguageDetection": {"enableMultiLanguageDetection": True},
+        "logSanitizeOperations": True,
+        "ignorePartialInvocationFailures": True
+    }
+}
+
+for tid in ["cym-inv-security-template-input", "cym-inv-security-template-output"]:
+    res = api_call("POST", f"{ma_base}/templates?templateId={tid}", template_body)
+    if res.get("error") == 409:
+        api_call("PATCH", f"{ma_base}/templates/{tid}?updateMask=filterConfig,templateMetadata", template_body)
+
+asst_url = f"https://discoveryengine.googleapis.com/v1alpha/projects/{project_id}/locations/global/collections/default_collection/engines/cym-inv-enterprise/assistants/default_assistant?updateMask=customerPolicy"
+api_call("PATCH", asst_url, {
+    "customerPolicy": {
+        "modelArmorConfig": {
+            "userPromptTemplate": f"projects/{project_id}/locations/us/templates/cym-inv-security-template-input",
+            "responseTemplate": f"projects/{project_id}/locations/us/templates/cym-inv-security-template-output",
+            "failureMode": "FAIL_OPEN"
+        }
+    }
+})
+print("Task 2 Model Armor templates created and linked to cym-inv-enterprise default_assistant!")
+EOF
+python3 /tmp/task2_model_armor.py`;
+    return {
+      script,
+      summary:
+        'Enable Model Armor and DLP APIs, create input/output Model Armor templates in us region, and attach them to cym-inv-enterprise default_assistant.',
+    };
+  }
+
+  // Fast-path 11: Deploy Gemini Enterprise with Workspace Data Sources and Model Armor - Task 3 (Configure Gemini Enterprise App Features, Grounding & Logo)
+  if (
+    lower.includes('cym-inv-enterprise') &&
+    (lower.includes('enterprise web search') ||
+      lower.includes('enable image and video generation') ||
+      lower.includes('app logo url'))
+  ) {
+    const logoMatch = combinedText.match(/https:\/\/cdn\.qwiklabs\.com\/[^\s)"']+/);
+    const logoUrl =
+      logoMatch?.[0] ||
+      'https://cdn.qwiklabs.com/7HNsRbL5DC5fTizZUhMXIP9PpTe%2F03j3kzaLp2KOqmI%3D';
+    const script = `cat << 'EOF' > /tmp/task3_configure_ge_app.py
+import subprocess, json, urllib.request, urllib.error
+
+project_id = "${proj}" or subprocess.check_output(["gcloud", "config", "get-value", "project"], text=True).strip()
+token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+
+def api_call(method, url, body=None):
+    req = urllib.request.Request(url, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-Goog-User-Project", project_id)
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    try:
+        with urllib.request.urlopen(req, data=data) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        err_text = e.read().decode("utf-8")
+        print(f"HTTP {e.code} on {method} {url}: {err_text[:400]}")
+        return {"error": e.code, "details": err_text}
+
+eng_base = f"https://discoveryengine.googleapis.com/v1alpha/projects/{project_id}/locations/global/collections/default_collection/engines/cym-inv-enterprise"
+
+# 1. Enable Model Selector, Image/Video Generation, and Gemini 3.1 Pro / Nano Banana
+api_call("PATCH", f"{eng_base}?updateMask=features,modelConfigs", {
+    "features": {
+        "model-selector": "FEATURE_STATE_ON",
+        "people-search": "FEATURE_STATE_ON",
+        "people-search-org-chart": "FEATURE_STATE_ON",
+        "Agent-sharing-without-admin-approval": "FEATURE_STATE_ON",
+        "disable-agent-sharing": "FEATURE_STATE_OFF",
+        "agent-gallery": "FEATURE_STATE_ON",
+        "prompt-gallery": "FEATURE_STATE_ON",
+        "notebook-lm": "FEATURE_STATE_ON",
+        "no-code-agent-builder": "FEATURE_STATE_ON",
+        "disable-image-generation": "FEATURE_STATE_OFF",
+        "disable-video-generation": "FEATURE_STATE_OFF",
+        "disable-talk-to-content": "FEATURE_STATE_OFF",
+        "gemini-in-workspace-contextual": "FEATURE_STATE_ON",
+        "Search-results-page": "FEATURE_STATE_ON"
+    },
+    "modelConfigs": {
+        "gemini-3.1-pro": "MODEL_ENABLED",
+        "gemini-3.1-flash-image": "MODEL_ENABLED"
+    }
+})
+
+# 2. Enable Enterprise Web Search grounding on default_assistant
+api_call("PATCH", f"{eng_base}/assistants/default_assistant?updateMask=webGroundingType", {
+    "webGroundingType": "WEB_GROUNDING_TYPE_ENTERPRISE_WEB_SEARCH"
+})
+
+# 3. Set UI Branding App Logo URL on default_search_widget_config
+api_call("PATCH", f"{eng_base}/widgetConfigs/default_search_widget_config?updateMask=uiBranding", {
+    "uiBranding": {
+        "logo": {
+            "url": "${logoUrl}"
+        }
+    }
+})
+print("Task 3 Gemini Enterprise App features, grounding, and branding configured!")
+EOF
+python3 /tmp/task3_configure_ge_app.py`;
+    return {
+      script,
+      summary:
+        'Enable Gemini Enterprise model selector, image/video generation, Enterprise Web Search grounding, and custom logo URL on cym-inv-enterprise.',
+    };
+  }
+
   // Universal Gemini Task Command Synthesis for any lab task (combining prose, code edits, CLI commands, and GCP resource creation in a single stateful script)
   const prompt = `You are an expert Google Cloud Skills Boost (Qwiklabs) autonomous lab completion engineer.
 Synthesize a single, idempotent, stateful, non-interactive bash script (to be executed inside the student's Google Cloud Shell VM) that completes ALL requirements of Task #${task.number} ("${task.title}") so that Qwiklabs' "Check my progress" grader passes 100%.
@@ -1339,7 +1666,24 @@ ${combinedText}
 4. **100% Non-Interactive**: Never launch interactive editors (\`nano\`, \`vim\`) or blocking foreground servers (\`adk web\`, \`chainlit run\`, \`npm start\`, \`adk run\`). Always pass non-interactive flags (\`--quiet\`, \`-auto-approve\`, \`-y\`).
 5. **GCP Console UI Equivalence**: If the task asks to create or update GCP resources via the Console UI, create/configure them programmatically using \`gcloud\`, \`bq\`, \`terraform\`, or Python SDK/REST API calls.
 6. **Cloud Shell Terraform Stub Trap**: In Google Cloud Shell, \`/usr/local/bin/terraform\` is a stub script that only prints installation instructions. When installing or running \`terraform\`, check \`dpkg -s terraform &>/dev/null\`, remove \`/usr/local/bin/terraform\` (\`sudo rm -f /usr/local/bin/terraform\`), and invoke \`/usr/bin/terraform\`.
-7. **Antigravity (\`agy\`)**: If any step launches \`agy\` or \`antigravity\`, always use \`agy --dangerously-skip-permissions || agy\`.`;
+7. **Antigravity (\`agy\`)**: If any step launches \`agy\` or \`antigravity\`, always use \`agy --dangerously-skip-permissions || agy\`.
+8. **Google Drive Uploads in Cloud Shell**: When a task requires uploading files to the student's Google Drive, use \`os.environ.get("DRIVE_ACCESS_TOKEN")\` (which is pre-exported into the Cloud Shell session with Drive scope) to POST multipart uploads to \`https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart\`.
+9. **Gemini Enterprise & Discovery Engine (\`discoveryengine.googleapis.com/v1alpha\`)**:
+   - **Identity Provider**: \`PATCH .../locations/global/aclConfig\` with \`{"idpConfig": {"idpType": "GSUITE"}}\`.
+   - **People via Custom Connector**: \`POST .../collections/default_collection/dataStores?dataStoreId=<id>\` with \`{"displayName": "<id>", "industryVertical": "GENERIC", "contentConfig": "THIRD_PARTY_IDENTITY_PEOPLE", "solutionTypes": ["SOLUTION_TYPE_SEARCH"], "aclEnabled": False}\`, then import NDJSON via \`POST .../dataStores/<id>/branches/0/documents:import\` with \`{"gcsSource": {"inputUris": ["gs://..."], "dataSchema": "document"}, "reconciliationMode": "FULL", "autoGenerateIds": False}\`.
+   - **Google Workspace Connectors (\`google_drive\`, \`google_mail\`, \`google_calendar\`)**: \`POST .../locations/global:setUpDataConnector\` with \`{"collectionId": "<name>-1", "collectionDisplayName": "<name>", "dataConnector": {"dataSource": "<type>", "entities": [{"entityName": "<type>"}], "bapConfig": {"supportedConnectorModes": ["ACTIONS"], "enabledActions": [...]}}}\`. NEVER set \`actionConfig: {"createBapConnection": True}\` or \`connectorModes\` on first-party Workspace connectors (causes 500 INTERNAL).
+     - \`google_drive\` actions: \`["copy_file", "create_file", "download_file_content", "get_file_metadata", "get_file_permissions", "list_recent_files", "list_shared_drives", "read_file_content", "search_files", "share_file", "trash_file", "update_file"]\`
+     - \`google_mail\` actions: \`["send_message"]\` (or \`["create_draft", "reply_all_message", "reply_message", "search_messages", "send_draft", "send_message"]\`)
+     - \`google_calendar\` actions: \`["create_event", "delete_event", "get_event", "list_calendars", "list_events", "respond_to_event", "search_events", "suggest_time", "update_event"]\`
+   - **Gemini Enterprise App (\`engines\`)**: \`POST .../collections/default_collection/engines?engineId=<app_id>\` with \`solutionType: "SOLUTION_TYPE_SEARCH"\`, \`industryVertical: "GENERIC"\`, \`appType: "APP_TYPE_INTRANET"\`, \`dataStoreIds: [...]\`, \`commonConfig: {"companyName": "Cymbal"}\`, \`searchEngineConfig: {"searchTier": "SEARCH_TIER_ENTERPRISE", "searchAddOns": ["SEARCH_ADD_ON_LLM"]}\`.
+   - **App Features, Grounding & Logo**:
+     - Features/Models: \`PATCH .../engines/<app_id>?updateMask=features,modelConfigs\` (\`model-selector: "FEATURE_STATE_ON"\`, \`disable-image-generation: "FEATURE_STATE_OFF"\`, \`disable-video-generation: "FEATURE_STATE_OFF"\`, \`modelConfigs: {"gemini-3.1-pro": "MODEL_ENABLED", "gemini-3.1-flash-image": "MODEL_ENABLED"}\`).
+     - Enterprise Web Search: \`PATCH .../engines/<app_id>/assistants/default_assistant?updateMask=webGroundingType\` with \`{"webGroundingType": "WEB_GROUNDING_TYPE_ENTERPRISE_WEB_SEARCH"}\`.
+     - Logo URL: \`PATCH .../engines/<app_id>/widgetConfigs/default_search_widget_config?updateMask=uiBranding\` with \`{"uiBranding": {"logo": {"url": "<logo_url>"}}}\`.
+10. **Model Armor (\`modelarmor.<loc>.rep.googleapis.com/v1\`)**:
+    - Enable \`modelarmor.googleapis.com\` and \`dlp.googleapis.com\` first.
+    - Use regional endpoint \`https://modelarmor.<loc>.rep.googleapis.com/v1/projects/<project>/locations/<loc>/templates?templateId=<id>\` (e.g. \`us\`).
+    - Attach templates to Gemini Enterprise Assistant via \`PATCH .../engines/<app_id>/assistants/default_assistant?updateMask=customerPolicy\` with \`customerPolicy.modelArmorConfig\` (\`userPromptTemplate\`, \`responseTemplate\`, \`failureMode: "FAIL_OPEN"\`).`;
 
   try {
     const ai = getGenAIClient();

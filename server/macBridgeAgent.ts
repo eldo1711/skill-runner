@@ -593,7 +593,12 @@ async function checkStudentGcloudAuth(username, projectId) {
               timeout: 8000,
             }).catch(() => {});
           }
-          return { authenticated: true, configDir: candidateDir, account: activeAccount };
+          return {
+            authenticated: true,
+            configDir: candidateDir,
+            account: activeAccount,
+            accessToken: tokenOut.trim(),
+          };
         }
       }
     } catch {
@@ -611,7 +616,7 @@ async function startStudentGcloudAuth(username, projectId) {
 
   const configDir = existing.configDir;
   return new Promise((resolve, reject) => {
-    const args = ['auth', 'login', '--quiet'];
+    const args = ['auth', 'login', '--enable-gdrive-access', '--quiet'];
     if (projectId) args.push(`--project=${projectId}`);
 
     const proc = spawn('gcloud', args, {
@@ -685,13 +690,16 @@ async function execInStudentCloudShell(username, projectId, command, timeoutMs =
   }
 
   try {
+    const envPrefix = authStatus.accessToken
+      ? `export DRIVE_ACCESS_TOKEN="${authStatus.accessToken}"; `
+      : '';
     const { stdout, stderr } = await execFileAsync(
       'gcloud',
       [
         'cloud-shell',
         'ssh',
         '--authorize-session',
-        `--command=${command}`,
+        `--command=${envPrefix}${command}`,
         '--quiet',
       ],
       {
@@ -757,8 +765,12 @@ async function connectBridge() {
           : rawEvent.toString();
       const msg = JSON.parse(rawStr);
 
-      if (msg.type === 'shutdown') {
-        console.log('🛑 Received stop signal from Cloud Skills Lab Runner UI. Exiting cleanly...');
+      if (msg.type === 'shutdown' || msg.type === 'superseded') {
+        console.log(
+          msg.type === 'superseded'
+            ? '🛑 Another Mac Bridge instance connected to Cloud Run. Exiting this duplicate instance cleanly...'
+            : '🛑 Received stop signal from Cloud Skills Lab Runner UI. Exiting cleanly...'
+        );
         shuttingDown = true;
         try {
           ws.close();
@@ -869,8 +881,14 @@ async function connectBridge() {
     }
   };
 
-  const onClose = () => {
+  const onClose = (closeEvent) => {
     if (shuttingDown) return;
+    const code = typeof closeEvent === 'number' ? closeEvent : closeEvent?.code;
+    if (code === 4001) {
+      console.log('🛑 Superseded by a newer Mac Bridge connection. Exiting cleanly...');
+      shuttingDown = true;
+      process.exit(0);
+    }
     console.log('⚠️ Connection to Cloud Run closed. Reconnecting in 3s...');
     setTimeout(connectBridge, 3000);
   };
