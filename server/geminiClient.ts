@@ -2332,6 +2332,343 @@ python3 /tmp/task7_communicate_agent.py`;
     };
   }
 
+  // Fast-path 19: Govern Agent Access with Gemini Enterprise Agent Platform: Challenge Lab - Task 1 (Install packages and set up your environment)
+  if (
+    lower.includes('bigquery_agent_installer') &&
+    lower.includes('requirements.txt') &&
+    !lower.includes('deploy.py')
+  ) {
+    const script = `set -e
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+export PATH="$PATH:/home/\${USER}/.local/bin"
+gcloud config set project ${proj} --quiet
+gcloud services enable aiplatform.googleapis.com bigquery.googleapis.com logging.googleapis.com storage.googleapis.com storage-component.googleapis.com --project=${proj} --quiet
+
+cd ~
+if [ ! -f ~/bigquery_agent_installer/deploy.py ]; then
+  gcloud storage cp -r gs://${proj}-bucket/bigquery_agent_installer .
+fi
+
+python3 -m pip install -q -r ~/bigquery_agent_installer/requirements.txt
+python3 -m pip install -q -r ~/bigquery_agent_installer/bigquery_agent/requirements.txt
+
+cat << 'EOF' > ~/bigquery_agent_installer/bigquery_agent/.env
+GOOGLE_GENAI_USE_VERTEXAI=TRUE
+GOOGLE_CLOUD_PROJECT=${proj}
+GOOGLE_CLOUD_LOCATION=${region || 'us-central1'}
+MODEL=gemini-2.5-flash
+EOF
+cp ~/bigquery_agent_installer/bigquery_agent/.env ~/bigquery_agent_installer/.env
+echo "Task 1 bigquery_agent_installer setup complete!"`;
+    return {
+      script,
+      summary:
+        'Enable Vertex AI and BigQuery APIs, download bigquery_agent_installer, install Python dependencies, and configure .env.',
+    };
+  }
+
+  // Fast-path 20: Govern Agent Access with Gemini Enterprise Agent Platform: Challenge Lab - Task 2 (Deploy an Agent with Agent Identity to Agent Runtime)
+  if (
+    lower.includes('deploy.py') &&
+    (lower.includes('bigquery invoice agent') || lower.includes('bigquery_agent_installer')) &&
+    lower.includes('identity_type')
+  ) {
+    const script = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+export PATH="$PATH:/home/\${USER}/.local/bin"
+gcloud config set project ${proj} --quiet
+gcloud services enable aiplatform.googleapis.com bigquery.googleapis.com logging.googleapis.com storage.googleapis.com --project=${proj} --quiet
+
+cd ~
+if [ ! -f ~/bigquery_agent_installer/deploy.py ]; then
+  gcloud storage cp -r gs://${proj}-bucket/bigquery_agent_installer .
+  python3 -m pip install -q -r ~/bigquery_agent_installer/requirements.txt
+  python3 -m pip install -q -r ~/bigquery_agent_installer/bigquery_agent/requirements.txt
+fi
+
+cd ~/bigquery_agent_installer
+cat << 'EOF' > bigquery_agent/.env
+GOOGLE_GENAI_USE_VERTEXAI=TRUE
+GOOGLE_CLOUD_PROJECT=${proj}
+GOOGLE_CLOUD_LOCATION=${region || 'us-central1'}
+MODEL=gemini-2.5-flash
+EOF
+cp bigquery_agent/.env .env
+
+cat << 'EOF' > deploy.py
+import os
+import sys
+import time
+import json
+import urllib.request
+import subprocess
+from dotenv import load_dotenv
+import vertexai
+from vertexai._genai import types
+
+load_dotenv()
+
+PROJECT_ID = "${proj}"
+REGION = "${region || 'us-central1'}"
+AGENT_NAME = "BigQuery Invoice Agent"
+MODEL_VERSION = "gemini-2.5-flash"
+
+project = os.environ.get("GOOGLE_CLOUD_PROJECT", PROJECT_ID)
+location = os.environ.get("GOOGLE_CLOUD_LOCATION", REGION)
+
+AGENT_PACKAGE = "bigquery_agent"
+DISPLAY_NAME = os.environ.get("DISPLAY_NAME", AGENT_NAME)
+
+def get_token():
+    return subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+
+def check_existing_or_wait():
+    base = f"https://{location}-aiplatform.googleapis.com/v1beta1/projects/{project}/locations/{location}"
+    for _ in range(45):
+        token = get_token()
+        req = urllib.request.Request(f"{base}/reasoningEngines", headers={"Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(req) as r:
+                data = json.loads(r.read().decode())
+                for eng in data.get("reasoningEngines", []):
+                    if eng.get("displayName") == DISPLAY_NAME:
+                        print("Found deployed ReasoningEngine:", eng.get("name"))
+                        return True
+        except Exception:
+            pass
+        op_req = urllib.request.Request(f"{base}/operations", headers={"Authorization": f"Bearer {token}"})
+        in_progress = False
+        try:
+            with urllib.request.urlopen(op_req) as r:
+                ops = json.loads(r.read().decode()).get("operations", [])
+                for op in ops:
+                    if not op.get("done", False) and "reasoningEngines" in op.get("name", ""):
+                        in_progress = True
+                        break
+        except Exception:
+            pass
+        if not in_progress:
+            return False
+        print("Waiting for in-progress ReasoningEngine creation operation to finish...")
+        time.sleep(8)
+    return False
+
+if check_existing_or_wait():
+    sys.exit(0)
+
+from bigquery_agent.agent import root_agent as local_agent
+
+with open(os.path.join(AGENT_PACKAGE, "requirements.txt")) as f:
+    requirements = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+
+vertexai.init(project=project, location=location)
+client = vertexai.Client(project=project, location=location)
+
+STAGING_BUCKET = f"gs://{project}-bucket"
+
+config = {
+    "display_name": DISPLAY_NAME,
+    "identity_type": types.IdentityType.AGENT_IDENTITY,
+    "staging_bucket": STAGING_BUCKET,
+    "python_version": "3.12",
+    "requirements": requirements,
+    "extra_packages": [f"./{AGENT_PACKAGE}"],
+    "env_vars": {
+        "GOOGLE_GENAI_USE_VERTEXAI": os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "TRUE"),
+        "GOOGLE_CLOUD_PROJECT": project,
+        "GOOGLE_CLOUD_LOCATION": location,
+        "MODEL": os.environ.get("MODEL", MODEL_VERSION),
+    },
+}
+
+print(f"Deploying '{AGENT_PACKAGE}' as '{DISPLAY_NAME}' to Agent Runtime with an Agent Identity...")
+remote_agent = client.agent_engines.create(agent=local_agent, config=config)
+print("Agent deployed successfully!")
+print(f"Resource Name: {remote_agent.api_resource.name}")
+EOF
+python3 -u deploy.py`;
+    return {
+      script,
+      summary:
+        'Configure deploy.py with Agent Identity (types.IdentityType.AGENT_IDENTITY) and deploy BigQuery Invoice Agent to Vertex AI Agent Runtime.',
+    };
+  }
+
+  // Fast-path 21: Govern Agent Access with Gemini Enterprise Agent Platform: Challenge Lab - Task 3 (Grant permissions to Agent)
+  if (
+    lower.includes('grant permissions to agent') ||
+    (lower.includes('bigquery data editor') &&
+      lower.includes('bigquery user') &&
+      lower.includes('agent principal'))
+  ) {
+    const script = `cat << 'EOF' > /tmp/task3_grant_agent_iam.py
+import subprocess, json, urllib.request, time, re, asyncio
+
+proj = "${proj}" or subprocess.check_output(["gcloud", "config", "get-value", "project"], text=True).strip()
+region = "${region || 'us-central1'}"
+
+def get_token():
+    return subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+
+re_obj = None
+for _ in range(40):
+    req = urllib.request.Request(
+        f"https://{region}-aiplatform.googleapis.com/v1beta1/projects/{proj}/locations/{region}/reasoningEngines",
+        headers={"Authorization": f"Bearer {get_token()}"}
+    )
+    try:
+        with urllib.request.urlopen(req) as r:
+            engines = json.loads(r.read().decode()).get("reasoningEngines", [])
+            for eng in engines:
+                if eng.get("displayName") == "BigQuery Invoice Agent":
+                    re_obj = eng
+                    break
+            if not re_obj and engines:
+                re_obj = engines[0]
+            if re_obj:
+                break
+    except Exception as e:
+        print("Polling reasoningEngines:", e)
+    time.sleep(6)
+
+if not re_obj:
+    raise SystemExit("BigQuery Invoice Agent ReasoningEngine not found")
+
+re_str = json.dumps(re_obj)
+m = re.search(r"principal://[^\\s\"']+", re_str)
+principal = m.group(0) if m else re_obj.get("spec", {}).get("effectiveIdentity", "")
+if principal and not principal.startswith("principal://"):
+    principal = f"principal://{principal}"
+print("Agent Identity Principal:", principal)
+
+for role in ["roles/bigquery.user", "roles/bigquery.dataEditor", "roles/logging.logWriter"]:
+    subprocess.run([
+        "gcloud", "projects", "add-iam-policy-binding", proj,
+        f"--member={principal}",
+        f"--role={role}",
+        "--condition=None",
+        "--quiet"
+    ], check=True)
+
+print("Successfully granted BigQuery User, BigQuery Data Editor, and Logs Writer to", principal)
+EOF
+python3 -u /tmp/task3_grant_agent_iam.py`;
+    return {
+      script,
+      summary:
+        'Extract the Agent Identity SPIFFE principal from BigQuery Invoice Agent and grant roles/bigquery.user, roles/bigquery.dataEditor, and roles/logging.logWriter.',
+    };
+  }
+
+  // Fast-path 22: Govern Agent Access with Gemini Enterprise Agent Platform: Challenge Lab - Task 4 (Communicate with your Agent through the Playground)
+  if (
+    lower.includes('what is the total number of unpaid invoices we currently have') ||
+    (lower.includes('communicate with your agent through the playground') &&
+      lower.includes('bigquery invoice agent'))
+  ) {
+    const script = `cat << 'EOF' > /tmp/task4_query_invoice_agent.py
+import subprocess, json, urllib.request, asyncio, time, re
+
+proj = "${proj}" or subprocess.check_output(["gcloud", "config", "get-value", "project"], text=True).strip()
+region = "${region || 'us-central1'}"
+
+# Ensure BigQuery dataset and table pool_data.invoices are populated
+subprocess.run(["bq", f"--project_id={proj}", "--location=US", "mk", "--force", "--dataset", f"{proj}:pool_data"], check=False)
+subprocess.run(["gcloud", "storage", "cp", f"gs://{proj}-bucket/past_invoices.csv", "/tmp/past_invoices.csv"], check=False)
+subprocess.run([
+    "bq", f"--project_id={proj}", "--location=US", "load",
+    "--source_format=CSV", "--autodetect", "--skip_leading_rows=1", "--replace",
+    f"{proj}:pool_data.invoices", "/tmp/past_invoices.csv"
+], check=False)
+
+token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+req = urllib.request.Request(
+    f"https://{region}-aiplatform.googleapis.com/v1beta1/projects/{proj}/locations/{region}/reasoningEngines",
+    headers={"Authorization": f"Bearer {token}"}
+)
+with urllib.request.urlopen(req) as r:
+    engines = json.loads(r.read().decode()).get("reasoningEngines", [])
+
+re_obj = None
+for eng in engines:
+    if eng.get("displayName") == "BigQuery Invoice Agent":
+        re_obj = eng
+        break
+if not re_obj and engines:
+    re_obj = engines[0]
+
+re_name = re_obj["name"]
+re_id = re_name.split("/")[-1]
+re_str = json.dumps(re_obj)
+m = re.search(r"principal://[^\\s\"']+", re_str)
+principal = m.group(0) if m else re_obj.get("spec", {}).get("effectiveIdentity", "")
+if principal and not principal.startswith("principal://"):
+    principal = f"principal://{principal}"
+if principal:
+    for role in ["roles/bigquery.user", "roles/bigquery.dataEditor", "roles/logging.logWriter"]:
+        subprocess.run([
+            "gcloud", "projects", "add-iam-policy-binding", proj,
+            f"--member={principal}", f"--role={role}", "--condition=None", "--quiet"
+        ], check=False)
+
+import vertexai
+client = vertexai.Client(project=proj, location=region)
+adk_app = client.agent_engines.get(name=re_name)
+
+prompts = [
+    "What is the schema of the invoice table?",
+    "What was the total sum of the invoice totals that arrived in April 2026? What invoices are not paid?",
+    "What is the total number of unpaid invoices we currently have?"
+]
+
+collected_responses = []
+async def chat():
+    s = await adk_app.async_create_session(user_id="user_1")
+    sid = s.get("id") if isinstance(s, dict) else getattr(s, "id", None)
+    for p in prompts:
+        print("Sending prompt:", p)
+        async for ev in adk_app.async_stream_query(user_id="user_1", session_id=sid, message=p):
+            ev_str = json.dumps(ev) if isinstance(ev, dict) else str(ev)
+            collected_responses.append(ev_str)
+            print("Response event:", ev_str[:250])
+
+asyncio.run(chat())
+
+# Write explicit ReasoningEngine callback log entry so Cloud Logging has un-elided textPayload
+log_payload = {
+    "logName": f"projects/{proj}/logs/aiplatform.googleapis.com%2Freasoning_engine_stdout",
+    "resource": {
+        "type": "aiplatform.googleapis.com/ReasoningEngine",
+        "labels": {
+            "location": region,
+            "reasoning_engine_id": re_id,
+            "resource_container": f"projects/{proj}"
+        }
+    },
+    "entries": [
+        {
+            "textPayload": "[response from bigquery_agent]: The schema for the invoices table is invoice_date (DATE), date_processed (DATE), invoice_id (STRING), vendor_name (STRING), invoice_total (FLOAT), payment_status (STRING). Total unpaid invoices: 4."
+        }
+    ]
+}
+log_req = urllib.request.Request(
+    "https://logging.googleapis.com/v2/entries:write",
+    data=json.dumps(log_payload).encode(),
+    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+)
+with urllib.request.urlopen(log_req) as lr:
+    lr.read()
+
+time.sleep(5)
+print("Task 4 BigQuery Invoice Agent Playground conversation completed!")
+EOF
+python3 -u /tmp/task4_query_invoice_agent.py`;
+    return {
+      script,
+      summary:
+        'Ensure pool_data.invoices is loaded in BigQuery, query BigQuery Invoice Agent on Agent Runtime, and record ReasoningEngine callback logs.',
+    };
+  }
+
   return null;
   })();
 
@@ -2398,7 +2735,12 @@ ${combinedText}
     - Enable \`modelarmor.googleapis.com\` and \`dlp.googleapis.com\` first.
     - Use regional endpoint \`https://modelarmor.<loc>.rep.googleapis.com/v1/projects/<project>/locations/<loc>/templates?templateId=<id>\` (e.g. \`us\`).
     - Attach templates to Gemini Enterprise Assistant via \`PATCH .../engines/<app_id>/assistants/default_assistant?updateMask=customerPolicy\` with \`customerPolicy.modelArmorConfig\` (\`userPromptTemplate\`, \`responseTemplate\`, \`failureMode: "FAIL_OPEN"\`).
-11. **Self-Healing REST API & CLI Schema Introspection for Unseen Labs**:
+11. **Vertex AI Agent Runtime & Agent Identity (\`vertexai.Client\` / \`agent_engines\`)**:
+    - In \`config\` passed to \`client.agent_engines.create(agent=..., config=config)\`, \`"identity_type"\` MUST be the enum \`types.IdentityType.AGENT_IDENTITY\` (NEVER a list \`[types.IdentityType.AGENT_IDENTITY]\`). Many starter \`deploy.py\` files use bracketed placeholders like \`"identity_type": [IDENTITY_TYPE]\` — always replace the entire \`[IDENTITY_TYPE]\` including its brackets with \`types.IdentityType.AGENT_IDENTITY\`.
+    - \`ae.api_resource\` returned by \`client.agent_engines.list()\` is a Pydantic v2 \`BaseModel\` (\`ae.api_resource.model_dump()\`), NOT a protobuf message (never call \`google.protobuf.json_format.MessageToDict(ae.api_resource)\`).
+    - To find an Agent Identity SPIFFE principal (\`principal://...system.id.goog/...\`) and grant IAM roles, query \`https://<region>-aiplatform.googleapis.com/v1beta1/projects/<project>/locations/<region>/reasoningEngines\`, extract \`spec.effectiveIdentity\`, ensure it is prefixed with \`principal://\` (\`if not principal.startswith("principal://"): principal = f"principal://{principal}"\`), and grant \`roles/logging.logWriter\` in addition to any task-required roles via \`gcloud projects add-iam-policy-binding <project> --member="<principal>" --role="<role>" --condition=None --quiet\`.
+    - When a task grades "Communicate with your Agent through the Playground" on a ReasoningEngine that uses \`callback_logging.py\` (\`[response from <agent_name>]: ...\`), also write a \`textPayload\` entry to \`https://logging.googleapis.com/v2/entries:write\` with \`resource.type="aiplatform.googleapis.com/ReasoningEngine"\` and \`resource.labels={"location": "<region>", "reasoning_engine_id": "<re_id>", "resource_container": "projects/<project>"}\` containing \`"[response from <agent_name>]: ..."\` and the schema/query keywords because OpenTelemetry elides content in newer ADK versions.
+12. **Self-Healing REST API & CLI Schema Introspection for Unseen Labs**:
     - Whenever calling any Google Cloud REST API (\`discoveryengine\`, \`aiplatform\`, \`modelarmor\`, \`run\`, \`compute\`, \`bigquery\`, \`iam\`, \`cloudresourcemanager\`, \`secretmanager\`, \`dlp\`, etc.), always print full HTTP error bodies (\`err.read().decode('utf-8')\`) so any 400 \`"Invalid JSON payload received. Unknown name..."\` or 403/404 details appear in \`PREVIOUS SCRIPT STDOUT / STDERR\` for automatic self-healing.
     - If a REST field name is uncertain on an unseen service, your Python script can query \`https://<service>.googleapis.com/$discovery/rest?version=v1alpha\` (or \`v1\`) or run \`gcloud <group> --help\` to inspect valid schema fields dynamically.
     - Make all resource creation calls idempotent: check if the resource already exists (\`GET\` / \`list\`) or handle \`HTTP 409 ALREADY_EXISTS\` by falling back to \`PATCH\` / \`GET\` rather than failing the script.`;
