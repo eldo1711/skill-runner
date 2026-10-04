@@ -271,24 +271,25 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
           }
         }
 
+        const isLiveCopyableInput = el.tagName.toLowerCase() === 'ql-copyable-input';
         if (label && val && !isPlaceholderVal(val)) {
           if (
-            !username &&
+            (isLiveCopyableInput || !username) &&
             (label.includes('username') ||
               label.includes('user name') ||
               label.includes('student'))
           ) {
             username = val.trim();
-          } else if (!password && label.includes('password')) {
+          } else if ((isLiveCopyableInput || !password) && label.includes('password')) {
             password = val.trim();
           } else if (
-            !projectId &&
+            (isLiveCopyableInput || !projectId) &&
             (label.includes('project') || label.includes('gcp project id'))
           ) {
             projectId = val.trim();
-          } else if (!region && label.includes('region')) {
+          } else if ((isLiveCopyableInput || !region) && label.includes('region')) {
             region = val.trim();
-          } else if (!zone && label.includes('zone')) {
+          } else if ((isLiveCopyableInput || !zone) && label.includes('zone')) {
             zone = val.trim();
           } else if (
             !extraVars[label] &&
@@ -304,7 +305,7 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
           }
         }
 
-        if (!consoleUrl && (el.tagName === 'A' || el.tagName.toLowerCase() === 'ql-button')) {
+        if (el.tagName === 'A' || el.tagName.toLowerCase() === 'ql-button') {
           const text = getDeepText(el).toLowerCase();
           const href = el.getAttribute('href') || '';
           if (
@@ -314,7 +315,9 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
               text.includes('open google cloud console') ||
               text.includes('open console'))
           ) {
-            consoleUrl = href;
+            if (!consoleUrl || el.classList?.contains('open-console-button')) {
+              consoleUrl = href;
+            }
           }
         }
       }
@@ -337,8 +340,8 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
       }
       if (key && val && !isPlaceholderVal(val)) {
         extraVars[key] = val;
-        if (!region && key.includes('region')) region = val;
-        if (!zone && key.includes('zone')) zone = val;
+        if (key.includes('region')) region = val;
+        if (key.includes('zone')) zone = val;
       }
     }
 

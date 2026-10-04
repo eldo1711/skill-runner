@@ -38,9 +38,9 @@ const SNAPSHOT_DIR = path.join(os.homedir(), '.cloud-skills-lab-runner');
 const SNAPSHOT_HTML_PATH = path.join(SNAPSHOT_DIR, 'live_lab_snapshot.html');
 const SNAPSHOT_FILES_DIR = path.join(SNAPSHOT_DIR, 'live_lab_snapshot_files');
 
-async function runAppleScript(script) {
+async function runAppleScript(script, timeoutMs = 35000) {
   const { stdout } = await execFileAsync('osascript', ['-e', script], {
-    timeout: 20000,
+    timeout: timeoutMs,
     maxBuffer: 10 * 1024 * 1024,
   });
   return stdout.trim();
@@ -370,20 +370,21 @@ async function checkProgressInUserChrome(
     // Keep default origin
   }
 
-  const checkUrl = `${origin}/assessments/run_step.json?id=${encodeURIComponent(
-    resolvedInstanceId
-  )}&step=${stepNo}`;
-  const checkFilePath = path.join(SNAPSHOT_DIR, `ql_check_step_${stepNo}.html`);
-  try {
-    if (fs.existsSync(checkFilePath)) fs.unlinkSync(checkFilePath);
-  } catch {
-    // Ignore
-  }
+  const fetchAssessmentStepRaw = async (instId) => {
+    const checkUrl = `${origin}/assessments/run_step.json?id=${encodeURIComponent(
+      instId
+    )}&step=${stepNo}`;
+    const checkFilePath = path.join(SNAPSHOT_DIR, `ql_check_step_${stepNo}.html`);
+    try {
+      if (fs.existsSync(checkFilePath)) fs.unlinkSync(checkFilePath);
+    } catch {
+      // Ignore
+    }
 
-  const escapedCheckUrl = checkUrl.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  const escapedCheckPath = checkFilePath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const escapedCheckUrl = checkUrl.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const escapedCheckPath = checkFilePath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
-  const script = `
+    const script = `
 tell application "Google Chrome"
   repeat with w in windows
     if ((id of w) as string) is "${targetWindowId}" then
@@ -407,21 +408,77 @@ tell application "Google Chrome"
   return "not_found"
 end tell
 `;
-  await runAppleScript(script).catch(() => '');
+    await runAppleScript(script).catch(() => '');
+    if (!fs.existsSync(checkFilePath)) return null;
+    const rawHtml = fs.readFileSync(checkFilePath, 'utf8');
+    const preMatch = rawHtml.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+    return (preMatch ? preMatch[1] : rawHtml).trim();
+  };
 
-  if (!fs.existsSync(checkFilePath)) {
+  let jsonCandidate = await fetchAssessmentStepRaw(resolvedInstanceId);
+  if (jsonCandidate === null) {
     return {
       verified: false,
       message: `Triggered Check my progress for Step #${stepNo}, but could not read grader response.`,
     };
   }
 
-  const rawHtml = fs.readFileSync(checkFilePath, 'utf8');
-  const preMatch = rawHtml.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
-  const jsonCandidate = (preMatch ? preMatch[1] : rawHtml).trim();
+  let data = null;
+  try {
+    data = JSON.parse(jsonCandidate);
+  } catch {
+    // If the user restarted the lab without reloading the page, the HTML attribute labinstanceid="..."
+    // still holds the ended lab's ID (causing /assessments/run_step.json to redirect to Dashboard HTML).
+    // Reload the Lab tab once to hydrate the new labinstanceid attribute and retry.
+    if (targetWindowId && targetTabIndex) {
+      const reloadScript = `
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${targetWindowId}" then
+      if ${targetTabIndex} <= (count of tabs of w) then
+        set t to tab ${targetTabIndex} of w
+        set URL of t to (URL of t)
+        delay 1.0
+        repeat 40 times
+          if (loading of t) is false then exit repeat
+          delay 0.25
+        end repeat
+        delay 0.8
+        return "reloaded"
+      end if
+    end if
+  end repeat
+  return "not_found"
+end tell
+`;
+      await runAppleScript(reloadScript).catch(() => '');
+      const freshSnap = await snapshotUserChromeTabByTarget(targetWindowId, targetTabIndex);
+      if (freshSnap && freshSnap.htmlPath && fs.existsSync(freshSnap.htmlPath)) {
+        const freshHtml = fs.readFileSync(freshSnap.htmlPath, 'utf8');
+        const m = freshHtml.match(/labinstanceid="(\d+)"/i);
+        if (m && m[1]) {
+          resolvedInstanceId = m[1];
+          const retryRaw = await fetchAssessmentStepRaw(resolvedInstanceId);
+          if (retryRaw) {
+            try {
+              data = JSON.parse(retryRaw);
+            } catch {
+              // Fall through
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (!data) {
+    return {
+      verified: false,
+      message: `Unable to parse Qwiklabs assessment JSON for Step #${stepNo}.`,
+    };
+  }
 
   try {
-    const data = JSON.parse(jsonCandidate);
     const idx = stepNo - 1;
     const stepCompleteList = Array.isArray(data.step_complete)
       ? data.step_complete.map(Boolean)
@@ -579,41 +636,54 @@ tell application "System Events"
       set value of attribute "AXEnhancedUserInterface" to true
     end try
     delay 0.3
-    repeat with w in windows
-      if (name of w) contains "Google Chrome" then
-        set allElems to entire contents of w
-        repeat with el in allElems
-          try
-            if (role of el) is "AXButton" then
-              set nm to (name of el) as string
-              if nm starts with "Start Lab" or nm is "Start" then
-                click el
-                delay 1.2
-                set followElems to entire contents of w
-                repeat with fel in followElems
-                  try
-                    if (role of fel) is "AXButton" then
-                      set fnm to (name of fel) as string
-                      if fnm is "Confirm" or fnm starts with "Launch with" then
-                        click fel
-                        exit repeat
-                      end if
-                    end if
-                  end try
-                end repeat
-                return "clicked"
-              end if
+    if (count of windows) > 0 then
+      set w to front window
+      set allElems to entire contents of w
+      repeat with el in allElems
+        try
+          if (role of el) is "AXButton" then
+            set nm to (name of el) as string
+            if nm starts with "Start Lab" or nm is "Start" then
+              click el
+              return "clicked"
             end if
-          end try
-        end repeat
-      end if
-    end repeat
+          end if
+        end try
+      end repeat
+    end if
   end tell
 end tell
 return "not_found"
 `;
   const axRes = await runAppleScript(axScript).catch(() => '');
-  return axRes === 'clicked';
+  if (axRes === 'clicked') {
+    await new Promise((r) => setTimeout(r, 1200));
+    const followScript = `
+tell application "System Events"
+  tell process "Google Chrome"
+    if (count of windows) > 0 then
+      set w to front window
+      set followElems to entire contents of w
+      repeat with fel in followElems
+        try
+          if (role of fel) is "AXButton" then
+            set fnm to (name of fel) as string
+            if fnm is "Confirm" or fnm starts with "Launch with" then
+              click fel
+              return "confirmed"
+            end if
+          end if
+        end try
+      end repeat
+    end if
+  end tell
+end tell
+return "done"
+`;
+    await runAppleScript(followScript).catch(() => '');
+    return true;
+  }
+  return false;
 }
 
 async function clickEndLabInUserChrome(preferredUrl, preferredTarget) {
@@ -629,7 +699,7 @@ async function clickEndLabInUserChrome(preferredUrl, preferredTarget) {
     await focusUserChromeTab(Number(target.windowId), Number(target.tabIndex));
   }
 
-  const axScript = `
+  const primaryScript = `
 tell application "Google Chrome" to activate
 delay 0.3
 tell application "System Events"
@@ -638,81 +708,98 @@ tell application "System Events"
       set value of attribute "AXEnhancedUserInterface" to true
     end try
     delay 0.3
-    repeat with w in windows
-      if (name of w) contains "Google Chrome" then
-        set allElems to entire contents of w
-        set clickedPrimary to false
-        repeat with el in allElems
-          try
-            if (role of el) is "AXButton" then
-              set nm to (name of el) as string
-              if nm is "End Lab" then
-                click el
-                set clickedPrimary to true
-                exit repeat
-              end if
+    if (count of windows) > 0 then
+      set w to front window
+      set allElems to entire contents of w
+      repeat with el in allElems
+        try
+          if (role of el) is "AXButton" then
+            set nm to (name of el) as string
+            if nm is "End Lab" or nm is "End" or nm starts with "End Lab" then
+              click el
+              return "clicked_primary"
             end if
-          end try
-        end repeat
-        if clickedPrimary is true then
-          delay 0.9
-          set dialogElems to entire contents of w
-          set lastEndBtn to missing value
-          repeat with del in dialogElems
-            try
-              if (role of del) is "AXButton" then
-                set dnm to (name of del) as string
-                if dnm is "End Lab" or dnm is "Confirm" or dnm is "Submit" then
-                  set lastEndBtn to del
-                end if
-              end if
-            end try
-          end repeat
-          if lastEndBtn is not missing value then
-            click lastEndBtn
-            delay 0.8
           end if
-          try
-            set revElems to entire contents of w
-            repeat with rel in revElems
-              try
-                if (role of rel) is "AXButton" then
-                  set rnm to (name of rel) as string
-                  if rnm is "Cancel" then
-                    click rel
-                    exit repeat
-                  end if
-                end if
-              end try
-            end repeat
-          end try
-          return "ended"
-        else
-          repeat with el in allElems
-            try
-              if (role of el) is "AXButton" then
-                set nm to (name of el) as string
-                if nm starts with "Start Lab" or nm is "Start" then
-                  return "already_ended"
-                end if
-              end if
-            end try
-          end repeat
-        end if
-      end if
-    end repeat
+        end try
+      end repeat
+      repeat with el in allElems
+        try
+          if (role of el) is "AXButton" then
+            set nm to (name of el) as string
+            if nm starts with "Start Lab" or nm is "Start" then
+              return "already_ended"
+            end if
+          end if
+        end try
+      end repeat
+    end if
   end tell
 end tell
 return "not_found"
 `;
-  const axRes = await runAppleScript(axScript).catch(() => '');
-  if (axRes === 'ended' || axRes === 'already_ended') {
+  const primaryRes = await runAppleScript(primaryScript).catch(() => '');
+  if (primaryRes === 'already_ended') {
     return {
       ended: true,
-      message:
-        axRes === 'already_ended'
-          ? 'Lab is already ended in Google Chrome.'
-          : 'Clicked "End Lab" and confirmed termination in Google Chrome.',
+      message: 'Lab is already ended in Google Chrome.',
+    };
+  }
+  if (primaryRes === 'clicked_primary') {
+    await new Promise((r) => setTimeout(r, 900));
+    const confirmScript = `
+tell application "System Events"
+  tell process "Google Chrome"
+    if (count of windows) > 0 then
+      set w to front window
+      set dialogElems to entire contents of w
+      set lastEndBtn to missing value
+      repeat with del in dialogElems
+        try
+          if (role of del) is "AXButton" then
+            set dnm to (name of del) as string
+            if dnm is "End Lab" or dnm is "Confirm" or dnm is "Submit" then
+              set lastEndBtn to del
+            end if
+          end if
+        end try
+      end repeat
+      if lastEndBtn is not missing value then
+        click lastEndBtn
+        return "confirmed"
+      end if
+    end if
+  end tell
+end tell
+return "no_confirm"
+`;
+    await runAppleScript(confirmScript).catch(() => '');
+    await new Promise((r) => setTimeout(r, 700));
+    const dismissReviewScript = `
+tell application "System Events"
+  tell process "Google Chrome"
+    if (count of windows) > 0 then
+      set w to front window
+      set revElems to entire contents of w
+      repeat with rel in revElems
+        try
+          if (role of rel) is "AXButton" then
+            set rnm to (name of rel) as string
+            if rnm is "Cancel" or rnm is "close" then
+              click rel
+              exit repeat
+            end if
+          end if
+        end try
+      end repeat
+    end if
+  end tell
+end tell
+return "done"
+`;
+    await runAppleScript(dismissReviewScript).catch(() => '');
+    return {
+      ended: true,
+      message: 'Clicked "End Lab" and confirmed termination in Google Chrome.',
     };
   }
   return {
@@ -743,7 +830,11 @@ async function checkStudentGcloudAuth(username, projectId) {
         'gcloud',
         ['auth', 'list', '--filter=status:ACTIVE', '--format=value(account)'],
         {
-          env: { ...process.env, CLOUDSDK_CONFIG: candidateDir },
+          env: {
+            ...process.env,
+            CLOUDSDK_CONFIG: candidateDir,
+            CLOUDSDK_CORE_DISABLE_PROMPTS: '1',
+          },
           timeout: 8000,
         }
       );
@@ -753,14 +844,22 @@ async function checkStudentGcloudAuth(username, projectId) {
           'gcloud',
           ['auth', 'print-access-token', '--quiet'],
           {
-            env: { ...process.env, CLOUDSDK_CONFIG: candidateDir },
+            env: {
+              ...process.env,
+              CLOUDSDK_CONFIG: candidateDir,
+              CLOUDSDK_CORE_DISABLE_PROMPTS: '1',
+            },
             timeout: 8000,
           }
         );
         if (tokenOut.trim().length > 10) {
           if (projectId) {
             await execFileAsync('gcloud', ['config', 'set', 'project', projectId, '--quiet'], {
-              env: { ...process.env, CLOUDSDK_CONFIG: candidateDir },
+              env: {
+                ...process.env,
+                CLOUDSDK_CONFIG: candidateDir,
+                CLOUDSDK_CORE_DISABLE_PROMPTS: '1',
+              },
               timeout: 8000,
             }).catch(() => {});
           }
@@ -861,9 +960,10 @@ async function execInStudentCloudShell(username, projectId, command, timeoutMs =
   }
 
   try {
-    const envPrefix = authStatus.accessToken
+    const driveExport = authStatus.accessToken
       ? `export DRIVE_ACCESS_TOKEN="${authStatus.accessToken}"; `
       : '';
+    const envPrefix = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1; ${driveExport}`;
     const { stdout, stderr } = await execFileAsync(
       'gcloud',
       [
@@ -874,8 +974,13 @@ async function execInStudentCloudShell(username, projectId, command, timeoutMs =
         '--quiet',
       ],
       {
-        env: { ...process.env, CLOUDSDK_CONFIG: authStatus.configDir },
+        env: {
+          ...process.env,
+          CLOUDSDK_CONFIG: authStatus.configDir,
+          CLOUDSDK_CORE_DISABLE_PROMPTS: '1',
+        },
         timeout: timeoutMs,
+        killSignal: 'SIGKILL',
         maxBuffer: 15 * 1024 * 1024,
       }
     );
@@ -897,6 +1002,7 @@ async function execInStudentCloudShell(username, projectId, command, timeoutMs =
 
 let ws = null;
 let shuttingDown = false;
+let pingTimer = null;
 
 async function pushTabsOnce() {
   if (!ws || ws.readyState !== 1) return;
@@ -923,6 +1029,16 @@ async function connectBridge() {
 
   const onOpen = async () => {
     console.log('✅ Mac Chrome Bridge connected to Cloud Run!');
+    if (pingTimer) clearInterval(pingTimer);
+    pingTimer = setInterval(() => {
+      if (ws && ws.readyState === 1) {
+        try {
+          ws.send(JSON.stringify({ type: 'ping' }));
+        } catch {
+          // Ignore
+        }
+      }
+    }, 20000);
     await pushTabsOnce();
   };
 
@@ -936,6 +1052,16 @@ async function connectBridge() {
           : rawEvent.toString();
       const msg = JSON.parse(rawStr);
 
+      if (msg.type === 'ping') {
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'pong' }));
+        }
+        return;
+      }
+      if (msg.type === 'pong') {
+        return;
+      }
+
       if (msg.type === 'shutdown' || msg.type === 'superseded') {
         console.log(
           msg.type === 'superseded'
@@ -943,6 +1069,7 @@ async function connectBridge() {
             : '🛑 Received stop signal from Skills Runner UI. Exiting cleanly...'
         );
         shuttingDown = true;
+        if (pingTimer) clearInterval(pingTimer);
         try {
           ws.close();
         } catch {
@@ -1037,6 +1164,7 @@ async function connectBridge() {
           );
         } else if (method === 'shutdown') {
           shuttingDown = true;
+          if (pingTimer) clearInterval(pingTimer);
           ws.send(JSON.stringify({ type: 'rpc_response', id, result: true }));
           process.exit(0);
         } else {
@@ -1063,6 +1191,10 @@ async function connectBridge() {
   };
 
   const onClose = (closeEvent) => {
+    if (pingTimer) {
+      clearInterval(pingTimer);
+      pingTimer = null;
+    }
     if (shuttingDown) return;
     const code = typeof closeEvent === 'number' ? closeEvent : closeEvent?.code;
     if (code === 4001) {

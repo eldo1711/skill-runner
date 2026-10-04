@@ -1750,12 +1750,13 @@ echo "Task 2 ADK Agent creation and deployment complete!"`;
     const script = `cat << 'EOF' > /tmp/task3_oauth_setup.py
 import subprocess, json, os, re, time
 
+os.environ["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
 proj = "${proj}" or subprocess.check_output(["gcloud", "config", "get-value", "project"], text=True).strip()
 username = "${credentials.username}" or subprocess.check_output(["gcloud", "config", "get-value", "account"], text=True).strip()
 
-subprocess.run(["gcloud", "services", "enable", "iap.googleapis.com", "clientauthconfig.googleapis.com", f"--project={proj}", "--quiet"], check=False)
+subprocess.run(["gcloud", "services", "enable", "iap.googleapis.com", f"--project={proj}", "--quiet"], check=False)
 
-brands_out = subprocess.check_output(["gcloud", "iap", "oauth-brands", "list", f"--project={proj}", "--format=json"], text=True).strip()
+brands_out = subprocess.check_output(["gcloud", "iap", "oauth-brands", "list", f"--project={proj}", "--format=json", "--quiet"], text=True).strip()
 brands = json.loads(brands_out) if brands_out else []
 if not brands:
     subprocess.run([
@@ -1765,11 +1766,11 @@ if not brands:
         f"--project={proj}",
         "--quiet"
     ], check=True)
-    brands_out = subprocess.check_output(["gcloud", "iap", "oauth-brands", "list", f"--project={proj}", "--format=json"], text=True).strip()
+    brands_out = subprocess.check_output(["gcloud", "iap", "oauth-brands", "list", f"--project={proj}", "--format=json", "--quiet"], text=True).strip()
     brands = json.loads(brands_out)
 
 brand_name = brands[0]["name"]
-clients_out = subprocess.check_output(["gcloud", "iap", "oauth-clients", "list", brand_name, f"--project={proj}", "--format=json"], text=True).strip()
+clients_out = subprocess.check_output(["gcloud", "iap", "oauth-clients", "list", brand_name, f"--project={proj}", "--format=json", "--quiet"], text=True).strip()
 clients = json.loads(clients_out) if clients_out else []
 
 target_client = None
@@ -1802,7 +1803,7 @@ if os.path.exists(auth_script):
     with open(auth_script, "w") as f:
         f.write(code)
 
-time.sleep(8)
+time.sleep(5)
 print("Task 3 OAuth Consent Screen and Gemini Enterprise Client ready:", client_id)
 EOF
 python3 /tmp/task3_oauth_setup.py`;
@@ -1820,9 +1821,11 @@ python3 /tmp/task3_oauth_setup.py`;
     !lower.includes('pool robot')
   ) {
     const script = `cat << 'EOF' > /tmp/task4_deploy_ge.py
-import subprocess, json, urllib.request, urllib.error, time
+import subprocess, json, urllib.request, urllib.error, time, os
 
+os.environ["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
 proj = "${proj}" or subprocess.check_output(["gcloud", "config", "get-value", "project"], text=True).strip()
+username = "${credentials.username}" or subprocess.check_output(["gcloud", "config", "get-value", "account"], text=True).strip()
 subprocess.run(["gcloud", "services", "enable", "discoveryengine.googleapis.com", f"--project={proj}", "--quiet"], check=False)
 token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
 
@@ -1846,7 +1849,33 @@ base = f"https://discoveryengine.googleapis.com/v1alpha/projects/{proj}/location
 # 1. Configure Google Identity Provider (GSUITE)
 api_call("PATCH", f"{base}/aclConfig", {"idpConfig": {"idpType": "GSUITE"}})
 
-# 2. Create Cymbal Pools GE app (engineId=cymbal-pools-ge)
+# 2. Provision Gemini Enterprise Free Trial LicenseConfig and assign to student user
+lcs = api_call("GET", f"{base}/licenseConfigs").get("licenseConfigs", [])
+if not lcs:
+    api_call("POST", f"{base}/licenseConfigs?licenseConfigId=search_and_assistant", {
+        "licenseCount": 50,
+        "subscriptionTier": "SUBSCRIPTION_TIER_SEARCH_AND_ASSISTANT",
+        "subscriptionTerm": "SUBSCRIPTION_TERM_ONE_MONTH",
+        "freeTrial": True
+    })
+    lcs = api_call("GET", f"{base}/licenseConfigs").get("licenseConfigs", [])
+
+if lcs:
+    lc_name = lcs[0]["name"]
+    api_call("PATCH", f"{base}/userStores/default_user_store?updateMask=defaultLicenseConfig,enableLicenseAutoRegister,enableExpiredLicenseAutoUpdate", {
+        "defaultLicenseConfig": lc_name,
+        "enableLicenseAutoRegister": True,
+        "enableExpiredLicenseAutoUpdate": True
+    })
+    if username:
+        api_call("POST", f"{base}/userStores/default_user_store:batchUpdateUserLicenses", {
+            "inlineSource": {
+                "userLicenses": [{"userPrincipal": username, "licenseConfig": lc_name}],
+                "updateMask": "licenseConfig"
+            }
+        })
+
+# 3. Create Cymbal Pools GE app (engineId=cymbal-pools-ge)
 eng_url = f"{base}/collections/default_collection/engines"
 api_call("POST", f"{eng_url}?engineId=cymbal-pools-ge", {
     "displayName": "Cymbal Pools GE",
@@ -1862,7 +1891,7 @@ api_call("POST", f"{eng_url}?engineId=cymbal-pools-ge", {
 
 time.sleep(3)
 
-# 3. Enable Agent Designer (no-code-agent-builder and workflow-agents)
+# 4. Enable Agent Designer (no-code-agent-builder and workflow-agents)
 api_call("PATCH", f"{eng_url}/cymbal-pools-ge?updateMask=features", {
     "features": {
         "no-code-agent-builder": "FEATURE_STATE_ON",
@@ -1872,13 +1901,13 @@ api_call("PATCH", f"{eng_url}/cymbal-pools-ge?updateMask=features", {
         "disable-agent-sharing": "FEATURE_STATE_OFF"
     }
 })
-print("Task 4 Cymbal Pools GE app deployed and Agent Designer enabled!")
+print("Task 4 Cymbal Pools GE app deployed, Free Trial license assigned, and Agent Designer enabled!")
 EOF
 python3 /tmp/task4_deploy_ge.py`;
     return {
       script,
       summary:
-        'Configure Google Identity Provider, create Cymbal Pools GE Gemini Enterprise app (cymbal-pools-ge), and enable Agent Designer features.',
+        'Configure Google Identity Provider, allocate Gemini Enterprise Free Trial license, create Cymbal Pools GE app, and enable Agent Designer features.',
     };
   }
 
@@ -1888,9 +1917,11 @@ python3 /tmp/task4_deploy_ge.py`;
     (lower.includes('agent designer') && lower.includes('pool robot'))
   ) {
     const script = `cat << 'EOF' > /tmp/task5_agent_designer.py
-import subprocess, json, urllib.request, urllib.error, time
+import subprocess, json, urllib.request, urllib.error, time, os
 
+os.environ["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
 proj = "${proj}" or subprocess.check_output(["gcloud", "config", "get-value", "project"], text=True).strip()
+username = "${credentials.username}" or subprocess.check_output(["gcloud", "config", "get-value", "account"], text=True).strip()
 token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
 
 def api_call(method, url, body=None):
@@ -1908,8 +1939,35 @@ def api_call(method, url, body=None):
         print(f"HTTP {e.code} on {method} {url}: {err_text[:400]}")
         return {"error": e.code, "details": err_text}
 
-eng_base = f"https://discoveryengine.googleapis.com/v1alpha/projects/{proj}/locations/global/collections/default_collection/engines/cymbal-pools-ge"
+base = f"https://discoveryengine.googleapis.com/v1alpha/projects/{proj}/locations/global"
+eng_base = f"{base}/collections/default_collection/engines/cymbal-pools-ge"
 asst_base = f"{eng_base}/assistants/default_assistant"
+
+# 0. Ensure Gemini Enterprise Free Trial LicenseConfig is active and assigned to student user
+lcs = api_call("GET", f"{base}/licenseConfigs").get("licenseConfigs", [])
+if not lcs:
+    api_call("POST", f"{base}/licenseConfigs?licenseConfigId=search_and_assistant", {
+        "licenseCount": 50,
+        "subscriptionTier": "SUBSCRIPTION_TIER_SEARCH_AND_ASSISTANT",
+        "subscriptionTerm": "SUBSCRIPTION_TERM_ONE_MONTH",
+        "freeTrial": True
+    })
+    lcs = api_call("GET", f"{base}/licenseConfigs").get("licenseConfigs", [])
+
+if lcs:
+    lc_name = lcs[0]["name"]
+    api_call("PATCH", f"{base}/userStores/default_user_store?updateMask=defaultLicenseConfig,enableLicenseAutoRegister,enableExpiredLicenseAutoUpdate", {
+        "defaultLicenseConfig": lc_name,
+        "enableLicenseAutoRegister": True,
+        "enableExpiredLicenseAutoUpdate": True
+    })
+    if username:
+        api_call("POST", f"{base}/userStores/default_user_store:batchUpdateUserLicenses", {
+            "inlineSource": {
+                "userLicenses": [{"userPrincipal": username, "licenseConfig": lc_name}],
+                "updateMask": "licenseConfig"
+            }
+        })
 
 # 1. Ensure Google Search grounding is enabled on default_assistant
 api_call("PATCH", f"{asst_base}?updateMask=webGroundingType,defaultWebGroundingToggleOff", {
@@ -1925,9 +1983,12 @@ agent_payload = {
     "displayName": "Pool Robot Innovations",
     "description": prompt_text,
     "lowCodeAgentDefinition": {
+        "rootAgentId": "root_agent",
+        "draftDisplayName": "Pool Robot Innovations",
+        "draftDescription": prompt_text,
         "nodes": [
             {
-                "id": "1",
+                "id": "root_agent",
                 "displayName": "Pool Robot Innovations",
                 "llmAgentNode": {
                     "description": prompt_text,
@@ -1961,20 +2022,14 @@ else:
 
 if agent_name:
     agent_id = agent_name.split("/")[-1]
-    api_call("POST", f"https://discoveryengine.googleapis.com/v1alpha/{agent_name}:deploy", {})
     # Execute preview queries via streamAssist so session and audit logs record the test run
     sess = api_call("POST", f"{eng_base}/sessions", {"displayName": "Pool Robot Innovations Preview"})
     sess_name = sess.get("name", "-")
-    v1_asst = f"https://discoveryengine.googleapis.com/v1/projects/{proj}/locations/global/collections/default_collection/engines/cymbal-pools-ge/assistants/default_assistant"
-    api_call("POST", f"{v1_asst}:streamAssist", {
+    api_call("POST", f"{asst_base}:streamAssist", {
         "query": {"text": starter_text},
         "session": sess_name,
         "toolsSpec": {"webGroundingSpec": {}},
         "agentsSpec": {"agentSpecs": [{"agentId": agent_id}]}
-    })
-    api_call("POST", f"{v1_asst}:streamAssist", {
-        "query": {"text": starter_text},
-        "toolsSpec": {"webGroundingSpec": {}}
     })
 
 print("Task 5 Pool Robot Innovations Agent Designer agent created and tested!")
@@ -1983,7 +2038,7 @@ python3 /tmp/task5_agent_designer.py`;
     return {
       script,
       summary:
-        'Create Pool Robot Innovations agent with lowCodeAgentDefinition and starter prompt in Gemini Enterprise and run preview query.',
+        'Ensure Gemini Enterprise license is assigned, create Pool Robot Innovations agent with lowCodeAgentDefinition, and run preview query.',
     };
   }
 
@@ -1996,9 +2051,11 @@ python3 /tmp/task5_agent_designer.py`;
     const script = `cat << 'EOF' > /tmp/task6_register_adk_agent.py
 import subprocess, json, urllib.request, urllib.error, os, re
 
+os.environ["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
 proj = "${proj}" or subprocess.check_output(["gcloud", "config", "get-value", "project"], text=True).strip()
 region = "${region}" or "us-central1"
-project_num = subprocess.check_output(["gcloud", "projects", "describe", proj, "--format=value(projectNumber)"], text=True).strip()
+username = "${credentials.username}" or subprocess.check_output(["gcloud", "config", "get-value", "account"], text=True).strip()
+project_num = subprocess.check_output(["gcloud", "projects", "describe", proj, "--format=value(projectNumber)", "--quiet"], text=True).strip()
 token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
 
 def api_call(method, url, body=None):
@@ -2016,15 +2073,37 @@ def api_call(method, url, body=None):
         print(f"HTTP {e.code} on {method} {url}: {err_text[:400]}")
         return {"error": e.code, "details": err_text}
 
-# 1. Retrieve OAuth Client ID & Secret
+# 1. Retrieve or create OAuth Client ID & Secret
 if os.path.exists("/tmp/oauth_client.json"):
     with open("/tmp/oauth_client.json") as f:
         oauth_info = json.load(f)
     client_id = oauth_info["clientId"]
     client_secret = oauth_info["clientSecret"]
 else:
-    brands = json.loads(subprocess.check_output(["gcloud", "iap", "oauth-brands", "list", f"--project={proj}", "--format=json"], text=True))
-    clients = json.loads(subprocess.check_output(["gcloud", "iap", "oauth-clients", "list", brands[0]["name"], f"--project={proj}", "--format=json"], text=True))
+    subprocess.run(["gcloud", "services", "enable", "iap.googleapis.com", f"--project={proj}", "--quiet"], check=False)
+    brands_out = subprocess.check_output(["gcloud", "iap", "oauth-brands", "list", f"--project={proj}", "--format=json", "--quiet"], text=True).strip()
+    brands = json.loads(brands_out) if brands_out else []
+    if not brands:
+        subprocess.run([
+            "gcloud", "iap", "oauth-brands", "create",
+            "--application_title=Cymbal Pools Auth",
+            f"--support_email={username}",
+            f"--project={proj}",
+            "--quiet"
+        ], check=True)
+        brands = json.loads(subprocess.check_output(["gcloud", "iap", "oauth-brands", "list", f"--project={proj}", "--format=json", "--quiet"], text=True).strip())
+    brand_name = brands[0]["name"]
+    clients_out = subprocess.check_output(["gcloud", "iap", "oauth-clients", "list", brand_name, f"--project={proj}", "--format=json", "--quiet"], text=True).strip()
+    clients = json.loads(clients_out) if clients_out else []
+    if not clients:
+        created_out = subprocess.check_output([
+            "gcloud", "iap", "oauth-clients", "create", brand_name,
+            "--display_name=Gemini Enterprise Client",
+            f"--project={proj}",
+            "--format=json",
+            "--quiet"
+        ], text=True).strip()
+        clients = [json.loads(created_out)]
     client_id = clients[0]["name"].split("/")[-1]
     client_secret = clients[0]["secret"]
 
@@ -2067,17 +2146,20 @@ res_auth = api_call("POST", f"{base_loc}/authorizations?authorizationId={auth_id
 if res_auth.get("error") == 409:
     api_call("PATCH", f"{base_loc}/authorizations/{auth_id}", auth_body)
 
-# 4. Locate the deployed Cymbal Pools Brand Voice Reasoning Engine
-re_url = f"https://{region}-aiplatform.googleapis.com/v1beta1/projects/{proj}/locations/{region}/reasoningEngines"
-re_resp = api_call("GET", re_url)
-re_list = (re_resp or {}).get("reasoningEngines", [])
+# 4. Locate the deployed Cymbal Pools Brand Voice Reasoning Engine across candidate regions
 re_resource = None
-for r in re_list:
-    if r.get("displayName") == "Cymbal Pools Brand Voice":
-        re_resource = r.get("name")
+for cand_reg in [region, "us-central1", "us-east4", "us-west1", "europe-west1"]:
+    re_url = f"https://{cand_reg}-aiplatform.googleapis.com/v1beta1/projects/{proj}/locations/{cand_reg}/reasoningEngines"
+    re_resp = api_call("GET", re_url)
+    re_list = (re_resp or {}).get("reasoningEngines", [])
+    for r in re_list:
+        if r.get("displayName") == "Cymbal Pools Brand Voice":
+            re_resource = r.get("name")
+            break
+    if not re_resource and re_list:
+        re_resource = re_list[0].get("name")
+    if re_resource:
         break
-if not re_resource and re_list:
-    re_resource = re_list[0].get("name")
 
 # 5. Grant Discovery Engine service agent access to Vertex AI
 sa = f"service-{project_num}@gcp-sa-discoveryengine.iam.gserviceaccount.com"
@@ -2263,6 +2345,11 @@ ${combinedText}
 9. **Gemini Enterprise & Discovery Engine (\`discoveryengine.googleapis.com/v1alpha\`)**:
    - **Mandatory Header**: Always include \`-H "X-Goog-User-Project: <project_id>"\` on ALL requests to \`discoveryengine.googleapis.com\` (Cloud Shell tokens otherwise bill project \`618104708054\` and fail with 403).
    - **Identity Provider**: \`PATCH .../locations/global/aclConfig\` with \`{"idpConfig": {"idpType": "GSUITE"}}\`.
+   - **Free Trial License Allocation (REQUIRED before creating any Agent Designer or ADK agents)**:
+     1. \`POST .../locations/global/licenseConfigs?licenseConfigId=search_and_assistant\` with \`{"licenseCount": 50, "subscriptionTier": "SUBSCRIPTION_TIER_SEARCH_AND_ASSISTANT", "subscriptionTerm": "SUBSCRIPTION_TERM_ONE_MONTH", "freeTrial": True}\` (do NOT pass \`startDate\`).
+     2. \`GET .../locations/global/licenseConfigs\` to read \`lc_name = licenseConfigs[0]["name"]\`.
+     3. \`PATCH .../locations/global/userStores/default_user_store?updateMask=defaultLicenseConfig,enableLicenseAutoRegister,enableExpiredLicenseAutoUpdate\` with \`{"defaultLicenseConfig": lc_name, "enableLicenseAutoRegister": True, "enableExpiredLicenseAutoUpdate": True}\`.
+     4. \`POST .../locations/global/userStores/default_user_store:batchUpdateUserLicenses\` with \`{"inlineSource": {"userLicenses": [{"userPrincipal": "<student_email>", "licenseConfig": lc_name}], "updateMask": "licenseConfig"}}\`.
    - **People via Custom Connector**: \`POST .../collections/default_collection/dataStores?dataStoreId=<id>\` with \`{"displayName": "<id>", "industryVertical": "GENERIC", "contentConfig": "THIRD_PARTY_IDENTITY_PEOPLE", "solutionTypes": ["SOLUTION_TYPE_SEARCH"], "aclEnabled": False}\`, then import NDJSON via \`POST .../dataStores/<id>/branches/0/documents:import\` with \`{"gcsSource": {"inputUris": ["gs://..."], "dataSchema": "document"}, "reconciliationMode": "FULL", "autoGenerateIds": False}\`.
    - **Google Workspace Connectors (\`google_drive\`, \`google_mail\`, \`google_calendar\`)**: \`POST .../locations/global:setUpDataConnector\` with \`{"collectionId": "<name>-1", "collectionDisplayName": "<name>", "dataConnector": {"dataSource": "<type>", "entities": [{"entityName": "<type>"}], "bapConfig": {"supportedConnectorModes": ["ACTIONS"], "enabledActions": [...]}}}\`. NEVER set \`actionConfig: {"createBapConnection": True}\` or \`connectorModes\` on first-party Workspace connectors (causes 500 INTERNAL).
      - \`google_drive\` actions: \`["copy_file", "create_file", "download_file_content", "get_file_metadata", "get_file_permissions", "list_recent_files", "list_shared_drives", "read_file_content", "search_files", "share_file", "trash_file", "update_file"]\`
@@ -2274,11 +2361,11 @@ ${combinedText}
      - Web Grounding: \`PATCH .../engines/<app_id>/assistants/default_assistant?updateMask=webGroundingType\` with \`{"webGroundingType": "WEB_GROUNDING_TYPE_ENTERPRISE_WEB_SEARCH"}\` or \`"WEB_GROUNDING_TYPE_GOOGLE_SEARCH"\`.
      - Logo URL: \`PATCH .../engines/<app_id>/widgetConfigs/default_search_widget_config?updateMask=uiBranding\` with \`{"uiBranding": {"logo": {"url": "<logo_url>"}}}\`.
    - **OAuth Authorizations & Agents (\`authorizations\` & \`assistants/default_assistant/agents\`)**:
-     - OAuth Brand & Client: \`gcloud iap oauth-brands create --application_title="<title>" --support_email="<student_email>"\` and \`gcloud iap oauth-clients create <brand> --display_name="<name>"\`.
+     - OAuth Brand & Client: Enable \`iap.googleapis.com\` alone (\`gcloud services enable iap.googleapis.com --project=<project> --quiet\`), then run \`gcloud iap oauth-brands create --application_title="<title>" --support_email="<student_email>" --quiet\` and \`gcloud iap oauth-clients create <brand> --display_name="<name>" --quiet\`.
      - Discovery Engine Authorization: \`POST .../v1alpha/projects/<project>/locations/global/authorizations?authorizationId=<auth_id>\` with \`{"name": "projects/<project_num>/locations/global/authorizations/<auth_id>", "displayName": "<display_name>", "serverSideOauth2": {"clientId": "<id>", "clientSecret": "<secret>", "authorizationUri": "<uri>", "tokenUri": "https://oauth2.googleapis.com/token"}}\`.
-     - Low-Code / Agent Designer Agent: \`POST .../v1alpha/projects/<project>/locations/global/collections/default_collection/engines/<app_id>/assistants/default_assistant/agents\` with \`{"displayName": "<name>", "description": "<desc>", "lowCodeAgentDefinition": {"nodes": [{"id": "1", "displayName": "<name>", "llmAgentNode": {"description": "<desc>", "instruction": "<instr>", "model": "gemini-2.5-flash"}}]}, "starterPrompts": [{"text": "<starter>"}], "sharingConfig": {"scope": "ALL_USERS"}}\`.
+     - Low-Code / Agent Designer Agent: \`POST .../v1alpha/projects/<project>/locations/global/collections/default_collection/engines/<app_id>/assistants/default_assistant/agents\` with \`{"displayName": "<name>", "description": "<desc>", "lowCodeAgentDefinition": {"rootAgentId": "root_agent", "draftDisplayName": "<name>", "draftDescription": "<desc>", "nodes": [{"id": "root_agent", "displayName": "<name>", "llmAgentNode": {"description": "<desc>", "instruction": "<instr>", "model": "gemini-2.5-flash"}}]}, "starterPrompts": [{"text": "<starter>"}], "sharingConfig": {"scope": "ALL_USERS"}}\`.
      - ADK Agent on Agent Engine: \`POST .../v1alpha/projects/<project>/locations/global/collections/default_collection/engines/<app_id>/assistants/default_assistant/agents\` with \`{"displayName": "<name>", "description": "<desc>", "adkAgentDefinition": {"provisionedReasoningEngine": {"reasoningEngine": "projects/<project_num>/locations/<region>/reasoningEngines/<re_id>"}}, "authorizationConfig": {"toolAuthorizations": ["projects/<project_num>/locations/global/authorizations/<auth_id>"]}, "sharingConfig": {"scope": "ALL_USERS"}}\`.
-     - Querying Agents via \`streamAssist\`: \`POST https://discoveryengine.googleapis.com/v1/projects/<project>/locations/global/collections/default_collection/engines/<app_id>/assistants/default_assistant:streamAssist\` with \`{"query": {"text": "<prompt>"}, "session": "<session_name>", "agentsSpec": {"agentSpecs": [{"agentId": "<agent_id>"}]}}\`.
+     - Querying Agents via \`streamAssist\`: \`POST https://discoveryengine.googleapis.com/v1alpha/projects/<project>/locations/global/collections/default_collection/engines/<app_id>/assistants/default_assistant:streamAssist\` with \`{"query": {"text": "<prompt>"}, "session": "<session_name>", "toolsSpec": {"webGroundingSpec": {}}, "agentsSpec": {"agentSpecs": [{"agentId": "<agent_id>"}]}}\`.
 10. **Model Armor (\`modelarmor.<loc>.rep.googleapis.com/v1\`)**:
     - Enable \`modelarmor.googleapis.com\` and \`dlp.googleapis.com\` first.
     - Use regional endpoint \`https://modelarmor.<loc>.rep.googleapis.com/v1/projects/<project>/locations/<loc>/templates?templateId=<id>\` (e.g. \`us\`).
