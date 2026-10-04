@@ -524,6 +524,7 @@ export async function synthesizeTaskShellScript(params: {
   );
   const lower = combinedText.toLowerCase();
 
+  const matchedFastPath = ((): { script: string; summary: string } | null => {
   // Fast-path 1: Vertex AI Search / Discovery Engine Data Store + Search App (e.g., Cymbal Paint & Paint Search)
   if (
     lower.includes('cymbal paint') &&
@@ -2221,6 +2222,13 @@ python3 /tmp/task7_communicate_agent.py`;
     };
   }
 
+  return null;
+  })();
+
+  if (matchedFastPath && !previousErrorMessage) {
+    return matchedFastPath;
+  }
+
   // Universal Gemini Task Command Synthesis for any lab task (combining prose, code edits, CLI commands, and GCP resource creation in a single stateful script)
   const prompt = `You are an expert Google Cloud Skills Boost (Qwiklabs) autonomous lab completion engineer.
 Synthesize a single, idempotent, stateful, non-interactive bash script (to be executed inside the student's Google Cloud Shell VM) that completes ALL requirements of Task #${task.number} ("${task.title}") so that Qwiklabs' "Check my progress" grader passes 100%.
@@ -2236,6 +2244,7 @@ ${allTasksSummary ? `\n### ALL LAB TASKS OVERVIEW (FOR CONTEXT ON DIRECTORY & EN
 ${workspaceSnapshot ? `\n### LIVE STUDENT CLOUD SHELL WORKSPACE SNAPSHOT (CURRENT FILES, STARTER CODE & CLI HELP)\n${workspaceSnapshot.slice(0, 48000)}\n` : ''}
 ${previousErrorMessage ? `\n### PREVIOUS "CHECK MY PROGRESS" GRADER FEEDBACK TO FIX (HIGHEST PRIORITY)\n"${previousErrorMessage}"\n` : ''}
 ${previousScriptOutput ? `\n### PREVIOUS SCRIPT STDOUT / STDERR\n${previousScriptOutput.slice(-6000)}\n` : ''}
+${matchedFastPath ? `\n### PREVIOUS ATTEMPT SCRIPT (ADAPT AND FIX THIS SCRIPT TO RESOLVE THE GRADER FEEDBACK ABOVE)\n\`\`\`bash\n${matchedFastPath.script}\n\`\`\`\n` : ''}
 
 ### CURRENT TASK TO COMPLETE (EXECUTE ALL STEPS IN ORDER)
 Task #${task.number}: ${task.title}
@@ -2273,43 +2282,98 @@ ${combinedText}
 10. **Model Armor (\`modelarmor.<loc>.rep.googleapis.com/v1\`)**:
     - Enable \`modelarmor.googleapis.com\` and \`dlp.googleapis.com\` first.
     - Use regional endpoint \`https://modelarmor.<loc>.rep.googleapis.com/v1/projects/<project>/locations/<loc>/templates?templateId=<id>\` (e.g. \`us\`).
-    - Attach templates to Gemini Enterprise Assistant via \`PATCH .../engines/<app_id>/assistants/default_assistant?updateMask=customerPolicy\` with \`customerPolicy.modelArmorConfig\` (\`userPromptTemplate\`, \`responseTemplate\`, \`failureMode: "FAIL_OPEN"\`).`;
+    - Attach templates to Gemini Enterprise Assistant via \`PATCH .../engines/<app_id>/assistants/default_assistant?updateMask=customerPolicy\` with \`customerPolicy.modelArmorConfig\` (\`userPromptTemplate\`, \`responseTemplate\`, \`failureMode: "FAIL_OPEN"\`).
+11. **Self-Healing REST API & CLI Schema Introspection for Unseen Labs**:
+    - Whenever calling any Google Cloud REST API (\`discoveryengine\`, \`aiplatform\`, \`modelarmor\`, \`run\`, \`compute\`, \`bigquery\`, \`iam\`, \`cloudresourcemanager\`, \`secretmanager\`, \`dlp\`, etc.), always print full HTTP error bodies (\`err.read().decode('utf-8')\`) so any 400 \`"Invalid JSON payload received. Unknown name..."\` or 403/404 details appear in \`PREVIOUS SCRIPT STDOUT / STDERR\` for automatic self-healing.
+    - If a REST field name is uncertain on an unseen service, your Python script can query \`https://<service>.googleapis.com/$discovery/rest?version=v1alpha\` (or \`v1\`) or run \`gcloud <group> --help\` to inspect valid schema fields dynamically.
+    - Make all resource creation calls idempotent: check if the resource already exists (\`GET\` / \`list\`) or handle \`HTTP 409 ALREADY_EXISTS\` by falling back to \`PATCH\` / \`GET\` rather than failing the script.`;
+
+  const parseSynthesisResponse = (rawText: string): { script?: string; summary?: string } | null => {
+    const cleaned = (rawText || '')
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+    if (!cleaned) return null;
+    try {
+      return JSON.parse(cleaned);
+    } catch {
+      // Repair truncated JSON responses by extracting the "script" string value directly
+      const scriptMatch = cleaned.match(/"script"\s*:\s*"((?:\\.|[^"\\])*)/);
+      const summaryMatch = cleaned.match(/"summary"\s*:\s*"((?:\\.|[^"\\])*)/);
+      if (scriptMatch && scriptMatch[1]) {
+        try {
+          const repairedScript = JSON.parse(`"${scriptMatch[1]}"`);
+          const repairedSummary =
+            summaryMatch && summaryMatch[1] ? JSON.parse(`"${summaryMatch[1]}"`) : undefined;
+          return { script: repairedScript, summary: repairedSummary };
+        } catch {
+          const fallbackUnescaped = scriptMatch[1]
+            .replace(/\\n/g, '\n')
+            .replace(/\\r/g, '\r')
+            .replace(/\\t/g, '\t')
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, '\\');
+          return { script: fallbackUnescaped };
+        }
+      }
+      return null;
+    }
+  };
 
   try {
     const ai = getGenAIClient();
-    const model = await resolveLatestGeminiModel();
-    const response = await ai.models.generateContent({
-      model,
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        temperature: 0.1,
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            script: {
-              type: Type.STRING,
-              description: 'Complete non-interactive bash script to execute in Cloud Shell.',
-            },
-            summary: {
-              type: Type.STRING,
-              description: 'One-sentence summary of what the synthesized script does.',
-            },
-          },
-          required: ['script', 'summary'],
-        },
-      },
-    });
+    const primaryModel = await resolveLatestGeminiModel();
+    const candidateModels = Array.from(
+      new Set([primaryModel, 'gemini-2.5-flash', 'gemini-3.1-pro-preview'])
+    );
 
-    const parsed = JSON.parse(response.text || '{}');
-    if (parsed.script && typeof parsed.script === 'string' && parsed.script.trim()) {
-      return {
-        script: transformAgyLaunchCommand(
-          interpolateLabVariables(parsed.script.trim(), credentials)
-        ),
-        summary: parsed.summary || `Synthesized Cloud Shell automation for Task #${task.number}`,
-      };
+    let lastErr: unknown = null;
+    for (const model of candidateModels) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const response = await ai.models.generateContent({
+            model,
+            contents: prompt,
+            config: {
+              responseMimeType: 'application/json',
+              temperature: 0.1,
+              maxOutputTokens: 16384,
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  script: {
+                    type: Type.STRING,
+                    description: 'Complete non-interactive bash script to execute in Cloud Shell.',
+                  },
+                  summary: {
+                    type: Type.STRING,
+                    description: 'One-sentence summary of what the synthesized script does.',
+                  },
+                },
+                required: ['script', 'summary'],
+              },
+            },
+          });
+
+          const parsed = parseSynthesisResponse(response.text || '');
+          if (parsed?.script && typeof parsed.script === 'string' && parsed.script.trim()) {
+            return {
+              script: transformAgyLaunchCommand(
+                interpolateLabVariables(parsed.script.trim(), credentials)
+              ),
+              summary:
+                parsed.summary || `Synthesized Cloud Shell automation for Task #${task.number}`,
+            };
+          }
+        } catch (innerErr) {
+          lastErr = innerErr;
+          if (attempt < 2) {
+            await new Promise((r) => setTimeout(r, 1500));
+          }
+        }
+      }
     }
+    if (lastErr) throw lastErr;
   } catch (err) {
     // Fallback: if local host ADC is expired, use the active Qwiklabs student's gcloud token & project Vertex AI endpoint
     if (credentials.username && proj) {
@@ -2337,14 +2401,15 @@ ${combinedText}
                 generationConfig: {
                   responseMimeType: 'application/json',
                   temperature: 0.1,
+                  maxOutputTokens: 16384,
                 },
               }),
             });
             if (vResp.ok) {
               const vData: any = await vResp.json();
               const text = vData?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-              const parsed = JSON.parse(text);
-              if (parsed.script && typeof parsed.script === 'string' && parsed.script.trim()) {
+              const parsed = parseSynthesisResponse(text);
+              if (parsed?.script && typeof parsed.script === 'string' && parsed.script.trim()) {
                 return {
                   script: transformAgyLaunchCommand(
                     interpolateLabVariables(parsed.script.trim(), credentials)
@@ -2363,6 +2428,6 @@ ${combinedText}
     console.warn('synthesizeTaskShellScript error:', err);
   }
 
-  return null;
+  return matchedFastPath;
 }
 
