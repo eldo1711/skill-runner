@@ -57,8 +57,8 @@ wssBridge.on('connection', (ws: WebSocket) => {
 app.get('/api/health', (_req, res) => {
   res.json({
     ok: true,
-    service: 'cloud-skills-lab-runner',
-    model: orchestrator.getState().activeModel || process.env.GEMINI_MODEL || 'gemini-3.8-flash',
+    service: 'skills-runner',
+    model: orchestrator.getState().activeModel || process.env.GEMINI_MODEL || 'gemini-3.5-flash',
     macBridgeConnected: orchestrator.getState().macBridgeConnected,
     status: orchestrator.getState().status,
   });
@@ -261,7 +261,7 @@ function resolvePublicBaseUrls(req: express.Request) {
   const isHttps = protoHeader.includes('https') || (req.headers.host || '').includes('.run.app');
   const httpProto = isHttps ? 'https' : 'http';
   const wsProto = isHttps ? 'wss' : 'ws';
-  const host = req.headers.host || 'cloud-skills-lab-runner-621653283297.us-central1.run.app';
+  const host = req.headers.host || 'skills-runner-621653283297.us-central1.run.app';
   return {
     httpBase: `${httpProto}://${host}`,
     wsUrl: `${wsProto}://${host}/ws-bridge`,
@@ -323,7 +323,7 @@ AGENT_FILE="$BRIDGE_DIR/macBridgeAgent.ts"
 PKG_FILE="$BRIDGE_DIR/package.json"
 
 if [ ! -f "$PKG_FILE" ]; then
-  echo '{"name":"skill-runner-bridge","private":true,"type":"module"}' > "$PKG_FILE"
+  echo '{"name":"skills-runner-bridge","private":true,"type":"module"}' > "$PKG_FILE"
 fi
 
 echo "⬇️  Saving latest On-Demand Mac Chrome Bridge to $AGENT_FILE..."
@@ -356,5 +356,5 @@ app.get('*', (req, res, next) => {
 
 const PORT = Number(process.env.PORT || 8080);
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Cloud Skills Lab Runner API & WS Server listening on http://0.0.0.0:${PORT}`);
+  console.log(`🚀 Skills Runner API & WS Server listening on http://0.0.0.0:${PORT}`);
 });

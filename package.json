@@ -1,8 +1,8 @@
 {
-  "name": "cloud-skills-lab-runner",
+  "name": "skills-runner",
   "version": "1.0.0",
   "private": true,
-  "description": "Autonomous Google Cloud Skills Boost Lab Runner powered by Gemini 3.5 Flash and Playwright",
+  "description": "Skills Runner — Autonomous Google Cloud Skills Boost & Antigravity Lab Agent powered by Gemini 3.5 Flash",
   "type": "module",
   "scripts": {
     "dev": "concurrently -k \"tsx watch server/index.ts\" \"vite\"",

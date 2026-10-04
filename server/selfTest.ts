@@ -14,7 +14,7 @@ import {
 } from './pageInspector.js';
 
 async function runVerificationTests() {
-  console.log('🧪 Running Cloud Skills Lab Runner Verification Suite...');
+  console.log('🧪 Running Skills Runner Verification Suite...');
 
   const latestModel = await resolveLatestGeminiModel();
   console.log(`✓ Resolved latest available Gemini model: ${latestModel}`);

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Cloud Skills Lab Runner — On-Demand Mac Chrome Bridge Agent (macBridgeAgent.ts)
+ * Skills Runner — On-Demand Mac Chrome Bridge Agent (macBridgeAgent.ts)
  *
  * - Zero local listening ports (outbound WebSocket connection to Cloud Run only)
  * - Zero background polling (only queries Google Chrome when explicitly requested by you in the UI,
@@ -23,9 +23,16 @@ import os from 'node:os';
 
 const execFileAsync = promisify(execFile);
 
+const cliUrlArg = process.argv
+  .find((a) => a.startsWith('--url='))
+  ?.slice('--url='.length)
+  .replace(/^http/i, 'ws')
+  .replace(/\/$/, '');
+
 const CLOUD_RUN_WS_URL =
   process.env.CLOUD_RUN_WS_URL ||
-  'wss://cloud-skills-lab-runner-621653283297.us-central1.run.app/ws-bridge';
+  (cliUrlArg ? (cliUrlArg.endsWith('/ws-bridge') ? cliUrlArg : `${cliUrlArg}/ws-bridge`) : '') ||
+  'wss://skills-runner-621653283297.us-central1.run.app/ws-bridge';
 
 const SNAPSHOT_DIR = path.join(os.homedir(), '.cloud-skills-lab-runner');
 const SNAPSHOT_HTML_PATH = path.join(SNAPSHOT_DIR, 'live_lab_snapshot.html');
@@ -732,7 +739,7 @@ async function pushTabsOnce() {
   try {
     const tabs = await listUserChromeTabs();
     ws.send(JSON.stringify({ type: 'tabs_push', tabs }));
-    console.log(`📋 Synced ${tabs.length} open Chrome tabs with Cloud Skills Lab Runner.`);
+    console.log(`📋 Synced ${tabs.length} open Chrome tabs with Skills Runner.`);
   } catch {
     // Ignore
   }
@@ -742,7 +749,7 @@ async function connectBridge() {
   if (shuttingDown) return;
   console.log(`🔗 Connecting On-Demand Mac Chrome Bridge to ${CLOUD_RUN_WS_URL}...`);
   console.log(
-    `ℹ️  Passive Mode: Zero background polling (only runs when you click an action in the Lab Runner UI).`
+    `ℹ️  Passive Mode: Zero background polling (only runs when you click an action in the Skills Runner UI).`
   );
   console.log(`ℹ️  Press Ctrl+C anytime (or click "Stop Mac Bridge" in the web UI) to exit.\n`);
 
@@ -769,7 +776,7 @@ async function connectBridge() {
         console.log(
           msg.type === 'superseded'
             ? '🛑 Another Mac Bridge instance connected to Cloud Run. Exiting this duplicate instance cleanly...'
-            : '🛑 Received stop signal from Cloud Skills Lab Runner UI. Exiting cleanly...'
+            : '🛑 Received stop signal from Skills Runner UI. Exiting cleanly...'
         );
         shuttingDown = true;
         try {

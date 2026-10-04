@@ -1,6 +1,6 @@
-# Cloud Skills Lab Runner — Universal Autonomous GCP & Antigravity Lab Agent
+# Skills Runner — Universal Autonomous GCP & Antigravity Lab Agent
 
-[![Cloud Run Deployed](https://img.shields.io/badge/Cloud_Run-Deployed-4285F4?logo=googlecloud&logoColor=white)](https://cloud-skills-lab-runner-621653283297.us-central1.run.app)
+[![Cloud Run Deployed](https://img.shields.io/badge/Cloud_Run-Deployed-4285F4?logo=googlecloud&logoColor=white)](https://skills-runner-621653283297.us-central1.run.app)
 [![Gemini 3.5 Flash](https://img.shields.io/badge/AI-Gemini_3.5_Flash-4285F4?logo=google&logoColor=white)](https://cloud.google.com/vertex-ai)
 [![Playwright](https://img.shields.io/badge/Automation-Playwright_%2B_Mac_Bridge-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev/)
 [![Node.js 22+](https://img.shields.io/badge/Runtime-Node.js_22+-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
@@ -8,12 +8,12 @@
 
 ## 1. Title & Executive Overview
 
-**Cloud Skills Lab Runner** (`skill-runner`) is a cloud-hosted web control center and hybrid browser/SSH automation agent that autonomously executes and verifies structured **Google Cloud Skills Boost (Qwiklabs)** and **Google Skills for Partners** hands-on labs and Challenge Labs.
+**Skills Runner** (`skills-runner`) is a cloud-hosted web control center and hybrid browser/SSH automation agent that autonomously executes and verifies structured **Google Cloud Skills Boost (Qwiklabs)** and **Google Skills for Partners** hands-on labs and Challenge Labs.
 
 ### Business Rationale, Public Sector Impact & Strategic Intent
 Public sector cloud engineers, state and local government technical architects, and delivery partners regularly complete complex hands-on Google Cloud labs spanning **Vertex AI**, **Agent Development Kit (ADK)**, **Discovery Engine**, **BigQuery**, **Terraform**, **Cloud Run**, and **Antigravity (`agy`)**. Manual execution of multi-step labs—especially when debugging grader rubrics, configuring isolated student environments, and reconciling multi-turn agent evaluations—consumes hours of engineering time.
 
-**Cloud Skills Lab Runner** pairs a stateless **Google Cloud Run** orchestration dashboard with a lightweight, on-demand **Mac Chrome Bridge** (`macBridgeAgent.ts`) that connects only when a lab is actively running. It introspects live student Cloud Shell workspaces, synthesizes stateful end-to-end bash and Python solutions powered by **`gemini-3.5-flash`**, executes them directly in the student's Cloud Shell VM or Incognito GCP Console, and closes the loop with a **3-attempt self-healing grader verification cycle** against Qwiklabs' **"Check my progress"** assessment API.
+**Skills Runner** pairs a stateless **Google Cloud Run** orchestration dashboard with a lightweight, on-demand **Mac Chrome Bridge** (`macBridgeAgent.ts`) that connects only when a lab is actively running. It introspects live student Cloud Shell workspaces, synthesizes stateful end-to-end bash and Python solutions powered by **`gemini-3.5-flash`**, executes them directly in the student's Cloud Shell VM or Incognito GCP Console, and closes the loop with a **3-attempt self-healing grader verification cycle** against Qwiklabs' **"Check my progress"** assessment API.
 
 ---
 
@@ -30,7 +30,7 @@ Public sector cloud engineers, state and local government technical architects, 
 
 ### Repository Directory Tree
 ```text
-skill-runner/
+skills-runner/
 ├── Dockerfile                     # Production Playwright + Node 22 container image for Cloud Run
 ├── .dockerignore
 ├── .gitignore
@@ -69,7 +69,7 @@ skill-runner/
    - If not running, operators can download a 1-click launcher (`Start-Mac-Chrome-Bridge.command`) that automatically saves and updates `~/Downloads/skill-runner/macBridgeAgent.ts` and connects over `wss://.../ws-bridge`.
    - Operates in **100% passive on-demand mode**—never touching Chrome or `osascript` in the background unless an action is explicitly triggered in the UI, preventing interference with SSO or Google login prompts.
 2. **Deep Shadow-DOM Lab Parser & Template Interpolation**:
-   - Pierces modern `<ql-lab-header>`, `<ql-code-block>`, `<ql-activity-tracking>`, and Declarative Shadow DOM templates.
+   - Pierces modern `<ql-lab-header>`, `<ql-copyable-input>`, `<ql-code-block>`, `<ql-activity-tracking>`, and Declarative Shadow DOM templates.
    - Automatically resolves Qwiklabs template expressions including piped default filters (`{{{ project_0.project_id | "your-gcp-project-id" }}}`, `{{{ project_0.default_region | "us-central1" }}}`) against live student credentials.
 3. **Live Student Cloud Shell Workspace Introspection**:
    - Before synthesizing commands for any task, [`inspectStudentCloudShellWorkspace`](server/nativeChromeBridge.ts) connects to the student's isolated Cloud Shell VM via `gcloud cloud-shell ssh` and inspects the directory tree (`~`), starter code (`.py`, `.json`, `.tf`, `.yaml`, `.env`, `requirements.txt`), and installed CLI `--help` output (such as `adk eval_set`).
@@ -83,13 +83,13 @@ skill-runner/
 
 ### Operator Workflow: Running Any New Lab End-to-End
 1. **Ensure the Mac Chrome Bridge is Active**:
-   - Open the [Cloud Skills Lab Runner Web UI](https://cloud-skills-lab-runner-621653283297.us-central1.run.app).
+   - Open the [Skills Runner Web UI](https://skills-runner-621653283297.us-central1.run.app).
    - If the top-right status badge shows **Mac Bridge Offline**, click **Download & Run Bridge** (or double-click `~/Downloads/skill-runner/Start-Mac-Chrome-Bridge.command`). The launcher automatically pulls the latest `macBridgeAgent.ts` from Cloud Run into `~/Downloads/skill-runner/` and connects over WebSocket.
 2. **Start Your Lab & Bind Chrome Tabs**:
-   - Open your Google Cloud Skills Boost / Google Skills for Partners lab in Chrome and click **Start Lab** (or click **Start Lab & Sign In** directly in the Lab Runner UI).
-   - Click **Sync Chrome Tabs** in the Lab Runner UI, select your active Lab tab from the dropdown, and click **Bind Selected Tabs** -> **Parse Lab**.
+   - Open your Google Cloud Skills Boost / Google Skills for Partners lab in Chrome and click **Start Lab** (or click **Start Lab & Sign In** directly in the Skills Runner UI).
+   - Click **Sync Chrome Tabs** in the Skills Runner UI, select your active Lab tab from the dropdown, and click **Bind Selected Windows & Sync Lab**.
 3. **Run Autonomous**:
-   - Click **Run Autonomous**. For each task in the lab, the runner automatically:
+   - Click **Start Autonomous Run**. For each task in the lab, Skills Runner automatically:
      1. Authenticates an isolated `gcloud` profile for the new `student-xx@qwiklabs.net` account and verifies `gcloud auth print-access-token --quiet`.
      2. SSHes into the student's live Cloud Shell VM to inspect existing files, starter code, and CLI `--help` output.
      3. Synthesizes and executes a single stateful bash script using **`gemini-3.5-flash`** covering both prose code edits and CLI commands.
@@ -122,7 +122,7 @@ skill-runner/
 | `/api/bridge/status` | `GET` | — | Returns `{ connected, wsUrl, httpBase }` for the local Mac Chrome Bridge |
 | `/api/bridge/stop` | `POST` | `{}` | Cleanly terminates the connected local `macBridgeAgent.ts` process |
 | `/api/bridge/macBridgeAgent.ts` | `GET` | — | Serves the latest `macBridgeAgent.ts` pre-configured with the Cloud Run `wss://` endpoint |
-| `/api/bridge/run-bridge.command` | `GET` | — | Downloads the 1-click macOS launcher (`Start-Mac-Chrome-Bridge.command`) that syncs into `~/Downloads/skill-runner/` |
+| `/api/bridge/Start-Mac-Chrome-Bridge.command` | `GET` | — | Downloads the 1-click macOS launcher (`Start-Mac-Chrome-Bridge.command`) that syncs into `~/Downloads/skill-runner/` |
 
 ---
 
@@ -147,7 +147,7 @@ export GEMINI_MODEL="gemini-3.5-flash"
 ```bash
 # 1. Clone the repository and install dependencies
 git clone https://github.com/eldo1711/skill-runner.git
-cd skill-runner
+cd skills-runner
 npm install
 
 # 2. Run the automated verification test suite
@@ -175,7 +175,7 @@ The repository includes [`deploy.sh`](deploy.sh) for repeatable one-command depl
 
 ### Direct `gcloud run deploy` Command
 ```bash
-gcloud run deploy cloud-skills-lab-runner \
+gcloud run deploy skills-runner \
   --source . \
   --project ice-cream-cone-452722 \
   --region us-central1 \
@@ -190,7 +190,7 @@ gcloud run deploy cloud-skills-lab-runner \
 
 ### Traffic Rollback Command
 ```bash
-gcloud run services update-traffic cloud-skills-lab-runner \
+gcloud run services update-traffic skills-runner \
   --region us-central1 \
   --to-revisions <REVISION_NAME>=100
 ```
@@ -199,7 +199,7 @@ gcloud run services update-traffic cloud-skills-lab-runner \
 
 ## 7. Security, Governance & Data Boundaries
 
-- **Strict Credential & Profile Isolation**: Temporary Qwiklabs student credentials (`student-xx@qwiklabs.net`) are isolated inside dedicated per-student `CLOUDSDK_CONFIG` directories (`~/.cloud-skills-lab-runner/gcloud-student-...`) and `--incognito` browser windows, preventing any cross-contamination with corporate or agency Google accounts.
+- **Strict Credential & Profile Isolation**: Temporary Qwiklabs student credentials (`student-xx@qwiklabs.net`) are isolated inside dedicated per-student `CLOUDSDK_CONFIG` directories and `--incognito` browser windows, preventing any cross-contamination with corporate or agency Google accounts.
 - **Zero Hardcoded Secrets**: No API keys, OAuth tokens, or service account keys are stored in source code or container images. Authentication relies on Cloud Run Workload Identity / ADC or runtime environment variables.
 - **Compliance & Public Sector Data Boundaries**: Designed strictly for ephemeral training and sandbox lab environments (`qwiklabs-gcp-*`). No regulated state agency records or protected workloads (HIPAA, FERPA, CJIS) are processed or persisted. The web interface meets modern accessibility contrast and keyboard navigation standards (ADA).
 - **On-Demand Local Bridge Governance**: The local Mac bridge (`macBridgeAgent.ts`) executes only when explicitly started by the user, performs zero background polling, and can be terminated immediately from the web UI (`Stop Mac Bridge`) or terminal (`Ctrl+C`).

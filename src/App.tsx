@@ -428,10 +428,10 @@ export default function App() {
             <div>
               <div className="flex items-center gap-2.5 flex-wrap">
                 <h1 className="text-base font-bold tracking-tight text-white">
-                  Cloud Skills Lab Runner
+                  Skills Runner
                 </h1>
                 <span className="px-2 py-0.5 text-[11px] font-semibold font-mono rounded-full bg-blue-500/15 text-blue-300 border border-blue-500/30">
-                  {state.activeModel || 'gemini-3.8-flash'}
+                  {state.activeModel || 'gemini-3.5-flash'}
                 </span>
                 <span
                   className="px-2 py-0.5 text-[11px] font-mono rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30"

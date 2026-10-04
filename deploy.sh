@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_ID="${PROJECT_ID:-ice-cream-cone-452722}"
 REGION="${REGION:-us-central1}"
-SERVICE_NAME="${SERVICE_NAME:-cloud-skills-lab-runner}"
+SERVICE_NAME="${SERVICE_NAME:-skills-runner}"
 ACCOUNT="${ACCOUNT:-admin@jtongarm.altostrat.com}"
 
 echo "🚀 Deploying ${SERVICE_NAME} to Cloud Run in ${PROJECT_ID} (${REGION}) as ${ACCOUNT}..."
