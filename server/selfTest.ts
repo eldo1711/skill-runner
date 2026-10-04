@@ -316,6 +316,66 @@ async function runVerificationTests() {
   ) {
     throw new Error('Task 3 synthesis did not produce expected Task 3 agent improvement script.');
   }
+  // 8. Verify Add Agents to Gemini Enterprise: Challenge Lab (GENAI149) fast-paths
+  const genai149Task2 = await synthesizeTaskShellScript({
+    labTitle: 'Add Agents to Gemini Enterprise: Challenge Lab',
+    task: {
+      number: 2,
+      title: 'Task 2. Create a No-Code ADK Agent and Deploy it to Agent Runtime',
+      hasCheckProgress: true,
+      checkProgressStepNumber: 1,
+      rawSectionText:
+        'Create a template folder for an agent named brand_voice and run adk deploy agent_engine --display_name "Cymbal Pools Brand Voice"',
+      steps: [],
+    },
+    credentials: modernParsed.credentials,
+  });
+  if (
+    !genai149Task2?.script.includes('Cymbal Pools Brand Voice') ||
+    !genai149Task2.script.includes('root_agent.yaml')
+  ) {
+    throw new Error('GENAI149 Task 2 synthesis failed.');
+  }
+
+  const genai149Task5 = await synthesizeTaskShellScript({
+    labTitle: 'Add Agents to Gemini Enterprise: Challenge Lab',
+    task: {
+      number: 5,
+      title: 'Task 5. Add a No-Code Agent with Agent Designer',
+      hasCheckProgress: true,
+      checkProgressStepNumber: 4,
+      rawSectionText:
+        'Create Pool Robot Innovations agent with Agent Designer in cymbal-pools-ge',
+      steps: [],
+    },
+    credentials: modernParsed.credentials,
+  });
+  if (
+    !genai149Task5?.script.includes('lowCodeAgentDefinition') ||
+    !genai149Task5.script.includes('Pool Robot Innovations')
+  ) {
+    throw new Error('GENAI149 Task 5 synthesis failed.');
+  }
+
+  const genai149Task6 = await synthesizeTaskShellScript({
+    labTitle: 'Add Agents to Gemini Enterprise: Challenge Lab',
+    task: {
+      number: 6,
+      title: 'Task 6. Add the ADK Agent Deployed to Agent Runtime to Gemini Enterprise',
+      hasCheckProgress: true,
+      checkProgressStepNumber: 5,
+      rawSectionText:
+        'Run construct_auth_uri.py, create Brand Voice Auth authorization, and register Brand Voice Agent',
+      steps: [],
+    },
+    credentials: modernParsed.credentials,
+  });
+  if (
+    !genai149Task6?.script.includes('adkAgentDefinition') ||
+    !genai149Task6.script.includes('brand-voice-auth')
+  ) {
+    throw new Error('GENAI149 Task 6 synthesis failed.');
+  }
   console.log('✓ Task-level script synthesis & piped variable interpolation verified.');
 
   await browser.close();

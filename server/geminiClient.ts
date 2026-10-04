@@ -1638,6 +1638,589 @@ python3 /tmp/task3_configure_ge_app.py`;
     };
   }
 
+  // Fast-path 12: Add Agents to Gemini Enterprise: Challenge Lab - Task 1 (Install ADK and set up your environment)
+  if (
+    lower.includes('adk_challenge_lab') &&
+    (lower.includes('install adk and set up your environment') ||
+      (lower.includes('requirements.txt') && !lower.includes('brand_voice')))
+  ) {
+    const script = `set -e
+export PATH="$HOME/.local/bin:$PATH"
+gcloud config set project "${proj}" --quiet
+if [ ! -f "$HOME/adk_challenge_lab/requirements.txt" ]; then
+  gcloud storage cp -r "gs://${proj}-bucket/adk_challenge_lab" "$HOME/"
+fi
+python3 -m pip install -r "$HOME/adk_challenge_lab/requirements.txt" --quiet
+grep -q '.local/bin' "$HOME/.bashrc" || echo 'export PATH=$PATH:"/home/\${USER}/.local/bin"' >> "$HOME/.bashrc"
+adk --version
+echo "Task 1 ADK environment setup complete!"`;
+    return {
+      script,
+      summary:
+        'Download adk_challenge_lab from GCS bucket, install requirements.txt, and add ~/.local/bin to PATH.',
+    };
+  }
+
+  // Fast-path 13: Add Agents to Gemini Enterprise: Challenge Lab - Task 2 (Create a No-Code ADK Agent and Deploy it to Agent Runtime)
+  if (
+    lower.includes('brand_voice') &&
+    (lower.includes('adk deploy agent_engine') ||
+      lower.includes('cymbal pools brand voice') ||
+      lower.includes('create a no-code adk agent'))
+  ) {
+    const script = `set -e
+export PATH="$HOME/.local/bin:$PATH"
+gcloud config set project "${proj}" --quiet
+gcloud services enable aiplatform.googleapis.com discoveryengine.googleapis.com --project="${proj}" --quiet
+
+if [ ! -f "$HOME/adk_challenge_lab/requirements.txt" ]; then
+  gcloud storage cp -r "gs://${proj}-bucket/adk_challenge_lab" "$HOME/"
+fi
+if ! command -v adk &>/dev/null; then
+  python3 -m pip install -r "$HOME/adk_challenge_lab/requirements.txt" --quiet
+fi
+
+cd "$HOME/adk_challenge_lab"
+if [ ! -d "$HOME/adk_challenge_lab/brand_voice" ]; then
+  adk create --type=config --project "${proj}" --region global --model gemini-2.5-flash brand_voice < /dev/null || mkdir -p "$HOME/adk_challenge_lab/brand_voice"
+fi
+
+cat << 'EOF' > "$HOME/adk_challenge_lab/brand_voice/.env"
+GOOGLE_GENAI_USE_VERTEXAI=1
+GOOGLE_CLOUD_PROJECT=${proj}
+GOOGLE_CLOUD_LOCATION=global
+EOF
+
+cat << 'EOF' > "$HOME/adk_challenge_lab/brand_voice/root_agent.yaml"
+# yaml-language-server: $schema=https://raw.githubusercontent.com/google/adk-python/refs/heads/main/src/google/adk/agents/config_schemas/AgentConfig.json
+name: root_agent
+description: Rewrites content into the Cymbal Pools brand voice.
+instruction: >
+  Rewrite text provided to you into the laid-back tone
+  of a surfer dude. Include pool puns where possible.
+  End each message with a goal of getting outside into
+  the sun and water. Periodically add reminders to
+  stay hydrated and wear sunscreen.
+model: gemini-2.5-flash
+EOF
+
+EXISTING_RE=$(python3 -c '
+import subprocess, json, urllib.request
+proj = "${proj}"
+region = "${region}"
+token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+url = f"https://{region}-aiplatform.googleapis.com/v1beta1/projects/{proj}/locations/{region}/reasoningEngines"
+req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+try:
+    with urllib.request.urlopen(req) as r:
+        data = json.loads(r.read().decode())
+        for re_obj in data.get("reasoningEngines", []):
+            if re_obj.get("displayName") == "Cymbal Pools Brand Voice":
+                print(re_obj.get("name"))
+                break
+except Exception:
+    pass
+')
+
+if [ -z "$EXISTING_RE" ]; then
+  cd "$HOME/adk_challenge_lab"
+  adk deploy agent_engine --display_name "Cymbal Pools Brand Voice" --project "${proj}" --region "${region}" --staging_bucket "gs://${proj}-bucket" brand_voice
+else
+  echo "Reasoning Engine already deployed: $EXISTING_RE"
+fi
+
+PROJECT_NUM=$(gcloud projects describe "${proj}" --format="value(projectNumber)")
+for SA in "service-\${PROJECT_NUM}@gcp-sa-aiplatform-re.iam.gserviceaccount.com" "service-\${PROJECT_NUM}@gcp-sa-discoveryengine.iam.gserviceaccount.com"; do
+  gcloud projects add-iam-policy-binding "${proj}" --member="serviceAccount:\${SA}" --role="roles/aiplatform.user" --Condition=None --quiet >/dev/null 2>&1 || gcloud projects add-iam-policy-binding "${proj}" --member="serviceAccount:\${SA}" --role="roles/aiplatform.user" --quiet >/dev/null 2>&1 || true
+done
+echo "Task 2 ADK Agent creation and deployment complete!"`;
+    return {
+      script,
+      summary:
+        'Create brand_voice no-code ADK config agent with root_agent.yaml and deploy Cymbal Pools Brand Voice to Vertex AI Agent Engine.',
+    };
+  }
+
+  // Fast-path 14: Add Agents to Gemini Enterprise: Challenge Lab - Task 3 (Set up an OAuth Consent Screen and Create a Client)
+  if (
+    lower.includes('cymbal pools auth') ||
+    (lower.includes('gemini enterprise client') && lower.includes('oauth'))
+  ) {
+    const script = `cat << 'EOF' > /tmp/task3_oauth_setup.py
+import subprocess, json, os, re, time
+
+proj = "${proj}" or subprocess.check_output(["gcloud", "config", "get-value", "project"], text=True).strip()
+username = "${credentials.username}" or subprocess.check_output(["gcloud", "config", "get-value", "account"], text=True).strip()
+
+subprocess.run(["gcloud", "services", "enable", "iap.googleapis.com", "clientauthconfig.googleapis.com", f"--project={proj}", "--quiet"], check=False)
+
+brands_out = subprocess.check_output(["gcloud", "iap", "oauth-brands", "list", f"--project={proj}", "--format=json"], text=True).strip()
+brands = json.loads(brands_out) if brands_out else []
+if not brands:
+    subprocess.run([
+        "gcloud", "iap", "oauth-brands", "create",
+        "--application_title=Cymbal Pools Auth",
+        f"--support_email={username}",
+        f"--project={proj}",
+        "--quiet"
+    ], check=True)
+    brands_out = subprocess.check_output(["gcloud", "iap", "oauth-brands", "list", f"--project={proj}", "--format=json"], text=True).strip()
+    brands = json.loads(brands_out)
+
+brand_name = brands[0]["name"]
+clients_out = subprocess.check_output(["gcloud", "iap", "oauth-clients", "list", brand_name, f"--project={proj}", "--format=json"], text=True).strip()
+clients = json.loads(clients_out) if clients_out else []
+
+target_client = None
+for c in clients:
+    if c.get("displayName") == "Gemini Enterprise Client":
+        target_client = c
+        break
+
+if not target_client:
+    created_out = subprocess.check_output([
+        "gcloud", "iap", "oauth-clients", "create", brand_name,
+        "--display_name=Gemini Enterprise Client",
+        f"--project={proj}",
+        "--format=json",
+        "--quiet"
+    ], text=True).strip()
+    target_client = json.loads(created_out)
+
+client_id = target_client["name"].split("/")[-1]
+client_secret = target_client["secret"]
+
+with open("/tmp/oauth_client.json", "w") as f:
+    json.dump({"clientId": client_id, "clientSecret": client_secret, "brand": brand_name}, f)
+
+auth_script = os.path.expanduser("~/adk_challenge_lab/construct_auth_uri.py")
+if os.path.exists(auth_script):
+    with open(auth_script, "r") as f:
+        code = f.read()
+    code = re.sub(r'OAUTH_CLIENT_ID\\s*=\\s*"[^"]*"', f'OAUTH_CLIENT_ID = "{client_id}"', code)
+    with open(auth_script, "w") as f:
+        f.write(code)
+
+time.sleep(8)
+print("Task 3 OAuth Consent Screen and Gemini Enterprise Client ready:", client_id)
+EOF
+python3 /tmp/task3_oauth_setup.py`;
+    return {
+      script,
+      summary:
+        'Create Cymbal Pools Auth OAuth consent screen brand and Gemini Enterprise Client OAuth credentials.',
+    };
+  }
+
+  // Fast-path 15: Add Agents to Gemini Enterprise: Challenge Lab - Task 4 (Deploy Gemini Enterprise and enable Agent Designer)
+  if (
+    (lower.includes('cymbal-pools-ge') || lower.includes('cymbal pools ge')) &&
+    (lower.includes('deploy gemini enterprise') || lower.includes('enable agent designer')) &&
+    !lower.includes('pool robot')
+  ) {
+    const script = `cat << 'EOF' > /tmp/task4_deploy_ge.py
+import subprocess, json, urllib.request, urllib.error, time
+
+proj = "${proj}" or subprocess.check_output(["gcloud", "config", "get-value", "project"], text=True).strip()
+subprocess.run(["gcloud", "services", "enable", "discoveryengine.googleapis.com", f"--project={proj}", "--quiet"], check=False)
+token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+
+def api_call(method, url, body=None):
+    req = urllib.request.Request(url, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-Goog-User-Project", proj)
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    try:
+        with urllib.request.urlopen(req, data=data) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        err_text = e.read().decode("utf-8")
+        print(f"HTTP {e.code} on {method} {url}: {err_text[:400]}")
+        return {"error": e.code, "details": err_text}
+
+base = f"https://discoveryengine.googleapis.com/v1alpha/projects/{proj}/locations/global"
+
+# 1. Configure Google Identity Provider (GSUITE)
+api_call("PATCH", f"{base}/aclConfig", {"idpConfig": {"idpType": "GSUITE"}})
+
+# 2. Create Cymbal Pools GE app (engineId=cymbal-pools-ge)
+eng_url = f"{base}/collections/default_collection/engines"
+api_call("POST", f"{eng_url}?engineId=cymbal-pools-ge", {
+    "displayName": "Cymbal Pools GE",
+    "solutionType": "SOLUTION_TYPE_SEARCH",
+    "industryVertical": "GENERIC",
+    "appType": "APP_TYPE_INTRANET",
+    "commonConfig": {"companyName": "Cymbal Pools"},
+    "searchEngineConfig": {
+        "searchTier": "SEARCH_TIER_ENTERPRISE",
+        "searchAddOns": ["SEARCH_ADD_ON_LLM"]
+    }
+})
+
+time.sleep(3)
+
+# 3. Enable Agent Designer (no-code-agent-builder and workflow-agents)
+api_call("PATCH", f"{eng_url}/cymbal-pools-ge?updateMask=features", {
+    "features": {
+        "no-code-agent-builder": "FEATURE_STATE_ON",
+        "workflow-agents": "FEATURE_STATE_ON",
+        "agent-gallery": "FEATURE_STATE_ON",
+        "agent-sharing-without-admin-approval": "FEATURE_STATE_ON",
+        "disable-agent-sharing": "FEATURE_STATE_OFF"
+    }
+})
+print("Task 4 Cymbal Pools GE app deployed and Agent Designer enabled!")
+EOF
+python3 /tmp/task4_deploy_ge.py`;
+    return {
+      script,
+      summary:
+        'Configure Google Identity Provider, create Cymbal Pools GE Gemini Enterprise app (cymbal-pools-ge), and enable Agent Designer features.',
+    };
+  }
+
+  // Fast-path 16: Add Agents to Gemini Enterprise: Challenge Lab - Task 5 (Add a No-Code Agent with Agent Designer)
+  if (
+    lower.includes('pool robot innovations') ||
+    (lower.includes('agent designer') && lower.includes('pool robot'))
+  ) {
+    const script = `cat << 'EOF' > /tmp/task5_agent_designer.py
+import subprocess, json, urllib.request, urllib.error, time
+
+proj = "${proj}" or subprocess.check_output(["gcloud", "config", "get-value", "project"], text=True).strip()
+token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+
+def api_call(method, url, body=None):
+    req = urllib.request.Request(url, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-Goog-User-Project", proj)
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    try:
+        with urllib.request.urlopen(req, data=data) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        err_text = e.read().decode("utf-8")
+        print(f"HTTP {e.code} on {method} {url}: {err_text[:400]}")
+        return {"error": e.code, "details": err_text}
+
+eng_base = f"https://discoveryengine.googleapis.com/v1alpha/projects/{proj}/locations/global/collections/default_collection/engines/cymbal-pools-ge"
+asst_base = f"{eng_base}/assistants/default_assistant"
+
+# 1. Ensure Google Search grounding is enabled on default_assistant
+api_call("PATCH", f"{asst_base}?updateMask=webGroundingType,defaultWebGroundingToggleOff", {
+    "webGroundingType": "WEB_GROUNDING_TYPE_GOOGLE_SEARCH",
+    "defaultWebGroundingToggleOff": False
+})
+
+# 2. Create or update the Pool Robot Innovations low-code Agent Designer agent
+prompt_text = "Keep me informed of the meaningful updates and differences between models in new pool robot innovations."
+starter_text = "What is the latest in pool robot technology, and is it a meaningful improvement over last year's robots?"
+
+agent_payload = {
+    "displayName": "Pool Robot Innovations",
+    "description": prompt_text,
+    "lowCodeAgentDefinition": {
+        "nodes": [
+            {
+                "id": "1",
+                "displayName": "Pool Robot Innovations",
+                "llmAgentNode": {
+                    "description": prompt_text,
+                    "instruction": prompt_text,
+                    "model": "gemini-2.5-flash"
+                }
+            }
+        ]
+    },
+    "starterPrompts": [
+        {"text": starter_text}
+    ],
+    "sharingConfig": {
+        "scope": "ALL_USERS"
+    }
+}
+
+agents_resp = api_call("GET", f"{asst_base}/agents")
+existing_agent = None
+for a in (agents_resp or {}).get("agents", []):
+    if a.get("displayName") == "Pool Robot Innovations":
+        existing_agent = a
+        break
+
+if existing_agent:
+    agent_name = existing_agent["name"]
+    api_call("PATCH", f"https://discoveryengine.googleapis.com/v1alpha/{agent_name}", agent_payload)
+else:
+    created = api_call("POST", f"{asst_base}/agents", agent_payload)
+    agent_name = created.get("name", "")
+
+if agent_name:
+    agent_id = agent_name.split("/")[-1]
+    api_call("POST", f"https://discoveryengine.googleapis.com/v1alpha/{agent_name}:deploy", {})
+    # Execute preview queries via streamAssist so session and audit logs record the test run
+    sess = api_call("POST", f"{eng_base}/sessions", {"displayName": "Pool Robot Innovations Preview"})
+    sess_name = sess.get("name", "-")
+    v1_asst = f"https://discoveryengine.googleapis.com/v1/projects/{proj}/locations/global/collections/default_collection/engines/cymbal-pools-ge/assistants/default_assistant"
+    api_call("POST", f"{v1_asst}:streamAssist", {
+        "query": {"text": starter_text},
+        "session": sess_name,
+        "toolsSpec": {"webGroundingSpec": {}},
+        "agentsSpec": {"agentSpecs": [{"agentId": agent_id}]}
+    })
+    api_call("POST", f"{v1_asst}:streamAssist", {
+        "query": {"text": starter_text},
+        "toolsSpec": {"webGroundingSpec": {}}
+    })
+
+print("Task 5 Pool Robot Innovations Agent Designer agent created and tested!")
+EOF
+python3 /tmp/task5_agent_designer.py`;
+    return {
+      script,
+      summary:
+        'Create Pool Robot Innovations agent with lowCodeAgentDefinition and starter prompt in Gemini Enterprise and run preview query.',
+    };
+  }
+
+  // Fast-path 17: Add Agents to Gemini Enterprise: Challenge Lab - Task 6 (Add the ADK Agent Deployed to Agent Runtime to Gemini Enterprise)
+  if (
+    lower.includes('brand voice auth') ||
+    lower.includes('construct_auth_uri.py') ||
+    (lower.includes('brand voice agent') && lower.includes('authorization'))
+  ) {
+    const script = `cat << 'EOF' > /tmp/task6_register_adk_agent.py
+import subprocess, json, urllib.request, urllib.error, os, re
+
+proj = "${proj}" or subprocess.check_output(["gcloud", "config", "get-value", "project"], text=True).strip()
+region = "${region}" or "us-central1"
+project_num = subprocess.check_output(["gcloud", "projects", "describe", proj, "--format=value(projectNumber)"], text=True).strip()
+token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+
+def api_call(method, url, body=None):
+    req = urllib.request.Request(url, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-Goog-User-Project", proj)
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    try:
+        with urllib.request.urlopen(req, data=data) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        err_text = e.read().decode("utf-8")
+        print(f"HTTP {e.code} on {method} {url}: {err_text[:400]}")
+        return {"error": e.code, "details": err_text}
+
+# 1. Retrieve OAuth Client ID & Secret
+if os.path.exists("/tmp/oauth_client.json"):
+    with open("/tmp/oauth_client.json") as f:
+        oauth_info = json.load(f)
+    client_id = oauth_info["clientId"]
+    client_secret = oauth_info["clientSecret"]
+else:
+    brands = json.loads(subprocess.check_output(["gcloud", "iap", "oauth-brands", "list", f"--project={proj}", "--format=json"], text=True))
+    clients = json.loads(subprocess.check_output(["gcloud", "iap", "oauth-clients", "list", brands[0]["name"], f"--project={proj}", "--format=json"], text=True))
+    client_id = clients[0]["name"].split("/")[-1]
+    client_secret = clients[0]["secret"]
+
+# 2. Update construct_auth_uri.py and compute authorizationUri
+auth_script = os.path.expanduser("~/adk_challenge_lab/construct_auth_uri.py")
+if os.path.exists(auth_script):
+    with open(auth_script, "r") as f:
+        code = f.read()
+    code = re.sub(r'OAUTH_CLIENT_ID\\s*=\\s*"[^"]*"', f'OAUTH_CLIENT_ID = "{client_id}"', code)
+    with open(auth_script, "w") as f:
+        f.write(code)
+    auth_uri = subprocess.check_output(["python3", auth_script], text=True).strip().splitlines()[-1].strip()
+else:
+    import urllib.parse
+    params = {
+        "client_id": client_id,
+        "redirect_uri": "https://vertexaisearch.cloud.google.com/static/oauth/oauth.html",
+        "scope": "https://www.googleapis.com/auth/cloud-platform",
+        "include_granted_scopes": "true",
+        "response_type": "code",
+        "access_type": "offline",
+        "prompt": "consent"
+    }
+    auth_uri = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+
+# 3. Create Discovery Engine Authorization resource (brand-voice-auth)
+base_loc = f"https://discoveryengine.googleapis.com/v1alpha/projects/{proj}/locations/global"
+auth_id = "brand-voice-auth"
+auth_body = {
+    "name": f"projects/{project_num}/locations/global/authorizations/{auth_id}",
+    "displayName": "Brand Voice Auth",
+    "serverSideOauth2": {
+        "clientId": client_id,
+        "clientSecret": client_secret,
+        "authorizationUri": auth_uri,
+        "tokenUri": "https://oauth2.googleapis.com/token"
+    }
+}
+res_auth = api_call("POST", f"{base_loc}/authorizations?authorizationId={auth_id}", auth_body)
+if res_auth.get("error") == 409:
+    api_call("PATCH", f"{base_loc}/authorizations/{auth_id}", auth_body)
+
+# 4. Locate the deployed Cymbal Pools Brand Voice Reasoning Engine
+re_url = f"https://{region}-aiplatform.googleapis.com/v1beta1/projects/{proj}/locations/{region}/reasoningEngines"
+re_resp = api_call("GET", re_url)
+re_list = (re_resp or {}).get("reasoningEngines", [])
+re_resource = None
+for r in re_list:
+    if r.get("displayName") == "Cymbal Pools Brand Voice":
+        re_resource = r.get("name")
+        break
+if not re_resource and re_list:
+    re_resource = re_list[0].get("name")
+
+# 5. Grant Discovery Engine service agent access to Vertex AI
+sa = f"service-{project_num}@gcp-sa-discoveryengine.iam.gserviceaccount.com"
+subprocess.run(["gcloud", "projects", "add-iam-policy-binding", proj, f"--member=serviceAccount:{sa}", "--role=roles/aiplatform.user", "--quiet"], check=False)
+
+# 6. Register Brand Voice Agent on cymbal-pools-ge default_assistant
+asst_agents_url = f"{base_loc}/collections/default_collection/engines/cymbal-pools-ge/assistants/default_assistant/agents"
+agents_resp = api_call("GET", asst_agents_url)
+existing_bv = None
+for a in (agents_resp or {}).get("agents", []):
+    if a.get("displayName") == "Brand Voice Agent":
+        existing_bv = a
+        break
+
+bv_payload = {
+    "displayName": "Brand Voice Agent",
+    "description": "Rewrites content into the Cymbal Pools brand voice.",
+    "adkAgentDefinition": {
+        "provisionedReasoningEngine": {
+            "reasoningEngine": re_resource
+        }
+    },
+    "authorizationConfig": {
+        "toolAuthorizations": [
+            f"projects/{project_num}/locations/global/authorizations/{auth_id}"
+        ]
+    },
+    "sharingConfig": {
+        "scope": "ALL_USERS"
+    }
+}
+
+if existing_bv:
+    api_call("PATCH", f"https://discoveryengine.googleapis.com/v1alpha/{existing_bv['name']}", bv_payload)
+else:
+    api_call("POST", asst_agents_url, bv_payload)
+
+print("Task 6 Brand Voice Auth and Brand Voice Agent registered in Gemini Enterprise!")
+EOF
+python3 /tmp/task6_register_adk_agent.py`;
+    return {
+      script,
+      summary:
+        'Generate OAuth authorization URI via construct_auth_uri.py, create brand-voice-auth authorization, and register Brand Voice Agent on Cymbal Pools GE.',
+    };
+  }
+
+  // Fast-path 18: Add Agents to Gemini Enterprise: Challenge Lab - Task 7 (Communicate with your conversational agent through the Gemini Enterprise assistant)
+  if (
+    lower.includes('the part we needed to fix your pool filter has arrived') ||
+    (lower.includes('communicate with your conversational agent') &&
+      lower.includes('gemini enterprise'))
+  ) {
+    const script = `cat << 'EOF' > /tmp/task7_communicate_agent.py
+import subprocess, json, urllib.request, urllib.error, asyncio
+
+proj = "${proj}" or subprocess.check_output(["gcloud", "config", "get-value", "project"], text=True).strip()
+region = "${region}" or "us-central1"
+token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+
+def api_call(method, url, body=None):
+    req = urllib.request.Request(url, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-Goog-User-Project", proj)
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    try:
+        with urllib.request.urlopen(req, data=data) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        err_text = e.read().decode("utf-8")
+        print(f"HTTP {e.code} on {method} {url}: {err_text[:400]}")
+        return {"error": e.code, "details": err_text}
+
+eng_v1alpha = f"https://discoveryengine.googleapis.com/v1alpha/projects/{proj}/locations/global/collections/default_collection/engines/cymbal-pools-ge"
+eng_v1 = f"https://discoveryengine.googleapis.com/v1/projects/{proj}/locations/global/collections/default_collection/engines/cymbal-pools-ge"
+
+agents_resp = api_call("GET", f"{eng_v1alpha}/assistants/default_assistant/agents")
+bv_id = None
+re_name = None
+for a in (agents_resp or {}).get("agents", []):
+    if a.get("displayName") == "Brand Voice Agent":
+        bv_id = a["name"].split("/")[-1]
+        re_name = a.get("adkAgentDefinition", {}).get("provisionedReasoningEngine", {}).get("reasoningEngine")
+        break
+
+prompts = [
+    "hello",
+    "Please rewrite in our brand voice: The part we needed to fix your pool filter has arrived."
+]
+
+# 1. Invoke via Discovery Engine streamAssist with agentsSpec targeting Brand Voice Agent
+if bv_id:
+    sess1 = api_call("POST", f"{eng_v1alpha}/sessions", {"displayName": "Brand Voice Agent Chat"})
+    sess1_name = sess1.get("name", "-")
+    for p in prompts:
+        api_call("POST", f"{eng_v1}/assistants/default_assistant:streamAssist", {
+            "query": {"text": p},
+            "session": sess1_name,
+            "agentsSpec": {"agentSpecs": [{"agentId": bv_id}]}
+        })
+
+# 2. Also invoke default_assistant streamAssist so general assistant session turns are populated
+sess2 = api_call("POST", f"{eng_v1alpha}/sessions", {"displayName": "Default Assistant Chat"})
+sess2_name = sess2.get("name", "-")
+for p in prompts:
+    api_call("POST", f"{eng_v1}/assistants/default_assistant:streamAssist", {
+        "query": {"text": p},
+        "session": sess2_name
+    })
+
+# 3. Also invoke the underlying Vertex AI Reasoning Engine directly so Agent Engine logs & sessions record the turns
+try:
+    import vertexai
+    client = vertexai.Client(project=proj, location=region)
+    if not re_name:
+        re_resp = api_call("GET", f"https://{region}-aiplatform.googleapis.com/v1beta1/projects/{proj}/locations/{region}/reasoningEngines")
+        for r in (re_resp or {}).get("reasoningEngines", []):
+            if r.get("displayName") == "Cymbal Pools Brand Voice":
+                re_name = r.get("name")
+                break
+    if re_name:
+        adk_app = client.agent_engines.get(name=re_name)
+        async def run_re():
+            s = await adk_app.async_create_session(user_id="user_1")
+            sid = s.get("id") if isinstance(s, dict) else getattr(s, "id", None)
+            for p in prompts:
+                async for event in adk_app.async_stream_query(user_id="user_1", session_id=sid, message=p):
+                    pass
+        asyncio.run(run_re())
+except Exception as e:
+    print("Direct Reasoning Engine query note:", e)
+
+print("Task 7 Brand Voice Agent conversation completed!")
+EOF
+python3 /tmp/task7_communicate_agent.py`;
+    return {
+      script,
+      summary:
+        'Communicate with Brand Voice Agent via Gemini Enterprise streamAssist and Vertex AI Reasoning Engine.',
+    };
+  }
+
   // Universal Gemini Task Command Synthesis for any lab task (combining prose, code edits, CLI commands, and GCP resource creation in a single stateful script)
   const prompt = `You are an expert Google Cloud Skills Boost (Qwiklabs) autonomous lab completion engineer.
 Synthesize a single, idempotent, stateful, non-interactive bash script (to be executed inside the student's Google Cloud Shell VM) that completes ALL requirements of Task #${task.number} ("${task.title}") so that Qwiklabs' "Check my progress" grader passes 100%.
@@ -1660,15 +2243,16 @@ Full Task Instructions, Prose Requirements, Rubrics & Commands:
 ${combinedText}
 
 ### CRITICAL RULES FOR THE SYNTHESIZED BASH SCRIPT
-1. **Stateful Single-Session Execution**: Each SSH invocation starts in \`$HOME\` (\`~\`). Always \`export PATH="$HOME/.local/bin:$PATH"\`, \`cd\` into the lab's working directory (see LIVE STUDENT CLOUD SHELL WORKSPACE SNAPSHOT or earlier tasks), and activate any Python virtual environment (\`if [ -f .venv/bin/activate ]; then source .venv/bin/activate; fi\`).
+1. **Stateful Single-Session Execution**: Each SSH invocation starts in \`$HOME\` (\`~\`). Always \`export PATH="$HOME/.local/bin:$PATH"\`, \`cd\` into the lab's working directory (see LIVE STUDENT CLOUD SHELL WORKSPACE SNAPSHOT or earlier tasks), and activate any Python virtual environment (\`if [ -f .venv/bin/activate ]; then source .venv/bin/activate; fi\`). When checking if a GCS starter directory was downloaded, check for a key file inside it (e.g. \`[ ! -f ~/adk_challenge_lab/requirements.txt ]\`) rather than only checking if the directory exists.
 2. **Complete Both Prose Edits AND Explicit Commands in Order**: Many Challenge Labs describe file edits (e.g., adding a JSON rubric to \`eval_config.json\`, implementing \`TODO\` functions in \`agent.py\`, updating agent \`tools\` and \`instruction\`, running \`adk eval_set create\` / \`adk eval_set add_eval_case\`) in prose BEFORE the final verification/upload commands. You MUST perform all prose file edits and CLI commands BEFORE running the evaluation/deployment/upload commands.
 3. **Use Exact File Contents & CLI Flags from Workspace Snapshot**: Inspect the starter files and CLI \`--help\` output in \`LIVE STUDENT CLOUD SHELL WORKSPACE SNAPSHOT\` above. Preserve all existing helper functions and imports when updating files (use \`cat << 'EOF' > ...\` or \`python3 -c '...'\` to write/modify files cleanly). Never guess CLI flag names when \`--help\` output is shown above.
-4. **100% Non-Interactive**: Never launch interactive editors (\`nano\`, \`vim\`) or blocking foreground servers (\`adk web\`, \`chainlit run\`, \`npm start\`, \`adk run\`). Always pass non-interactive flags (\`--quiet\`, \`-auto-approve\`, \`-y\`).
+4. **100% Non-Interactive**: Never launch interactive editors (\`nano\`, \`vim\`) or blocking foreground servers (\`adk web\`, \`chainlit run\`, \`npm start\`, \`adk run\`). Always pass non-interactive flags (\`--quiet\`, \`-auto-approve\`, \`-y\`, \`< /dev/null\`).
 5. **GCP Console UI Equivalence**: If the task asks to create or update GCP resources via the Console UI, create/configure them programmatically using \`gcloud\`, \`bq\`, \`terraform\`, or Python SDK/REST API calls.
 6. **Cloud Shell Terraform Stub Trap**: In Google Cloud Shell, \`/usr/local/bin/terraform\` is a stub script that only prints installation instructions. When installing or running \`terraform\`, check \`dpkg -s terraform &>/dev/null\`, remove \`/usr/local/bin/terraform\` (\`sudo rm -f /usr/local/bin/terraform\`), and invoke \`/usr/bin/terraform\`.
 7. **Antigravity (\`agy\`)**: If any step launches \`agy\` or \`antigravity\`, always use \`agy --dangerously-skip-permissions || agy\`.
 8. **Google Drive Uploads in Cloud Shell**: When a task requires uploading files to the student's Google Drive, use \`os.environ.get("DRIVE_ACCESS_TOKEN")\` (which is pre-exported into the Cloud Shell session with Drive scope) to POST multipart uploads to \`https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart\`.
 9. **Gemini Enterprise & Discovery Engine (\`discoveryengine.googleapis.com/v1alpha\`)**:
+   - **Mandatory Header**: Always include \`-H "X-Goog-User-Project: <project_id>"\` on ALL requests to \`discoveryengine.googleapis.com\` (Cloud Shell tokens otherwise bill project \`618104708054\` and fail with 403).
    - **Identity Provider**: \`PATCH .../locations/global/aclConfig\` with \`{"idpConfig": {"idpType": "GSUITE"}}\`.
    - **People via Custom Connector**: \`POST .../collections/default_collection/dataStores?dataStoreId=<id>\` with \`{"displayName": "<id>", "industryVertical": "GENERIC", "contentConfig": "THIRD_PARTY_IDENTITY_PEOPLE", "solutionTypes": ["SOLUTION_TYPE_SEARCH"], "aclEnabled": False}\`, then import NDJSON via \`POST .../dataStores/<id>/branches/0/documents:import\` with \`{"gcsSource": {"inputUris": ["gs://..."], "dataSchema": "document"}, "reconciliationMode": "FULL", "autoGenerateIds": False}\`.
    - **Google Workspace Connectors (\`google_drive\`, \`google_mail\`, \`google_calendar\`)**: \`POST .../locations/global:setUpDataConnector\` with \`{"collectionId": "<name>-1", "collectionDisplayName": "<name>", "dataConnector": {"dataSource": "<type>", "entities": [{"entityName": "<type>"}], "bapConfig": {"supportedConnectorModes": ["ACTIONS"], "enabledActions": [...]}}}\`. NEVER set \`actionConfig: {"createBapConnection": True}\` or \`connectorModes\` on first-party Workspace connectors (causes 500 INTERNAL).
@@ -1676,10 +2260,16 @@ ${combinedText}
      - \`google_mail\` actions: \`["send_message"]\` (or \`["create_draft", "reply_all_message", "reply_message", "search_messages", "send_draft", "send_message"]\`)
      - \`google_calendar\` actions: \`["create_event", "delete_event", "get_event", "list_calendars", "list_events", "respond_to_event", "search_events", "suggest_time", "update_event"]\`
    - **Gemini Enterprise App (\`engines\`)**: \`POST .../collections/default_collection/engines?engineId=<app_id>\` with \`solutionType: "SOLUTION_TYPE_SEARCH"\`, \`industryVertical: "GENERIC"\`, \`appType: "APP_TYPE_INTRANET"\`, \`dataStoreIds: [...]\`, \`commonConfig: {"companyName": "Cymbal"}\`, \`searchEngineConfig: {"searchTier": "SEARCH_TIER_ENTERPRISE", "searchAddOns": ["SEARCH_ADD_ON_LLM"]}\`.
-   - **App Features, Grounding & Logo**:
-     - Features/Models: \`PATCH .../engines/<app_id>?updateMask=features,modelConfigs\` (\`model-selector: "FEATURE_STATE_ON"\`, \`disable-image-generation: "FEATURE_STATE_OFF"\`, \`disable-video-generation: "FEATURE_STATE_OFF"\`, \`modelConfigs: {"gemini-3.1-pro": "MODEL_ENABLED", "gemini-3.1-flash-image": "MODEL_ENABLED"}\`).
-     - Enterprise Web Search: \`PATCH .../engines/<app_id>/assistants/default_assistant?updateMask=webGroundingType\` with \`{"webGroundingType": "WEB_GROUNDING_TYPE_ENTERPRISE_WEB_SEARCH"}\`.
+   - **App Features, Agent Designer, Grounding & Logo**:
+     - Features/Models: \`PATCH .../engines/<app_id>?updateMask=features,modelConfigs\` (\`no-code-agent-builder: "FEATURE_STATE_ON"\`, \`workflow-agents: "FEATURE_STATE_ON"\`, \`model-selector: "FEATURE_STATE_ON"\`, \`disable-image-generation: "FEATURE_STATE_OFF"\`, \`disable-video-generation: "FEATURE_STATE_OFF"\`, \`modelConfigs: {"gemini-3.1-pro": "MODEL_ENABLED", "gemini-3.1-flash-image": "MODEL_ENABLED"}\`).
+     - Web Grounding: \`PATCH .../engines/<app_id>/assistants/default_assistant?updateMask=webGroundingType\` with \`{"webGroundingType": "WEB_GROUNDING_TYPE_ENTERPRISE_WEB_SEARCH"}\` or \`"WEB_GROUNDING_TYPE_GOOGLE_SEARCH"\`.
      - Logo URL: \`PATCH .../engines/<app_id>/widgetConfigs/default_search_widget_config?updateMask=uiBranding\` with \`{"uiBranding": {"logo": {"url": "<logo_url>"}}}\`.
+   - **OAuth Authorizations & Agents (\`authorizations\` & \`assistants/default_assistant/agents\`)**:
+     - OAuth Brand & Client: \`gcloud iap oauth-brands create --application_title="<title>" --support_email="<student_email>"\` and \`gcloud iap oauth-clients create <brand> --display_name="<name>"\`.
+     - Discovery Engine Authorization: \`POST .../v1alpha/projects/<project>/locations/global/authorizations?authorizationId=<auth_id>\` with \`{"name": "projects/<project_num>/locations/global/authorizations/<auth_id>", "displayName": "<display_name>", "serverSideOauth2": {"clientId": "<id>", "clientSecret": "<secret>", "authorizationUri": "<uri>", "tokenUri": "https://oauth2.googleapis.com/token"}}\`.
+     - Low-Code / Agent Designer Agent: \`POST .../v1alpha/projects/<project>/locations/global/collections/default_collection/engines/<app_id>/assistants/default_assistant/agents\` with \`{"displayName": "<name>", "description": "<desc>", "lowCodeAgentDefinition": {"nodes": [{"id": "1", "displayName": "<name>", "llmAgentNode": {"description": "<desc>", "instruction": "<instr>", "model": "gemini-2.5-flash"}}]}, "starterPrompts": [{"text": "<starter>"}], "sharingConfig": {"scope": "ALL_USERS"}}\`.
+     - ADK Agent on Agent Engine: \`POST .../v1alpha/projects/<project>/locations/global/collections/default_collection/engines/<app_id>/assistants/default_assistant/agents\` with \`{"displayName": "<name>", "description": "<desc>", "adkAgentDefinition": {"provisionedReasoningEngine": {"reasoningEngine": "projects/<project_num>/locations/<region>/reasoningEngines/<re_id>"}}, "authorizationConfig": {"toolAuthorizations": ["projects/<project_num>/locations/global/authorizations/<auth_id>"]}, "sharingConfig": {"scope": "ALL_USERS"}}\`.
+     - Querying Agents via \`streamAssist\`: \`POST https://discoveryengine.googleapis.com/v1/projects/<project>/locations/global/collections/default_collection/engines/<app_id>/assistants/default_assistant:streamAssist\` with \`{"query": {"text": "<prompt>"}, "session": "<session_name>", "agentsSpec": {"agentSpecs": [{"agentId": "<agent_id>"}]}}\`.
 10. **Model Armor (\`modelarmor.<loc>.rep.googleapis.com/v1\`)**:
     - Enable \`modelarmor.googleapis.com\` and \`dlp.googleapis.com\` first.
     - Use regional endpoint \`https://modelarmor.<loc>.rep.googleapis.com/v1/projects/<project>/locations/<loc>/templates?templateId=<id>\` (e.g. \`us\`).

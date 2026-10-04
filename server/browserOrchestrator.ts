@@ -592,7 +592,15 @@ export class LabBrowserOrchestrator {
     }
 
     // Immediately populate deterministic DOM-parsed tasks and interpolate with the live Project ID
-    this.state.tasks = parsed.tasks;
+    const previousTasks = this.state.tasks;
+    const isSameTaskList =
+      this.isLoopRunning &&
+      previousTasks.length === parsed.tasks.length &&
+      previousTasks.every((prev, idx) => prev.title === parsed.tasks[idx]?.title);
+
+    if (!isSameTaskList) {
+      this.state.tasks = parsed.tasks;
+    }
     this.reinterpolateAllTaskCommands();
 
     // If the lab is active and has an assessment instance ID, query the live Qwiklabs assessment status immediately
@@ -613,14 +621,18 @@ export class LabBrowserOrchestrator {
       }
     }
 
-    if (this.state.tasks.length > 0) {
+    if (!this.isLoopRunning && this.state.tasks.length > 0) {
       const nextPendingTask =
         this.state.tasks.find((t) => t.status !== 'completed') || this.state.tasks[0];
       this.state.activeTaskId = nextPendingTask.id;
       this.state.activeStepId = nextPendingTask.steps[0]?.id || null;
     }
     const rawStepCount = this.state.tasks.reduce((acc, t) => acc + t.steps.length, 0);
-    this.setStatus('lab_parsed');
+    if (!this.isLoopRunning) {
+      this.setStatus('lab_parsed');
+    } else {
+      this.emitState();
+    }
     this.addLog(
       'success',
       'lab_window',
@@ -859,6 +871,7 @@ export class LabBrowserOrchestrator {
   public async startExecutionLoop(singleStepOnly = false): Promise<void> {
     if (this.isLoopRunning) {
       this.pauseRequested = false;
+      this.setStatus(singleStepOnly ? 'running_step' : 'running_autonomous');
       return;
     }
 
@@ -888,8 +901,9 @@ export class LabBrowserOrchestrator {
         )
         .join('\n\n');
 
-      for (const task of this.state.tasks) {
-        if (task.status === 'completed' || task.status === 'skipped') continue;
+      for (let taskIdx = 0; taskIdx < this.state.tasks.length; taskIdx++) {
+        const task = this.state.tasks[taskIdx];
+        if (!task || task.status === 'completed' || task.status === 'skipped') continue;
 
         this.state.activeTaskId = task.id;
         task.status = 'running';
@@ -969,7 +983,7 @@ export class LabBrowserOrchestrator {
                 password: this.state.credentials.password,
                 projectId: this.state.credentials.projectId,
                 onProgress: (m) => this.addLog('info', 'cloud_shell', m),
-                timeoutMs: 240000,
+                timeoutMs: 420000,
               });
               lastSshOk = sshRes.ok;
               previousScriptOutput = `${sshRes.stdout}\n${sshRes.stderr}`.trim();
