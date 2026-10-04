@@ -81,6 +81,21 @@ skill-runner/
    - Automatically wraps `agy` / `antigravity` CLI invocations with `--dangerously-skip-permissions` and graceful fallback (`agy --dangerously-skip-permissions || agy`).
    - Appends non-interactive execution directives to Antigravity prompts and auto-approves IDE confirmation buttons (`Accept All`, `Allow`, `Run Command`, `Proceed`).
 
+### Operator Workflow: Running Any New Lab End-to-End
+1. **Ensure the Mac Chrome Bridge is Active**:
+   - Open the [Cloud Skills Lab Runner Web UI](https://cloud-skills-lab-runner-621653283297.us-central1.run.app).
+   - If the top-right status badge shows **Mac Bridge Offline**, click **Download & Run Bridge** (or double-click `~/Downloads/skill-runner/Start-Mac-Chrome-Bridge.command`). The launcher automatically pulls the latest `macBridgeAgent.ts` from Cloud Run into `~/Downloads/skill-runner/` and connects over WebSocket.
+2. **Start Your Lab & Bind Chrome Tabs**:
+   - Open your Google Cloud Skills Boost / Google Skills for Partners lab in Chrome and click **Start Lab** (or click **Start Lab & Sign In** directly in the Lab Runner UI).
+   - Click **Sync Chrome Tabs** in the Lab Runner UI, select your active Lab tab from the dropdown, and click **Bind Selected Tabs** -> **Parse Lab**.
+3. **Run Autonomous**:
+   - Click **Run Autonomous**. For each task in the lab, the runner automatically:
+     1. Authenticates an isolated `gcloud` profile for the new `student-xx@qwiklabs.net` account and verifies `gcloud auth print-access-token --quiet`.
+     2. SSHes into the student's live Cloud Shell VM to inspect existing files, starter code, and CLI `--help` output.
+     3. Synthesizes and executes a single stateful bash script using **`gemini-3.5-flash`** covering both prose code edits and CLI commands.
+     4. Clicks **Check my progress** and, if any assessment check fails, feeds the grader's error message + `stdout`/`stderr` back into **`gemini-3.5-flash`** for up to **3 self-healing retries**.
+   - *Note on Edge Cases*: If Google's login screen presents a visual reCAPTCHA challenge for a newly provisioned `student-xx@qwiklabs.net` account, signing into the Incognito GCP Console window once in Chrome clears the challenge. If a lab requires interacting with an external non-GCP third-party SaaS site, use **Step-by-Step** mode or the **Live Operator Override** box.
+
 ---
 
 ## 4. API & Interface Reference
