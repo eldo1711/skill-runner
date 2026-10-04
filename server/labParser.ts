@@ -28,13 +28,16 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
     // Recursive helper to collect all elements across open Shadow DOMs and Declarative Shadow DOM <template>s
     function queryAllDeep(root: Document | ShadowRoot | DocumentFragment | Element): Element[] {
       const results: Element[] = [];
+      const visited = new Set<Node>();
       const walker = (node: Document | ShadowRoot | DocumentFragment | Element) => {
+        if (!node || visited.has(node)) return;
+        visited.add(node);
+        if ((node as HTMLElement).shadowRoot) {
+          walker((node as HTMLElement).shadowRoot!);
+        }
         const children = Array.from(node.children || []);
         for (const el of children) {
           results.push(el);
-          if ((el as HTMLElement).shadowRoot) {
-            walker((el as HTMLElement).shadowRoot!);
-          }
           if (el.tagName === 'TEMPLATE' && (el as HTMLTemplateElement).content) {
             walker((el as HTMLTemplateElement).content);
           }
@@ -48,14 +51,29 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
     function getDeepText(el: Element | null): string {
       if (!el) return '';
       let text = '';
-      if ((el as HTMLElement).shadowRoot) {
-        text += ((el as HTMLElement).shadowRoot!.textContent || '') + ' ';
-      }
-      const tmpl = el.querySelector('template') as HTMLTemplateElement | null;
-      if (tmpl && tmpl.content) {
-        text += (tmpl.content.textContent || '') + ' ';
-      }
-      text += el.textContent || '';
+      const visited = new Set<Node>();
+      const walkText = (node: Node) => {
+        if (!node || visited.has(node)) return;
+        visited.add(node);
+        if (node.nodeType === 3) {
+          text += (node.nodeValue || '') + ' ';
+          return;
+        }
+        if ((node as HTMLElement).shadowRoot) {
+          walkText((node as HTMLElement).shadowRoot!);
+        }
+        if (
+          (node as Element).tagName === 'TEMPLATE' &&
+          (node as HTMLTemplateElement).content
+        ) {
+          walkText((node as HTMLTemplateElement).content);
+        }
+        const childNodes = Array.from(node.childNodes || []);
+        for (const c of childNodes) {
+          walkText(c);
+        }
+      };
+      walkText(el);
       return text.replace(/\s+/g, ' ').trim();
     }
 
@@ -66,6 +84,7 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
     let headerTitle = '';
     let headerTimer = '';
     let headerRunning = false;
+    let liveShadowState: 'running' | 'stopped' | null = null;
     let username = '';
     let password = '';
     let projectId = '';
@@ -74,65 +93,107 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
     let zone = '';
     const extraVars: Record<string, string> = {};
 
+    const isPlaceholderVal = (v: string): boolean => {
+      const t = v.trim();
+      if (!t) return true;
+      return /^(_+|region|zone|project_id|your-gcp-project-id|username|model name|model id|<filled in.*)$/i.test(
+        t
+      );
+    };
+
     if (labHeader) {
       headerTitle = (labHeader.getAttribute('labtitle') || '').trim();
 
-      const timerAttr = labHeader.getAttribute('labtimer');
-      if (timerAttr) {
-        try {
-          const parsedTimer = JSON.parse(timerAttr);
-          if (typeof parsedTimer.secondsRemaining === 'number') {
-            const totalSecs = Math.max(0, Math.floor(parsedTimer.secondsRemaining));
-            const hrs = String(Math.floor(totalSecs / 3600)).padStart(2, '0');
-            const mins = String(Math.floor((totalSecs % 3600) / 60)).padStart(2, '0');
-            const secs = String(totalSecs % 60).padStart(2, '0');
-            headerTimer = `${hrs}:${mins}:${secs}`;
-          }
-        } catch {
-          // Ignore malformed JSON
+      // Check live Shadow DOM inside <ql-lab-header> first, because LitElement updates its Shadow DOM
+      // when a lab starts or ends without mutating the initial server-rendered HTML attributes.
+      const headerDeepEls = queryAllDeep(labHeader);
+      const headerCtrlBtn = headerDeepEls.find(
+        (el) => el.tagName.toLowerCase() === 'ql-lab-control-button'
+      );
+      if (headerCtrlBtn) {
+        const ctrlSubEls = [headerCtrlBtn, ...queryAllDeep(headerCtrlBtn)];
+        const hasRunningMarker = ctrlSubEls.some((el) => {
+          const aria = (
+            el.getAttribute('data-aria-label') ||
+            el.getAttribute('aria-label') ||
+            ''
+          ).toLowerCase();
+          return (
+            el.hasAttribute('running') ||
+            el.classList?.contains('running') ||
+            aria === 'end' ||
+            aria.startsWith('end lab')
+          );
+        });
+        const btnDeepText = getDeepText(headerCtrlBtn).toLowerCase();
+        if (hasRunningMarker || /\bend\b/.test(btnDeepText)) {
+          liveShadowState = 'running';
+        } else if (/\bstart\b/.test(btnDeepText)) {
+          liveShadowState = 'stopped';
         }
       }
 
-      const controlAttr = labHeader.getAttribute('labcontrolbutton');
-      if (controlAttr) {
-        try {
-          const parsedCtrl = JSON.parse(controlAttr);
-          if (parsedCtrl.running === true) {
-            headerRunning = true;
+      if (liveShadowState !== 'stopped') {
+        const timerAttr = labHeader.getAttribute('labtimer');
+        if (timerAttr) {
+          try {
+            const parsedTimer = JSON.parse(timerAttr);
+            if (typeof parsedTimer.secondsRemaining === 'number') {
+              const totalSecs = Math.max(0, Math.floor(parsedTimer.secondsRemaining));
+              const hrs = String(Math.floor(totalSecs / 3600)).padStart(2, '0');
+              const mins = String(Math.floor((totalSecs % 3600) / 60)).padStart(2, '0');
+              const secs = String(totalSecs % 60).padStart(2, '0');
+              headerTimer = `${hrs}:${mins}:${secs}`;
+            }
+          } catch {
+            // Ignore malformed JSON
           }
-        } catch {
-          // Ignore
         }
-      }
 
-      const detailsAttr = labHeader.getAttribute('labdetails');
-      if (detailsAttr) {
-        try {
-          const detailsList = JSON.parse(detailsAttr);
-          if (Array.isArray(detailsList)) {
-            for (const item of detailsList) {
-              const prop = String(item.property || item.label || '').toLowerCase();
-              const val = String(item.value || '').trim();
-              const href = String(item.href || '').trim();
-              if (prop === 'username' || prop.includes('username')) {
-                if (val) username = val;
-              } else if (prop === 'password' || prop.includes('password')) {
-                if (val) password = val;
-              } else if (prop === 'project_id' || prop.includes('project')) {
-                if (val) projectId = val;
-              } else if (prop === 'console_url' || prop.includes('console')) {
-                if (href || val) consoleUrl = href || val;
-              } else if (prop.includes('region')) {
-                if (val) region = val;
-              } else if (prop.includes('zone')) {
-                if (val) zone = val;
-              } else if (prop && val) {
-                extraVars[prop] = val;
+        const controlAttr = labHeader.getAttribute('labcontrolbutton');
+        if (controlAttr) {
+          try {
+            const parsedCtrl = JSON.parse(controlAttr);
+            if (parsedCtrl.running === true) {
+              headerRunning = true;
+            }
+          } catch {
+            // Ignore
+          }
+        }
+        if (liveShadowState === 'running') {
+          headerRunning = true;
+        }
+
+        const detailsAttr = labHeader.getAttribute('labdetails');
+        if (detailsAttr) {
+          try {
+            const detailsList = JSON.parse(detailsAttr);
+            if (Array.isArray(detailsList)) {
+              for (const item of detailsList) {
+                const prop = String(item.property || item.label || '').toLowerCase();
+                const val = String(item.value || '').trim();
+                const href = String(item.href || '').trim();
+                if (prop === 'username' || prop.includes('username')) {
+                  if (val && !isPlaceholderVal(val)) username = val;
+                } else if (prop === 'password' || prop.includes('password')) {
+                  if (val && !isPlaceholderVal(val)) password = val;
+                } else if (prop === 'project_id' || prop.includes('project')) {
+                  if (val && !isPlaceholderVal(val)) projectId = val;
+                } else if (prop === 'console_url' || prop.includes('console')) {
+                  if (href || val) consoleUrl = href || val;
+                } else if (prop.includes('region')) {
+                  if (val && !isPlaceholderVal(val)) region = val;
+                } else if (prop.includes('zone')) {
+                  if (val && !isPlaceholderVal(val)) zone = val;
+                } else if (prop && val && !isPlaceholderVal(val)) {
+                  extraVars[prop] = val;
+                }
               }
             }
+          } catch {
+            // Ignore
           }
-        } catch {
-          // Ignore
         }
       }
     }
@@ -149,79 +210,112 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
       'Google Cloud Skills Lab';
 
     // 3. Timer & Lab Started state
-    const timerEl = allElements.find(
-      (el) =>
-        el.tagName.toLowerCase() === 'ql-timer' ||
-        el.classList?.contains('js-timer') ||
-        /^\d{2}:\d{2}:\d{2}$/.test((el.textContent || '').trim())
-    );
-    const labTimer = headerTimer || (timerEl ? getDeepText(timerEl) : '00:00:00');
-
-    const hasEndLabButton = labHeader?.hasAttribute('labcontrolbutton')
-      ? headerRunning
-      : Boolean(document.querySelector('ql-lab-control-button[running]')) ||
-        allElements.some((el) => {
-          const t = getDeepText(el).toLowerCase();
-          return (
-            (el.tagName === 'BUTTON' || el.tagName.toLowerCase().includes('button')) &&
-            t.includes('end lab')
-          );
-        });
-
-    // 4. Also scan <ql-lab-control-panel> or input/text-box elements if not populated from <ql-lab-header>
+    let liveHhMmSsTimer = '';
     for (const el of allElements) {
-      const label = (
-        el.getAttribute('label') ||
-        el.getAttribute('aria-label') ||
-        el.getAttribute('name') ||
-        ''
-      ).toLowerCase();
-      const val =
-        (el as HTMLInputElement).value ||
-        el.getAttribute('value') ||
-        el.getAttribute('text') ||
-        '';
-
-      if (label && val) {
-        if (
-          !username &&
-          (label.includes('username') || label.includes('user name') || label.includes('student'))
-        ) {
-          username = val.trim();
-        } else if (!password && label.includes('password')) {
-          password = val.trim();
-        } else if (
-          !projectId &&
-          (label.includes('project') || label.includes('gcp project id'))
-        ) {
-          projectId = val.trim();
-        } else if (!region && label.includes('region')) {
-          region = val.trim();
-        } else if (!zone && label.includes('zone')) {
-          zone = val.trim();
-        } else if (
-          !extraVars[label] &&
-          val.trim().length <= 120 &&
-          !label.includes('recaptcha') &&
-          !label.includes('authenticity_token') &&
-          !label.includes('_method') &&
-          !label.includes('lab_review') &&
-          !label.includes('share link')
-        ) {
-          extraVars[label] = val.trim();
+      if (el.tagName.toLowerCase() === 'ql-timer' || el.classList?.contains('js-timer')) {
+        const tText = getDeepText(el);
+        const m = tText.match(/\b(\d{2}:\d{2}:\d{2})\b/);
+        if (m) {
+          liveHhMmSsTimer = m[1];
+          break;
         }
       }
+    }
+    const labTimer =
+      liveShadowState === 'stopped'
+        ? '00:00:00'
+        : liveHhMmSsTimer || headerTimer || '00:00:00';
 
-      if (!consoleUrl && (el.tagName === 'A' || el.tagName.toLowerCase() === 'ql-button')) {
-        const text = getDeepText(el).toLowerCase();
-        const href = el.getAttribute('href') || '';
-        if (
-          (text.includes('open google console') ||
-            text.includes('open google cloud console') ||
-            text.includes('open console')) &&
-          href
-        ) {
-          consoleUrl = href;
+    const hasEndLabButton =
+      liveShadowState === 'stopped'
+        ? false
+        : liveShadowState === 'running'
+          ? true
+          : labHeader?.hasAttribute('labcontrolbutton')
+            ? headerRunning
+            : Boolean(document.querySelector('ql-lab-control-button[running]')) ||
+              allElements.some((el) => {
+                const t = getDeepText(el).toLowerCase();
+                return (
+                  (el.tagName === 'BUTTON' || el.tagName.toLowerCase().includes('button')) &&
+                  t.includes('end lab')
+                );
+              });
+
+    // 4. Scan <ql-copyable-input> Shadow DOMs and control-panel inputs (populates live credentials even when started without page reload)
+    if (liveShadowState !== 'stopped') {
+      for (const el of allElements) {
+        let label = (
+          el.getAttribute('label') ||
+          el.getAttribute('aria-label') ||
+          el.getAttribute('name') ||
+          ''
+        ).toLowerCase();
+        let val =
+          (el as HTMLInputElement).value ||
+          el.getAttribute('value') ||
+          el.getAttribute('text') ||
+          '';
+
+        if (el.tagName.toLowerCase() === 'ql-copyable-input') {
+          const subEls = queryAllDeep(el);
+          const lblEl = subEls.find((c) => c.tagName === 'LABEL');
+          const inpEl = subEls.find((c) => c.tagName === 'INPUT') as
+            | HTMLInputElement
+            | undefined;
+          if (!label && lblEl) {
+            label = (lblEl.textContent || '').trim().toLowerCase();
+          }
+          if (!val && inpEl) {
+            val = (inpEl.value || inpEl.getAttribute('value') || '').trim();
+          }
+        }
+
+        if (label && val && !isPlaceholderVal(val)) {
+          if (
+            !username &&
+            (label.includes('username') ||
+              label.includes('user name') ||
+              label.includes('student'))
+          ) {
+            username = val.trim();
+          } else if (!password && label.includes('password')) {
+            password = val.trim();
+          } else if (
+            !projectId &&
+            (label.includes('project') || label.includes('gcp project id'))
+          ) {
+            projectId = val.trim();
+          } else if (!region && label.includes('region')) {
+            region = val.trim();
+          } else if (!zone && label.includes('zone')) {
+            zone = val.trim();
+          } else if (
+            !extraVars[label] &&
+            val.trim().length <= 120 &&
+            !label.includes('recaptcha') &&
+            !label.includes('authenticity_token') &&
+            !label.includes('_method') &&
+            !label.includes('lab_review') &&
+            !label.includes('share link') &&
+            label !== 'copy'
+          ) {
+            extraVars[label] = val.trim();
+          }
+        }
+
+        if (!consoleUrl && (el.tagName === 'A' || el.tagName.toLowerCase() === 'ql-button')) {
+          const text = getDeepText(el).toLowerCase();
+          const href = el.getAttribute('href') || '';
+          if (
+            href &&
+            (href.includes('/google_sso?') ||
+              text.includes('open google console') ||
+              text.includes('open google cloud console') ||
+              text.includes('open console'))
+          ) {
+            consoleUrl = href;
+          }
         }
       }
     }
@@ -238,10 +332,10 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
         qv.textContent ||
         ''
       ).trim();
-      if (val && !val.includes('<filled in at lab start>')) {
+      if (val && !isPlaceholderVal(val)) {
         qv.textContent = val;
       }
-      if (key && val && !val.includes('<filled in at lab start>') && val !== 'Model Name' && val !== 'Model ID') {
+      if (key && val && !isPlaceholderVal(val)) {
         extraVars[key] = val;
         if (!region && key.includes('region')) region = val;
         if (!zone && key.includes('zone')) zone = val;
@@ -262,14 +356,16 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
       '\n' +
       bodyText;
 
-    if (!username) {
-      const userMatch = fullDeepText.match(/student-[a-z0-9-]+@[a-z0-9.-]+\.[a-z]+/i);
-      if (userMatch) username = userMatch[0];
-    }
+    if (liveShadowState !== 'stopped') {
+      if (!username) {
+        const userMatch = fullDeepText.match(/student-[a-z0-9-]+@[a-z0-9.-]+\.[a-z]+/i);
+        if (userMatch) username = userMatch[0];
+      }
 
-    if (!projectId) {
-      const projMatch = fullDeepText.match(/qwiklabs-gcp-(?:xx|\d+)-[a-z0-9]{6,16}\b/i);
-      if (projMatch) projectId = projMatch[0];
+      if (!projectId) {
+        const projMatch = fullDeepText.match(/qwiklabs-gcp-(?:xx|\d+)-[a-z0-9]{6,16}\b/i);
+        if (projMatch) projectId = projMatch[0];
+      }
     }
 
     if (!region) {
@@ -291,7 +387,10 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
         : 'https://console.cloud.google.com/';
     }
 
-    const isLabStarted = Boolean(username || projectId || hasEndLabButton);
+    const isLabStarted =
+      liveShadowState === 'stopped'
+        ? false
+        : Boolean(username || projectId || hasEndLabButton);
 
     // Check if user is on a Sign-In gate
     const currentUrl = window.location.href;

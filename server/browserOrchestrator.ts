@@ -219,16 +219,14 @@ export class LabBrowserOrchestrator {
    */
   private reinterpolateAllTaskCommands() {
     if (!this.state.tasks || this.state.tasks.length === 0) return;
-    this.state.tasks = this.state.tasks.map((task) => ({
-      ...task,
-      steps: task.steps.map((step) => ({
-        ...step,
-        instruction: interpolateLabVariables(step.instruction, this.state.credentials),
-        commands: (step.commands || []).map((cmd) =>
+    for (const task of this.state.tasks) {
+      for (const step of task.steps) {
+        step.instruction = interpolateLabVariables(step.instruction, this.state.credentials);
+        step.commands = (step.commands || []).map((cmd) =>
           transformAgyLaunchCommand(interpolateLabVariables(cmd, this.state.credentials))
-        ),
-      })),
-    }));
+        );
+      }
+    }
   }
 
   private applyScannedTabs(tabs: ChromeTabDescriptor[]) {
@@ -566,22 +564,27 @@ export class LabBrowserOrchestrator {
       }
     }
 
-    // Merge extracted credentials without overwriting non-empty manual overrides
-    this.state.credentials = {
-      username: parsed.credentials.username || this.state.credentials.username,
-      password: parsed.credentials.password || this.state.credentials.password,
-      projectId:
-        parsed.credentials.projectId ||
-        liveConsoleProjectId ||
-        this.state.credentials.projectId,
-      consoleUrl: parsed.credentials.consoleUrl || this.state.credentials.consoleUrl,
-      region: parsed.credentials.region || this.state.credentials.region,
-      zone: parsed.credentials.zone || this.state.credentials.zone,
-      extraVars: {
-        ...this.state.credentials.extraVars,
-        ...parsed.credentials.extraVars,
-      },
-    };
+    if (!parsed.isLabStarted) {
+      this.state.credentials = parsed.credentials;
+      this.state.totalScore = 0;
+    } else {
+      // Merge extracted credentials without overwriting non-empty manual overrides
+      this.state.credentials = {
+        username: parsed.credentials.username || this.state.credentials.username,
+        password: parsed.credentials.password || this.state.credentials.password,
+        projectId:
+          parsed.credentials.projectId ||
+          liveConsoleProjectId ||
+          this.state.credentials.projectId,
+        consoleUrl: parsed.credentials.consoleUrl || this.state.credentials.consoleUrl,
+        region: parsed.credentials.region || this.state.credentials.region,
+        zone: parsed.credentials.zone || this.state.credentials.zone,
+        extraVars: {
+          ...this.state.credentials.extraVars,
+          ...parsed.credentials.extraVars,
+        },
+      };
+    }
 
     if (this.state.credentials.username || this.state.credentials.projectId) {
       this.addLog(
@@ -875,7 +878,7 @@ export class LabBrowserOrchestrator {
       return;
     }
 
-    if (this.state.tasks.length === 0) {
+    if (this.state.tasks.length === 0 || !this.state.isLabStarted || !this.state.credentials.password) {
       await this.parseLabInstructions();
     }
 
@@ -883,7 +886,12 @@ export class LabBrowserOrchestrator {
       parseTabKey(this.state.selectedConsoleTabKey || this.state.selectedCloudShellTabKey)
     );
 
-    if (!hasNativeTarget && (!this.consolePage || this.consolePage.isClosed())) {
+    if (
+      !this.state.isLabStarted ||
+      !this.state.credentials.username ||
+      !this.state.credentials.password ||
+      (!hasNativeTarget && (!this.consolePage || this.consolePage.isClosed()))
+    ) {
       await this.startLabAndLaunchIncognito();
     }
 
