@@ -964,7 +964,8 @@ export async function triggerStartLabAndExtractCredentials(
   page: Page,
   onLog: (msg: string) => void,
   syncFromUserChrome?: () => Promise<void>,
-  labUrl?: string
+  labUrl?: string,
+  preferredTarget?: { windowId: number; tabIndex: number } | null
 ): Promise<LabCredentials> {
   onLog('Checking if lab is already active or needs "Start Lab" clicked...');
 
@@ -973,7 +974,7 @@ export async function triggerStartLabAndExtractCredentials(
   }
 
   let parsed = await parseLabPageDom(page);
-  if (parsed.isLabStarted && (parsed.credentials.username || parsed.credentials.projectId)) {
+  if (parsed.isLabStarted && parsed.credentials.username && parsed.credentials.password) {
     onLog(
       `Lab is already running! Extracted Project ID: ${parsed.credentials.projectId}, Username: ${parsed.credentials.username}`
     );
@@ -981,8 +982,8 @@ export async function triggerStartLabAndExtractCredentials(
   }
 
   let clicked = false;
-  if (labUrl) {
-    clicked = await clickStartLabInUserChrome(labUrl);
+  if (labUrl || preferredTarget) {
+    clicked = await clickStartLabInUserChrome(labUrl, preferredTarget);
     if (clicked) {
       onLog('Clicked "Start Lab" in your Google Chrome window...');
     }

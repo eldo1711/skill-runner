@@ -557,6 +557,170 @@ end tell
   }
 }
 
+async function clickStartLabInUserChrome(preferredUrl, preferredTarget) {
+  let target = preferredTarget || null;
+  if (!target?.windowId || !target?.tabIndex) {
+    const tabs = await listUserChromeTabs();
+    const labTab = tabs.find((t) => t.suggestedRole === 'lab');
+    if (labTab) {
+      target = { windowId: labTab.windowId, tabIndex: labTab.tabIndex };
+    }
+  }
+  if (target?.windowId && target?.tabIndex) {
+    await focusUserChromeTab(Number(target.windowId), Number(target.tabIndex));
+  }
+
+  const axScript = `
+tell application "Google Chrome" to activate
+delay 0.3
+tell application "System Events"
+  tell process "Google Chrome"
+    try
+      set value of attribute "AXEnhancedUserInterface" to true
+    end try
+    delay 0.3
+    repeat with w in windows
+      if (name of w) contains "Google Chrome" then
+        set allElems to entire contents of w
+        repeat with el in allElems
+          try
+            if (role of el) is "AXButton" then
+              set nm to (name of el) as string
+              if nm starts with "Start Lab" or nm is "Start" then
+                click el
+                delay 1.2
+                set followElems to entire contents of w
+                repeat with fel in followElems
+                  try
+                    if (role of fel) is "AXButton" then
+                      set fnm to (name of fel) as string
+                      if fnm is "Confirm" or fnm starts with "Launch with" then
+                        click fel
+                        exit repeat
+                      end if
+                    end if
+                  end try
+                end repeat
+                return "clicked"
+              end if
+            end if
+          end try
+        end repeat
+      end if
+    end repeat
+  end tell
+end tell
+return "not_found"
+`;
+  const axRes = await runAppleScript(axScript).catch(() => '');
+  return axRes === 'clicked';
+}
+
+async function clickEndLabInUserChrome(preferredUrl, preferredTarget) {
+  let target = preferredTarget || null;
+  if (!target?.windowId || !target?.tabIndex) {
+    const tabs = await listUserChromeTabs();
+    const labTab = tabs.find((t) => t.suggestedRole === 'lab');
+    if (labTab) {
+      target = { windowId: labTab.windowId, tabIndex: labTab.tabIndex };
+    }
+  }
+  if (target?.windowId && target?.tabIndex) {
+    await focusUserChromeTab(Number(target.windowId), Number(target.tabIndex));
+  }
+
+  const axScript = `
+tell application "Google Chrome" to activate
+delay 0.3
+tell application "System Events"
+  tell process "Google Chrome"
+    try
+      set value of attribute "AXEnhancedUserInterface" to true
+    end try
+    delay 0.3
+    repeat with w in windows
+      if (name of w) contains "Google Chrome" then
+        set allElems to entire contents of w
+        set clickedPrimary to false
+        repeat with el in allElems
+          try
+            if (role of el) is "AXButton" then
+              set nm to (name of el) as string
+              if nm is "End Lab" then
+                click el
+                set clickedPrimary to true
+                exit repeat
+              end if
+            end if
+          end try
+        end repeat
+        if clickedPrimary is true then
+          delay 0.9
+          set dialogElems to entire contents of w
+          set lastEndBtn to missing value
+          repeat with del in dialogElems
+            try
+              if (role of del) is "AXButton" then
+                set dnm to (name of del) as string
+                if dnm is "End Lab" or dnm is "Confirm" or dnm is "Submit" then
+                  set lastEndBtn to del
+                end if
+              end if
+            end try
+          end repeat
+          if lastEndBtn is not missing value then
+            click lastEndBtn
+            delay 0.8
+          end if
+          try
+            set revElems to entire contents of w
+            repeat with rel in revElems
+              try
+                if (role of rel) is "AXButton" then
+                  set rnm to (name of rel) as string
+                  if rnm is "Cancel" then
+                    click rel
+                    exit repeat
+                  end if
+                end if
+              end try
+            end repeat
+          end try
+          return "ended"
+        else
+          repeat with el in allElems
+            try
+              if (role of el) is "AXButton" then
+                set nm to (name of el) as string
+                if nm starts with "Start Lab" or nm is "Start" then
+                  return "already_ended"
+                end if
+              end if
+            end try
+          end repeat
+        end if
+      end if
+    end repeat
+  end tell
+end tell
+return "not_found"
+`;
+  const axRes = await runAppleScript(axScript).catch(() => '');
+  if (axRes === 'ended' || axRes === 'already_ended') {
+    return {
+      ended: true,
+      message:
+        axRes === 'already_ended'
+          ? 'Lab is already ended in Google Chrome.'
+          : 'Clicked "End Lab" and confirmed termination in Google Chrome.',
+    };
+  }
+  return {
+    ended: false,
+    message: 'Could not locate an active "End Lab" button in the selected Chrome tab.',
+  };
+}
+
 /**
  * Isolated student gcloud configuration & direct Cloud Shell SSH execution
  */
@@ -860,6 +1024,16 @@ async function connectBridge() {
             Number(params.tabIndex),
             String(params.text || ''),
             params.pressEnter !== false
+          );
+        } else if (method === 'start_lab') {
+          result = await clickStartLabInUserChrome(
+            params.preferredUrl,
+            params.preferredTarget
+          );
+        } else if (method === 'end_lab') {
+          result = await clickEndLabInUserChrome(
+            params.preferredUrl,
+            params.preferredTarget
           );
         } else if (method === 'shutdown') {
           shuttingDown = true;

@@ -624,11 +624,31 @@ end tell
 }
 
 /**
- * Attempts to click "Start Lab" in the user's Google Chrome tab via AppleScript JS execution.
+ * Clicks "Start Lab" in the user's Google Chrome tab via AppleScript JS execution or macOS System Events Accessibility.
  */
 export async function clickStartLabInUserChrome(
-  preferredUrl?: string
+  preferredUrl?: string,
+  preferredTarget?: { windowId: number; tabIndex: number } | null
 ): Promise<boolean> {
+  if (process.platform !== 'darwin') {
+    if (!macBridgeHub.isConnected()) return false;
+    return macBridgeHub
+      .invoke<boolean>('start_lab', { preferredUrl, preferredTarget }, 30000)
+      .catch(() => false);
+  }
+
+  let target = preferredTarget || null;
+  if (!target) {
+    const tabs = await listUserChromeTabs();
+    const labTab = tabs.find((t) => t.suggestedRole === 'lab');
+    if (labTab) {
+      target = { windowId: labTab.windowId, tabIndex: labTab.tabIndex };
+    }
+  }
+  if (target) {
+    await focusUserChromeTab(target.windowId, target.tabIndex);
+  }
+
   const js = `
     (() => {
       const hdr = document.querySelector('ql-lab-header');
@@ -640,7 +660,221 @@ export async function clickStartLabInUserChrome(
     })()
   `;
   const res = await executeJsInUserChromeLabTab(js, preferredUrl);
-  return res.ok && res.result === 'clicked';
+  if (res.ok && res.result === 'clicked') {
+    return true;
+  }
+
+  const axScript = `
+tell application "Google Chrome" to activate
+delay 0.3
+tell application "System Events"
+  tell process "Google Chrome"
+    try
+      set value of attribute "AXEnhancedUserInterface" to true
+    end try
+    delay 0.3
+    repeat with w in windows
+      if (name of w) contains "Google Chrome" then
+        set allElems to entire contents of w
+        repeat with el in allElems
+          try
+            if (role of el) is "AXButton" then
+              set nm to (name of el) as string
+              if nm starts with "Start Lab" or nm is "Start" then
+                click el
+                delay 1.2
+                -- Check if a secondary confirmation or credit launch button appeared
+                set followElems to entire contents of w
+                repeat with fel in followElems
+                  try
+                    if (role of fel) is "AXButton" then
+                      set fnm to (name of fel) as string
+                      if fnm is "Confirm" or fnm starts with "Launch with" then
+                        click fel
+                        exit repeat
+                      end if
+                    end if
+                  end try
+                end repeat
+                return "clicked"
+              end if
+            end if
+          end try
+        end repeat
+      end if
+    end repeat
+  end tell
+end tell
+return "not_found"
+`;
+  const axRes = await runAppleScript(axScript).catch(() => '');
+  return axRes === 'clicked';
+}
+
+/**
+ * Clicks "End Lab" and confirms the "Are you sure?" dialog in the user's Google Chrome Lab tab
+ * via AppleScript JS execution or macOS System Events Accessibility.
+ */
+export async function clickEndLabInUserChrome(
+  preferredUrl?: string,
+  preferredTarget?: { windowId: number; tabIndex: number } | null
+): Promise<{ ended: boolean; message: string }> {
+  if (process.platform !== 'darwin') {
+    if (!macBridgeHub.isConnected()) {
+      return {
+        ended: false,
+        message: 'Mac Chrome Bridge is not connected — cannot click End Lab in Chrome.',
+      };
+    }
+    try {
+      const res = await macBridgeHub.invoke<{ ended: boolean; message: string }>(
+        'end_lab',
+        { preferredUrl, preferredTarget },
+        30000
+      );
+      if (res && typeof res.ended === 'boolean') {
+        return res;
+      }
+    } catch (err: any) {
+      return {
+        ended: false,
+        message: `End Lab RPC failed: ${err?.message || String(err)}`,
+      };
+    }
+    return { ended: false, message: 'End Lab did not return a status.' };
+  }
+
+  let target = preferredTarget || null;
+  if (!target) {
+    const tabs = await listUserChromeTabs();
+    const labTab = tabs.find((t) => t.suggestedRole === 'lab');
+    if (labTab) {
+      target = { windowId: labTab.windowId, tabIndex: labTab.tabIndex };
+    }
+  }
+  if (target) {
+    await focusUserChromeTab(target.windowId, target.tabIndex);
+  }
+
+  const js = `
+    (() => {
+      if (window.ql && window.ql.labRun && typeof window.ql.labRun.stopLab === 'function') {
+        window.ql.labRun.stopLab();
+        return 'ended_via_ql';
+      }
+      const hdr = document.querySelector('ql-lab-header');
+      const btn = hdr?.shadowRoot?.querySelector('ql-lab-control-button') || document.querySelector('ql-lab-control-button');
+      const inner = btn?.shadowRoot?.querySelector('ql-button') || btn;
+      const nativeBtn = inner?.shadowRoot?.querySelector('md-filled-button, button') || inner;
+      if (nativeBtn) {
+        nativeBtn.click();
+        setTimeout(() => {
+          const confirmBtn = document.querySelector('#js-are-you-sure-button');
+          const confirmNative = confirmBtn?.shadowRoot?.querySelector('md-text-button, button') || confirmBtn;
+          if (confirmNative) confirmNative.click();
+        }, 400);
+        return 'clicked_end';
+      }
+      return 'not_found';
+    })()
+  `;
+  const jsRes = await executeJsInUserChromeLabTab(js, preferredUrl);
+  if (jsRes.ok && (jsRes.result === 'ended_via_ql' || jsRes.result === 'clicked_end')) {
+    await new Promise((r) => setTimeout(r, 1200));
+    return { ended: true, message: 'Lab ended in Google Chrome.' };
+  }
+
+  const axScript = `
+tell application "Google Chrome" to activate
+delay 0.3
+tell application "System Events"
+  tell process "Google Chrome"
+    try
+      set value of attribute "AXEnhancedUserInterface" to true
+    end try
+    delay 0.3
+    repeat with w in windows
+      if (name of w) contains "Google Chrome" then
+        set allElems to entire contents of w
+        set clickedPrimary to false
+        repeat with el in allElems
+          try
+            if (role of el) is "AXButton" then
+              set nm to (name of el) as string
+              if nm is "End Lab" then
+                click el
+                set clickedPrimary to true
+                exit repeat
+              end if
+            end if
+          end try
+        end repeat
+        if clickedPrimary is true then
+          delay 0.9
+          set dialogElems to entire contents of w
+          set lastEndBtn to missing value
+          repeat with del in dialogElems
+            try
+              if (role of del) is "AXButton" then
+                set dnm to (name of del) as string
+                if dnm is "End Lab" or dnm is "Confirm" or dnm is "Submit" then
+                  set lastEndBtn to del
+                end if
+              end if
+            end try
+          end repeat
+          if lastEndBtn is not missing value then
+            click lastEndBtn
+            delay 0.8
+          end if
+          -- Dismiss optional review dialog if opened
+          try
+            set revElems to entire contents of w
+            repeat with rel in revElems
+              try
+                if (role of rel) is "AXButton" then
+                  set rnm to (name of rel) as string
+                  if rnm is "Cancel" then
+                    click rel
+                    exit repeat
+                  end if
+                end if
+              end try
+            end repeat
+          end try
+          return "ended"
+        else
+          repeat with el in allElems
+            try
+              if (role of el) is "AXButton" then
+                set nm to (name of el) as string
+                if nm starts with "Start Lab" or nm is "Start" then
+                  return "already_ended"
+                end if
+              end if
+            end try
+          end repeat
+        end if
+      end if
+    end repeat
+  end tell
+end tell
+return "not_found"
+`;
+  const axRes = await runAppleScript(axScript).catch(() => '');
+  if (axRes === 'ended' || axRes === 'already_ended') {
+    return {
+      ended: true,
+      message:
+        axRes === 'already_ended'
+          ? 'Lab is already ended in Google Chrome.'
+          : 'Clicked "End Lab" and confirmed termination in Google Chrome.',
+    };
+  }
+  return {
+    ended: false,
+    message: 'Could not locate an active "End Lab" button in the selected Chrome tab.',
+  };
 }
 
 /**

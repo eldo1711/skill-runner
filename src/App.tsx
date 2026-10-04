@@ -77,6 +77,12 @@ export default function App() {
   const [credDraft, setCredDraft] = useState<LabCredentials>(INITIAL_STATE.credentials);
   const [scanningWindows, setScanningWindows] = useState<boolean>(false);
   const [syncingLab, setSyncingLab] = useState<boolean>(false);
+  const [endingLab, setEndingLab] = useState<boolean>(false);
+  const [showSwitchCourseModal, setShowSwitchCourseModal] = useState<boolean>(false);
+  const [switchingCourse, setSwitchingCourse] = useState<boolean>(false);
+  const [newCourseUrl, setNewCourseUrl] = useState<string>('');
+  const [newCourseTabKey, setNewCourseTabKey] = useState<string>('');
+  const [endCurrentBeforeSwitch, setEndCurrentBeforeSwitch] = useState<boolean>(true);
   const [showBridgeModal, setShowBridgeModal] = useState<boolean>(false);
   const [pendingActionLabel, setPendingActionLabel] = useState<string | null>(null);
   const pendingActionRef = useRef<(() => Promise<void>) | null>(null);
@@ -314,6 +320,47 @@ export default function App() {
 
   const handleSkipStep = async () => {
     await apiPost('/api/lab/skip-step');
+  };
+
+  const handleEndLab = async () => {
+    await ensureMacBridgeConnected('End Current Lab', async () => {
+      setEndingLab(true);
+      try {
+        await apiPost('/api/lab/end');
+      } finally {
+        setEndingLab(false);
+      }
+    });
+  };
+
+  const handleOpenSwitchCourseModal = async () => {
+    setEndCurrentBeforeSwitch(Boolean(state.isLabStarted));
+    setNewCourseUrl('');
+    setNewCourseTabKey('');
+    setShowSwitchCourseModal(true);
+    if (state.macBridgeConnected) {
+      apiPost('/api/chrome/scan').catch(() => {});
+    }
+  };
+
+  const handleConfirmSwitchCourse = async (autoRun: boolean) => {
+    await ensureMacBridgeConnected('Run a Different Skill Course', async () => {
+      setSwitchingCourse(true);
+      try {
+        await apiPost('/api/lab/switch-course', {
+          url: newCourseUrl.trim() || undefined,
+          labTabKey: newCourseTabKey || undefined,
+          endCurrentFirst: endCurrentBeforeSwitch,
+          autoRun,
+        });
+        if (newCourseUrl.trim()) {
+          setUrlInput(newCourseUrl.trim());
+        }
+        setShowSwitchCourseModal(false);
+      } finally {
+        setSwitchingCourse(false);
+      }
+    });
   };
 
   const handleModeChange = async (mode: ExecutionMode) => {
@@ -768,6 +815,32 @@ export default function App() {
           >
             <SkipForward className="w-3.5 h-3.5" />
             Skip Step
+          </button>
+
+          <button
+            type="button"
+            onClick={handleEndLab}
+            disabled={endingLab}
+            className="px-3.5 py-2 rounded-lg bg-red-600/20 hover:bg-red-600/35 text-red-200 border border-red-500/40 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition disabled:opacity-60"
+            title="Stop execution, click End Lab in Chrome, and clear temporary credentials"
+          >
+            {endingLab ? (
+              <RefreshCw className="w-3.5 h-3.5 text-red-400 animate-spin" />
+            ) : (
+              <Power className="w-3.5 h-3.5 text-red-400" />
+            )}
+            {endingLab ? 'Ending Lab...' : 'End Lab'}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleOpenSwitchCourseModal}
+            disabled={switchingCourse}
+            className="px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shadow-sm disabled:opacity-60"
+            title="End or clear the current lab and switch to a different Skill Course or open Chrome tab"
+          >
+            <Layers className="w-3.5 h-3.5" />
+            Run a Different Skill Course
           </button>
         </div>
       </header>
@@ -1755,6 +1828,142 @@ export default function App() {
                 className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium cursor-pointer"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Run a Different Skill Course Modal */}
+      {showSwitchCourseModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="max-w-xl w-full rounded-2xl bg-slate-900 border border-slate-700/80 shadow-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center">
+                  <Layers className="w-4 h-4 text-indigo-400" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    Run a Different Skill Course
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    End or reset the current lab session and switch to another Google Cloud Skills Boost lab
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowSwitchCourseModal(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4 text-xs text-slate-300">
+              {/* Option A: Select an Open Chrome Tab */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="font-semibold text-slate-200">
+                    Option 1: Select an Open Chrome Lab Tab
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleScanChromeWindows}
+                    disabled={scanningWindows}
+                    className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1 cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${scanningWindows ? 'animate-spin' : ''}`} />
+                    Refresh Open Tabs
+                  </button>
+                </div>
+                <select
+                  value={newCourseTabKey}
+                  onChange={(e) => {
+                    setNewCourseTabKey(e.target.value);
+                    if (e.target.value) setNewCourseUrl('');
+                  }}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="">-- Choose an Open Chrome Tab (or paste a URL below) --</option>
+                  {chromeTabs.map((t) => (
+                    <option key={t.key} value={t.key}>
+                      {formatTabLabel(t)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Option B: Paste a New Skill Course / Lab URL */}
+              <div className="space-y-1.5">
+                <label className="font-semibold text-slate-200 block">
+                  Option 2: Or Paste a New Skill Course / Lab URL
+                </label>
+                <input
+                  type="url"
+                  value={newCourseUrl}
+                  onChange={(e) => {
+                    setNewCourseUrl(e.target.value);
+                    if (e.target.value) setNewCourseTabKey('');
+                  }}
+                  placeholder="https://partner.skills.google/paths/... or https://partner.skills.google/focuses/..."
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3.5 py-2 text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+
+              {/* Checkbox to End Current Active Lab First */}
+              <label className="flex items-center gap-2.5 p-3 rounded-xl bg-slate-950/90 border border-slate-800 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={endCurrentBeforeSwitch}
+                  onChange={(e) => setEndCurrentBeforeSwitch(e.target.checked)}
+                  className="rounded border-slate-600 bg-slate-900 text-indigo-600 focus:ring-indigo-500"
+                />
+                <div>
+                  <span className="font-semibold text-slate-200 block">
+                    End current active lab in Google Chrome before switching
+                  </span>
+                  <span className="text-[11px] text-slate-400">
+                    Automatically clicks "End Lab" and confirms the dialog so Qwiklabs allows starting your next lab immediately.
+                  </span>
+                </div>
+              </label>
+            </div>
+
+            <div className="px-6 py-3.5 border-t border-slate-800 bg-slate-950/70 flex flex-wrap items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setShowSwitchCourseModal(false)}
+                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => handleConfirmSwitchCourse(false)}
+                disabled={switchingCourse}
+                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-500/30 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition disabled:opacity-60"
+              >
+                {switchingCourse ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <FileSearch className="w-3.5 h-3.5" />
+                )}
+                Switch & Load Course
+              </button>
+              <button
+                type="button"
+                onClick={() => handleConfirmSwitchCourse(true)}
+                disabled={switchingCourse}
+                className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shadow-sm disabled:opacity-60"
+              >
+                {switchingCourse ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                )}
+                Switch & Run Autonomous
               </button>
             </div>
           </div>

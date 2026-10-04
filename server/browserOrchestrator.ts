@@ -15,6 +15,7 @@ import {
   triggerStartLabAndExtractCredentials,
 } from './labParser.js';
 import {
+  clickEndLabInUserChrome,
   execInStudentCloudShellBridge,
   focusUserChromeTab,
   inspectStudentCloudShellWorkspace,
@@ -727,7 +728,8 @@ export class LabBrowserOrchestrator {
       this.labPage!,
       (msg) => this.addLog('action', 'lab_window', msg),
       () => this.syncLabPageFromUserChrome(),
-      this.state.labUrl
+      this.state.labCurrentUrl || this.state.labUrl,
+      parseTabKey(this.state.selectedLabTabKey)
     );
 
     this.state.credentials = {
@@ -740,7 +742,9 @@ export class LabBrowserOrchestrator {
       zone: creds.zone || this.state.credentials.zone,
       extraVars: { ...this.state.credentials.extraVars, ...creds.extraVars },
     };
-    this.state.isLabStarted = true;
+    this.state.isLabStarted = Boolean(
+      this.state.credentials.username || this.state.credentials.projectId
+    );
     this.emitState();
 
     if (this.state.tasks.length === 0) {
@@ -779,6 +783,124 @@ export class LabBrowserOrchestrator {
     this.state.isConsoleSignedIn = signedIn;
     this.setStatus('lab_parsed');
     await this.refreshScreenshots();
+  }
+
+  /**
+   * Stops any active execution loop, clicks "End Lab" + confirms termination in the user's Chrome Lab tab,
+   * and clears expired student credentials.
+   */
+  public async endCurrentLab(): Promise<{ ended: boolean; message: string }> {
+    this.pauseRequested = true;
+    this.isLoopRunning = false;
+
+    this.addLog('action', 'lab_window', 'Ending active lab session in Google Chrome...');
+    const res = await clickEndLabInUserChrome(
+      this.state.labCurrentUrl || this.state.labUrl,
+      parseTabKey(this.state.selectedLabTabKey)
+    );
+
+    this.state.isLabStarted = false;
+    this.state.isConsoleSignedIn = false;
+    this.state.labTimer = '00:00:00';
+    this.state.labInstanceId = '';
+    this.state.credentials = {
+      username: '',
+      password: '',
+      projectId: '',
+      consoleUrl: '',
+      region: '',
+      zone: '',
+      extraVars: {},
+    };
+    this.setStatus('idle');
+
+    if (res.ended) {
+      this.addLog('success', 'lab_window', res.message);
+    } else {
+      this.addLog('warn', 'lab_window', res.message);
+    }
+
+    try {
+      await this.syncLabPageFromUserChrome();
+      await this.refreshScreenshots();
+    } catch {
+      // Ignore snapshot refresh errors after ending
+    }
+    this.emitState();
+    return res;
+  }
+
+  /**
+   * Ends the current lab (if requested), resets all lab state/credentials/tasks cleanly,
+   * switches to a different Skill Course / Lab URL or open Chrome tab, and optionally starts autonomous execution.
+   */
+  public async switchSkillCourse(params: {
+    url?: string;
+    labTabKey?: string | null;
+    endCurrentFirst?: boolean;
+    autoRun?: boolean;
+  }): Promise<void> {
+    this.pauseRequested = true;
+    this.isLoopRunning = false;
+
+    if (params.endCurrentFirst && this.state.isLabStarted) {
+      await this.endCurrentLab();
+    }
+
+    this.state.isLabStarted = false;
+    this.state.isConsoleSignedIn = false;
+    this.state.labTitle = '';
+    this.state.labTimer = '00:00:00';
+    this.state.labInstanceId = '';
+    this.state.totalScore = 0;
+    this.state.maxScore = 0;
+    this.state.tasks = [];
+    this.state.activeTaskId = null;
+    this.state.activeStepId = null;
+    this.state.selectedConsoleTabKey = null;
+    this.state.selectedCloudShellTabKey = null;
+    this.state.credentials = {
+      username: '',
+      password: '',
+      projectId: '',
+      consoleUrl: '',
+      region: '',
+      zone: '',
+      extraVars: {},
+    };
+    this.setStatus('idle');
+    this.emitState();
+
+    if (params.labTabKey) {
+      this.addLog(
+        'info',
+        'lab_window',
+        `Switching to selected Chrome Lab tab (${params.labTabKey})...`
+      );
+      await this.bindChromeTargets({
+        labTabKey: params.labTabKey,
+        consoleTabKey: null,
+        cloudShellTabKey: null,
+      });
+    } else if (params.url && params.url.trim()) {
+      const cleanUrl = params.url.trim();
+      this.addLog('info', 'lab_window', `Opening new Skill Course / Lab URL: ${cleanUrl}...`);
+      await this.openLabUrl(cleanUrl);
+    } else {
+      await this.scanOpenChromeWindows(false);
+      this.addLog(
+        'info',
+        'system',
+        'Cleared previous lab session. Select an open Chrome tab or paste a new Skill Course URL to begin.'
+      );
+    }
+
+    if (params.autoRun && this.state.tasks.length > 0) {
+      this.setExecutionMode('autonomous');
+      this.startExecutionLoop(false).catch((err) => {
+        this.addLog('error', 'system', `Autonomous execution error: ${err?.message || String(err)}`);
+      });
+    }
   }
 
   /**

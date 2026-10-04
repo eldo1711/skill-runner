@@ -138,6 +138,32 @@ app.post('/api/lab/skip-step', (_req, res) => {
   res.json({ ok: true });
 });
 
+// 6b. End Current Lab Session
+app.post('/api/lab/end', async (_req, res) => {
+  try {
+    const result = await orchestrator.endCurrentLab();
+    res.json({ ok: true, ...result, state: orchestrator.getState() });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || String(err) });
+  }
+});
+
+// 6c. Switch / Run a Different Skill Course
+app.post('/api/lab/switch-course', async (req, res) => {
+  try {
+    const { url, labTabKey, endCurrentFirst, autoRun } = req.body || {};
+    await orchestrator.switchSkillCourse({
+      url: typeof url === 'string' ? url : undefined,
+      labTabKey: labTabKey !== undefined ? labTabKey : undefined,
+      endCurrentFirst: Boolean(endCurrentFirst),
+      autoRun: Boolean(autoRun),
+    });
+    res.json({ ok: true, state: orchestrator.getState() });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || String(err) });
+  }
+});
+
 // 7. Toggle Execution Mode (autonomous vs step_by_step)
 app.post('/api/lab/mode', (req, res) => {
   const mode: ExecutionMode =

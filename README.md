@@ -113,6 +113,8 @@ skills-runner/
 | `/api/lab/run` | `POST` | `{ "singleStep": false }` | Starts or resumes the autonomous task execution & verification loop |
 | `/api/lab/pause` | `POST` | `{}` | Pauses the active execution loop |
 | `/api/lab/skip-step` | `POST` | `{}` | Skips the currently active step |
+| `/api/lab/end` | `POST` | `{}` | Stops execution, clicks "End Lab" + confirms termination in Google Chrome, and clears expired credentials |
+| `/api/lab/switch-course` | `POST` | `{ "url": "...", "labTabKey": "win:tab", "endCurrentFirst": true, "autoRun": true }` | Ends the active lab (optional), resets state, switches to a new Skill Course URL or Chrome tab, and optionally starts autonomous execution |
 | `/api/lab/mode` | `POST` | `{ "mode": "autonomous" \| "step_by_step" }` | Switches between Autonomous and Step-by-Step execution modes |
 | `/api/lab/override` | `POST` | `{ "instruction": "..." }` | Queues a live operator override instruction for the next synthesis turn |
 | `/api/lab/credentials` | `POST` | `{ "projectId": "...", "region": "..." }` | Manually updates or overrides extracted lab credentials and re-interpolates commands |
