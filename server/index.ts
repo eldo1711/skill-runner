@@ -59,7 +59,7 @@ app.get('/api/health', (_req, res) => {
   res.json({
     ok: true,
     service: 'skills-runner',
-    model: orchestrator.getState().activeModel || process.env.GEMINI_MODEL || 'gemini-3.5-flash',
+    model: orchestrator.getState().activeModel || process.env.GEMINI_MODEL || 'gemini-3.8-flash',
     macBridgeConnected: orchestrator.getState().macBridgeConnected,
     status: orchestrator.getState().status,
   });

@@ -268,7 +268,7 @@ export class LabBrowserOrchestrator {
       ...this.state,
       ...saved,
       availableChromeTabs: connected ? this.state.availableChromeTabs : [],
-      activeModel: this.state.activeModel || saved.activeModel || getActiveGeminiModel(),
+      activeModel: getActiveGeminiModel(),
       macBridgeConnected: connected,
     };
     this.emitState();
@@ -1282,9 +1282,22 @@ export class LabBrowserOrchestrator {
         )
         .join('\n\n');
 
-      for (let taskIdx = 0; taskIdx < this.state.tasks.length; taskIdx++) {
+        for (let taskIdx = 0; taskIdx < this.state.tasks.length; taskIdx++) {
         const task = this.state.tasks[taskIdx];
         if (!task || task.status === 'completed' || task.status === 'skipped') continue;
+
+        const hasAnyCommand = task.steps.some((s) => (s.commands || []).length > 0);
+        const isInformationalOverview =
+          !task.hasCheckProgress &&
+          !hasAnyCommand &&
+          /\b(overview|introduction|scenario|objectives?)\b/i.test(task.title);
+        if (isInformationalOverview) {
+          task.status = 'completed';
+          for (const s of task.steps) s.status = 'completed';
+          this.addLog('info', 'system', `Skipped informational section: ${task.title}`);
+          this.emitState();
+          continue;
+        }
 
         // Pre-task live score & completion check: if this task is already verified on Qwiklabs, mark it completed and advance immediately
         if (task.hasCheckProgress && this.state.isLabStarted) {

@@ -596,13 +596,15 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
       if (
         !title ||
         /^[a-z]{2,8}\d{2,5}$/i.test(title) ||
-        lowerTitle === 'overview' ||
+        lowerTitle.includes('overview') ||
+        lowerTitle.includes('introduction') ||
         lowerTitle === 'objective' ||
         lowerTitle === 'objectives' ||
         lowerTitle === 'setup' ||
         lowerTitle.includes('setup and requirements') ||
         lowerTitle.includes('before you click') ||
         lowerTitle.includes('challenge scenario') ||
+        lowerTitle.includes('scenario') ||
         lowerTitle.includes('your challenge') ||
         lowerTitle.includes('related learning') ||
         lowerTitle.includes('congratulations') ||

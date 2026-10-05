@@ -407,6 +407,45 @@ async function runVerificationTests() {
     '✓ macBridgeAgent.ts pure-ESM syntax & standalone Incognito/OAuth RPC handlers verified.'
   );
 
+  // 10. Verify primary_project.* template interpolation and Challenge lab overview filtering
+  const primaryInterpolated = interpolateLabVariables(
+    'PROJECT_ID={{{ primary_project.project_id | "your-gcp-project-id" }}} MODEL={{{ primary_project.startup_script.gemini_flash_model_id | "gemini-model-id" }}}',
+    modernParsed.credentials
+  );
+  if (
+    primaryInterpolated !==
+    'PROJECT_ID=qwiklabs-gcp-02-44b374896675 MODEL=gemini-2.5-flash'
+  ) {
+    throw new Error(`primary_project interpolation failed: ${primaryInterpolated}`);
+  }
+
+  await page.setContent(`
+    <!DOCTYPE html>
+    <html>
+      <body>
+        <div class="js-lab-content-body">
+          <h2>Challenge lab overview</h2>
+          <p>Scenario description with no tasks.</p>
+          <h2>Task 1. Evaluate model responses</h2>
+          <ol><li>Run the evaluation in evaluation.ipynb</li></ol>
+          <ql-activity-tracking step="1">Check my progress</ql-activity-tracking>
+        </div>
+      </body>
+    </html>
+  `);
+  const overviewFiltered = await parseLabPageDom(page);
+  if (
+    overviewFiltered.tasks.length !== 1 ||
+    !overviewFiltered.tasks[0].title.includes('Task 1')
+  ) {
+    throw new Error(
+      `Expected 'Challenge lab overview' to be skipped, got tasks: ${JSON.stringify(
+        overviewFiltered.tasks.map((t) => t.title)
+      )}`
+    );
+  }
+  console.log('✓ Challenge lab overview filtering & primary_project.* interpolation verified.');
+
   await browser.close();
   console.log('✅ All verification tests passed!');
 }

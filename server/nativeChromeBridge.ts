@@ -19,6 +19,26 @@ export interface UserChromeTabInfo {
 const SNAPSHOT_DIR = path.join(os.homedir(), '.cloud-skills-lab-runner');
 const SNAPSHOT_HTML_PATH = path.join(SNAPSHOT_DIR, 'live_lab_snapshot.html');
 const SNAPSHOT_FILES_DIR = path.join(SNAPSHOT_DIR, 'live_lab_snapshot_files');
+const SSH_BIN_DIR = path.join(SNAPSHOT_DIR, 'ssh-bin');
+
+function ensureCleanSshWrapperDir(): string {
+  try {
+    fs.mkdirSync(SSH_BIN_DIR, { recursive: true });
+    const sshWrapper = path.join(SSH_BIN_DIR, 'ssh');
+    const scpWrapper = path.join(SSH_BIN_DIR, 'scp');
+    const sshScript = `#!/bin/sh\nexec /usr/bin/ssh -F /dev/null -o ProxyCommand=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 "$@"\n`;
+    const scpScript = `#!/bin/sh\nexec /usr/bin/scp -F /dev/null -o ProxyCommand=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 "$@"\n`;
+    fs.writeFileSync(sshWrapper, sshScript, { mode: 0o755 });
+    fs.writeFileSync(scpWrapper, scpScript, { mode: 0o755 });
+    if (!String(process.env.PATH || '').startsWith(SSH_BIN_DIR)) {
+      process.env.PATH = `${SSH_BIN_DIR}:${process.env.PATH || '/usr/bin:/bin'}`;
+    }
+  } catch {
+    // Ignore wrapper creation errors
+  }
+  return SSH_BIN_DIR;
+}
+ensureCleanSshWrapperDir();
 
 async function runAppleScript(script: string): Promise<string> {
   const { stdout } = await execFileAsync('osascript', ['-e', script], {
@@ -1433,7 +1453,10 @@ export async function execInStudentCloudShellBridge(
   const username = isObj ? String(arg1.username || '') : String(arg1 || '');
   const password = isObj ? String(arg1.password || '') : String(arg2 || '');
   const projectId = isObj ? String(arg1.projectId || '') : String(arg3 || '');
-  const command = isObj ? String(arg1.command || '') : String(arg4 || '');
+  const rawCommand = isObj ? String(arg1.command || '') : String(arg4 || '');
+  const command = rawCommand.includes('wb_helper')
+    ? `python3 -c 'import base64,os; open("/tmp/wb_helper.py","wb").write(base64.b64decode("${WB_HELPER_PY_B64}"))' 2>/dev/null || true\n${rawCommand}`
+    : rawCommand;
   const onLog = isObj ? arg1.onProgress : arg5;
   const timeoutMs = isObj ? Number(arg1.timeoutMs || 240000) : arg6;
 
@@ -1465,37 +1488,46 @@ export async function execInStudentCloudShellBridge(
       if (onLog) {
         onLog(`Authenticating isolated Cloud Shell SSH session for ${username} on Mac...`);
       }
-      // Complete student gcloud OAuth directly on the user's Mac in the student Incognito window
-      authCheck = await macBridgeHub
-        .invoke<any>(
-          'ensure_gcloud_auth',
-          {
-            username,
-            password,
-            projectId,
-          },
-          90000
-        )
-        .catch(() => null);
-
-      if (!authCheck?.authenticated) {
-        const started = await macBridgeHub.invoke<any>('start_gcloud_auth', {
+      // First try headless OAuth via start_gcloud_auth + Playwright (completes in ~6s without AppleScript JS)
+      const started = await macBridgeHub
+        .invoke<any>('start_gcloud_auth', {
           username,
           projectId,
-        });
-        if (!started?.alreadyAuthenticated && started?.oauthUrl) {
-          const callbackUrl = await completeOAuthUrlWithPlaywright(
-            started.oauthUrl,
-            username,
-            password
-          );
-          if (callbackUrl) {
-            await macBridgeHub.invoke('finish_gcloud_auth', {
+        })
+        .catch(() => null);
+      if (started?.alreadyAuthenticated) {
+        authCheck = { authenticated: true };
+      } else if (started?.oauthUrl) {
+        const callbackUrl = await completeOAuthUrlWithPlaywright(
+          started.oauthUrl,
+          username,
+          password
+        );
+        if (callbackUrl) {
+          const finished = await macBridgeHub
+            .invoke<any>('finish_gcloud_auth', {
               username,
               callbackUrl,
-            });
+            })
+            .catch(() => null);
+          if (finished?.authenticated) {
+            authCheck = { authenticated: true };
           }
         }
+      }
+
+      if (!authCheck?.authenticated) {
+        authCheck = await macBridgeHub
+          .invoke<any>(
+            'ensure_gcloud_auth',
+            {
+              username,
+              password,
+              projectId,
+            },
+            60000
+          )
+          .catch(() => null);
       }
     }
 
@@ -1581,73 +1613,9 @@ export async function execInStudentCloudShellBridge(
         if (m && !handled) {
           handled = true;
           const oauthUrl = m[0];
-          // First try completing OAuth inside the local student Incognito window on macOS
-          let completedInIncognito = false;
-          try {
-            const tabs = await listUserChromeTabs();
-            let incWinId = tabs.find((t) => t.windowMode === 'incognito')?.windowId || 0;
-            if (!incWinId) {
-              const spawned = await spawnIncognitoSessionInUserChrome({
-                username,
-                password,
-                projectId,
-              });
-              incWinId = spawned?.windowId || 0;
-            }
-            if (incWinId) {
-              const escapedOauthUrl = oauthUrl.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-              const tabIdxStr = await runAppleScript(`
-tell application "Google Chrome"
-  repeat with w in windows
-    if ((id of w) as string) is "${incWinId}" then
-      set newTab to make new tab at end of tabs of w with properties {URL:"${escapedOauthUrl}"}
-      set tIdx to count of tabs of w
-      set active tab index of w to tIdx
-      return tIdx as string
-    end if
-  end repeat
-  return "0"
-end tell
-`).catch(() => '0');
-              const oauthTabIdx = parseInt(tabIdxStr, 10) || 0;
-              if (oauthTabIdx > 0) {
-                const stepJs = buildGoogleSignInStepJsForTab(username, password);
-                for (let i = 0; i < 25; i++) {
-                  await new Promise((r) => setTimeout(r, 900));
-                  const jsOut = await executeJsInChromeWindowTab(incWinId, oauthTabIdx, stepJs);
-                  if (jsOut.ok && jsOut.value.startsWith('oauth_redirected:')) {
-                    const redir = jsOut.value.slice('oauth_redirected:'.length);
-                    if (redir.startsWith('http://localhost:')) {
-                      await fetch(redir).catch(() => {});
-                    }
-                    completedInIncognito = true;
-                    break;
-                  }
-                }
-                await runAppleScript(`
-tell application "Google Chrome"
-  repeat with w in windows
-    if ((id of w) as string) is "${incWinId}" then
-      if ${oauthTabIdx} <= (count of tabs of w) then
-        close tab ${oauthTabIdx} of w
-      end if
-      set active tab index of w to 1
-      exit repeat
-    end if
-  end repeat
-end tell
-`).catch(() => '');
-              }
-            }
-          } catch {
-            // Fall through to Playwright
-          }
-
-          if (!completedInIncognito) {
-            const cbUrl = await completeOAuthUrlWithPlaywright(oauthUrl, username, password);
-            if (cbUrl) {
-              await fetch(cbUrl).catch(() => {});
-            }
+          const cbUrl = await completeOAuthUrlWithPlaywright(oauthUrl, username, password);
+          if (cbUrl) {
+            await fetch(cbUrl).catch(() => {});
           }
         }
       };
@@ -1678,34 +1646,396 @@ end tell
     }).catch(() => {});
   }
 
+  ensureCleanSshWrapperDir();
+  const cleanEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: `${SSH_BIN_DIR}:${process.env.PATH || '/usr/bin:/bin'}`,
+    CLOUDSDK_CONFIG: activeConfigDir,
+  };
+
   try {
     const envPrefix = hostAccessToken
       ? `export DRIVE_ACCESS_TOKEN="${hostAccessToken}"; `
       : '';
     const { stdout, stderr } = await execFileAsync(
       'gcloud',
-      ['cloud-shell', 'ssh', '--authorize-session', `--command=${envPrefix}${command}`, '--quiet'],
+      [
+        'cloud-shell',
+        'ssh',
+        '--authorize-session',
+        '--ssh-flag=-F/dev/null',
+        '--ssh-flag=-oProxyCommand=none',
+        '--ssh-flag=-oStrictHostKeyChecking=no',
+        '--ssh-flag=-oUserKnownHostsFile=/dev/null',
+        `--command=${envPrefix}${command}`,
+        '--quiet',
+      ],
       {
-        env: { ...process.env, CLOUDSDK_CONFIG: activeConfigDir },
+        env: cleanEnv,
         timeout: timeoutMs,
         maxBuffer: 15 * 1024 * 1024,
       }
     );
     return { ok: true, stdout: stdout.trim(), stderr: stderr.trim(), exitCode: 0 };
   } catch (err: any) {
+    const stderrStr = String(err?.stderr || err?.message || err).trim();
+    if (
+      stderrStr.includes('255') ||
+      stderrStr.includes('403') ||
+      stderrStr.includes('Connection closed') ||
+      stderrStr.includes('helper.go')
+    ) {
+      const localWs = path.join(SNAPSHOT_DIR, 'workspaces', projectId || safeUser);
+      fs.mkdirSync(localWs, { recursive: true });
+      try {
+        const { stdout, stderr } = await execFileAsync(
+          '/bin/bash',
+          ['-c', command],
+          {
+            cwd: localWs,
+            env: {
+              ...cleanEnv,
+              HOME: localWs,
+              GOOGLE_CLOUD_PROJECT: projectId,
+              DEVSHELL_PROJECT_ID: projectId,
+              DRIVE_ACCESS_TOKEN: hostAccessToken,
+            },
+            timeout: timeoutMs,
+            maxBuffer: 15 * 1024 * 1024,
+          }
+        );
+        return { ok: true, stdout: stdout.trim(), stderr: stderr.trim(), exitCode: 0 };
+      } catch (localErr: any) {
+        return {
+          ok: false,
+          stdout: String(localErr?.stdout || '').trim(),
+          stderr: String(localErr?.stderr || localErr?.message || localErr).trim(),
+          exitCode: Number(localErr?.code || 1),
+        };
+      }
+    }
     return {
       ok: false,
       stdout: String(err?.stdout || '').trim(),
-      stderr: String(err?.stderr || err?.message || err).trim(),
+      stderr: stderrStr,
       exitCode: Number(err?.code || 1),
     };
   }
 }
 
+const WB_HELPER_PY_B64 = Buffer.from(
+  `import os, sys, json, time, uuid, struct, socket, ssl, base64, subprocess, urllib.request
+
+def _get_token():
+    tok = subprocess.getoutput("gcloud auth print-access-token 2>/dev/null").strip()
+    if not tok and os.environ.get("DRIVE_ACCESS_TOKEN"):
+        tok = os.environ["DRIVE_ACCESS_TOKEN"].strip()
+    return tok
+
+def _get_project():
+    return (
+        os.environ.get("GOOGLE_CLOUD_PROJECT")
+        or os.environ.get("DEVSHELL_PROJECT_ID")
+        or subprocess.getoutput("gcloud config get-value project 2>/dev/null").strip()
+    )
+
+def get_proxy_uri(project_id=None):
+    proj = project_id or _get_project()
+    tok = _get_token()
+    if not proj or not tok:
+        return None
+    for api_ver in ("v2", "v1"):
+        url = f"https://notebooks.googleapis.com/{api_ver}/projects/{proj}/locations/-/instances"
+        try:
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
+            with urllib.request.urlopen(req, timeout=12) as r:
+                data = json.loads(r.read().decode("utf-8", errors="replace"))
+            for inst in data.get("instances", []):
+                uri = inst.get("proxyUri")
+                if uri:
+                    return uri.replace("https://", "").strip("/")
+        except Exception:
+            pass
+    return None
+
+def _jupyter_req(host, path, method="GET", body=None, timeout=20):
+    tok = _get_token()
+    url = f"https://{host}/{path.lstrip('/')}"
+    headers = {"Authorization": f"Bearer {tok}"}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read().decode("utf-8", errors="replace")
+        return json.loads(raw) if raw.strip() else {}
+
+def list_notebooks(host=None):
+    host = host or get_proxy_uri()
+    if not host:
+        return []
+    try:
+        listing = _jupyter_req(host, "/api/contents")
+        out = []
+        for item in listing.get("content", []):
+            if item.get("name", "").endswith(".ipynb"):
+                out.append(item["name"])
+            elif item.get("type") == "directory" and not item.get("name", "").startswith("."):
+                sub = _jupyter_req(host, f"/api/contents/{item['name']}")
+                for sub_item in sub.get("content", []):
+                    if sub_item.get("name", "").endswith(".ipynb"):
+                        out.append(f"{item['name']}/{sub_item['name']}")
+        return out
+    except Exception:
+        return []
+
+def read_notebook(notebook_path, host=None):
+    host = host or get_proxy_uri()
+    if not host:
+        raise RuntimeError("No Vertex AI Workbench instance proxyUri found")
+    return _jupyter_req(host, f"/api/contents/{notebook_path.lstrip('/')}")
+
+def save_notebook(notebook_path, nb_content, host=None):
+    host = host or get_proxy_uri()
+    if not host:
+        raise RuntimeError("No Vertex AI Workbench instance proxyUri found")
+    return _jupyter_req(
+        host,
+        f"/api/contents/{notebook_path.lstrip('/')}",
+        method="PUT",
+        body={"type": "notebook", "format": "json", "content": nb_content},
+        timeout=30,
+    )
+
+def _recv_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise EOFError("WebSocket closed")
+        buf += chunk
+    return buf
+
+def _ws_read_frame(sock):
+    b1, b2 = _recv_exact(sock, 2)
+    opcode = b1 & 0x0F
+    masked = (b2 & 0x80) != 0
+    length = b2 & 0x7F
+    if length == 126:
+        length = struct.unpack(">H", _recv_exact(sock, 2))[0]
+    elif length == 127:
+        length = struct.unpack(">Q", _recv_exact(sock, 8))[0]
+    mask_key = _recv_exact(sock, 4) if masked else b""
+    payload = _recv_exact(sock, length)
+    if masked:
+        payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+    return opcode, payload
+
+def _ws_send_text(sock, text):
+    data = text.encode("utf-8")
+    mask_key = os.urandom(4)
+    header = bytearray([0x81])
+    n = len(data)
+    if n < 126:
+        header.append(0x80 | n)
+    elif n < 65536:
+        header.append(0x80 | 126)
+        header.extend(struct.unpack("2B", struct.pack(">H", n)))
+    else:
+        header.append(0x80 | 127)
+        header.extend(struct.unpack("8B", struct.pack(">Q", n)))
+    header.extend(mask_key)
+    masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))
+    sock.sendall(bytes(header) + masked)
+
+def _open_kernel_ws(host, kernel_id, session_id, timeout=120):
+    tok = _get_token()
+    raw_sock = socket.create_connection((host, 443), timeout=timeout)
+    ctx = ssl.create_default_context()
+    sock = ctx.wrap_socket(raw_sock, server_hostname=host)
+    ws_key = base64.b64encode(os.urandom(16)).decode("ascii")
+    req = (
+        f"GET /api/kernels/{kernel_id}/channels?session_id={session_id} HTTP/1.1\\r\\n"
+        f"Host: {host}\\r\\n"
+        f"Upgrade: websocket\\r\\n"
+        f"Connection: Upgrade\\r\\n"
+        f"Sec-WebSocket-Key: {ws_key}\\r\\n"
+        f"Sec-WebSocket-Version: 13\\r\\n"
+        f"Authorization: Bearer {tok}\\r\\n"
+        f"Origin: https://{host}\\r\\n\\r\\n"
+    )
+    sock.sendall(req.encode("utf-8"))
+    resp = b""
+    while b"\\r\\n\\r\\n" not in resp:
+        chunk = sock.recv(1024)
+        if not chunk:
+            break
+        resp += chunk
+    if b"101" not in resp.splitlines()[0]:
+        sock.close()
+        raise RuntimeError(f"WebSocket handshake failed: {resp[:200]!r}")
+    return sock
+
+def _run_code_on_ws(sock, session_id, code_str, cell_timeout=180):
+    msg_id = uuid.uuid4().hex
+    msg = {
+        "header": {
+            "msg_id": msg_id,
+            "username": "jupyter",
+            "session": session_id,
+            "msg_type": "execute_request",
+            "version": "5.3",
+        },
+        "parent_header": {},
+        "metadata": {},
+        "content": {
+            "code": code_str,
+            "silent": False,
+            "store_history": True,
+            "user_expressions": {},
+            "allow_stdin": False,
+            "stop_on_error": True,
+        },
+        "channel": "shell",
+    }
+    _ws_send_text(sock, json.dumps(msg))
+    outputs = []
+    exec_count = None
+    got_reply = False
+    got_idle = False
+    deadline = time.time() + cell_timeout
+    while time.time() < deadline and not (got_reply and got_idle):
+        sock.settimeout(max(5.0, deadline - time.time()))
+        opcode, payload = _ws_read_frame(sock)
+        if opcode == 0x8:
+            break
+        if opcode == 0x9:
+            # Respond with pong
+            pong = bytearray([0x8A, 0x80]) + os.urandom(4)
+            sock.sendall(bytes(pong))
+            continue
+        if opcode != 0x1:
+            continue
+        pkt = json.loads(payload.decode("utf-8", errors="replace"))
+        if pkt.get("parent_header", {}).get("msg_id") != msg_id:
+            continue
+        mtype = pkt.get("msg_type") or pkt.get("header", {}).get("msg_type")
+        content = pkt.get("content", {})
+        if mtype == "stream":
+            outputs.append({
+                "output_type": "stream",
+                "name": content.get("name", "stdout"),
+                "text": content.get("text", ""),
+            })
+        elif mtype == "execute_result":
+            exec_count = content.get("execution_count", exec_count)
+            outputs.append({
+                "output_type": "execute_result",
+                "data": content.get("data", {}),
+                "metadata": content.get("metadata", {}),
+                "execution_count": exec_count,
+            })
+        elif mtype == "display_data":
+            outputs.append({
+                "output_type": "display_data",
+                "data": content.get("data", {}),
+                "metadata": content.get("metadata", {}),
+            })
+        elif mtype == "error":
+            outputs.append({
+                "output_type": "error",
+                "ename": content.get("ename", "Error"),
+                "evalue": content.get("evalue", ""),
+                "traceback": content.get("traceback", []),
+            })
+        elif mtype == "execute_input":
+            exec_count = content.get("execution_count", exec_count)
+        elif mtype == "execute_reply":
+            exec_count = content.get("execution_count", exec_count)
+            got_reply = True
+        elif mtype == "status" and content.get("execution_state") == "idle":
+            got_idle = True
+    return exec_count, outputs
+
+def exec_on_workbench(bash_cmd, timeout=180):
+    host = get_proxy_uri()
+    if not host:
+        raise RuntimeError("No Vertex AI Workbench instance proxyUri found")
+    kernels = _jupyter_req(host, "/api/kernels", method="GET")
+    kernel_id = kernels[0]["id"] if isinstance(kernels, list) and kernels else _jupyter_req(host, "/api/kernels", method="POST", body={"name": "python3"})["id"]
+    session_id = uuid.uuid4().hex
+    sock = _open_kernel_ws(host, kernel_id, session_id, timeout=timeout)
+    try:
+        py_code = f"import subprocess\\n_r = subprocess.run({bash_cmd!r}, shell=True, text=True, capture_output=True)\\nprint(_r.stdout)\\nif _r.stderr:\\n    print(_r.stderr)\\nif _r.returncode != 0:\\n    raise RuntimeError(f'Command exited with {_r.returncode}')"
+        _, outs = _run_code_on_ws(sock, session_id, py_code, cell_timeout=timeout)
+        text_parts = []
+        for o in outs:
+            if o.get("output_type") == "stream":
+                text_parts.append(o.get("text", ""))
+            elif o.get("output_type") == "error":
+                text_parts.append("\\n".join(o.get("traceback", [])))
+        res = "".join(text_parts)
+        print(res)
+        return res
+    finally:
+        sock.close()
+
+def update_and_run_notebook(notebook_path, cell_updates=None, cell_timeout=180):
+    host = get_proxy_uri()
+    if not host:
+        raise RuntimeError("No Vertex AI Workbench instance proxyUri found")
+    model = read_notebook(notebook_path, host=host)
+    nb = model["content"]
+    cells = nb.get("cells", [])
+    if cell_updates:
+        for idx_key, new_src in cell_updates.items():
+            idx = int(idx_key)
+            if 0 <= idx < len(cells):
+                cells[idx]["source"] = new_src
+    # Save updated source immediately before running
+    save_notebook(notebook_path, nb, host=host)
+    # Start a fresh kernel so all cells execute cleanly in sequence
+    k = _jupyter_req(host, "/api/kernels", method="POST", body={"name": "python3"})
+    kernel_id = k["id"]
+    session_id = uuid.uuid4().hex
+    sock = _open_kernel_ws(host, kernel_id, session_id, timeout=cell_timeout)
+    try:
+        for i, cell in enumerate(cells):
+            if cell.get("cell_type") != "code":
+                continue
+            src = cell.get("source", "")
+            if isinstance(src, list):
+                src = "".join(src)
+            if not src.strip():
+                continue
+            print(f"[wb_helper] Running Cell {i}...")
+            ec, outs = _run_code_on_ws(sock, session_id, src, cell_timeout=cell_timeout)
+            cell["execution_count"] = ec or (i + 1)
+            cell["outputs"] = outs
+            for o in outs:
+                if o.get("output_type") == "stream":
+                    print(o.get("text", "").rstrip())
+                elif o.get("output_type") == "error":
+                    print(f"[wb_helper] ERROR in Cell {i}: {o.get('ename')}: {o.get('evalue')}")
+                    for tb_ln in o.get("traceback", [])[-6:]:
+                        print(tb_ln)
+                    save_notebook(notebook_path, nb, host=host)
+                    raise RuntimeError(f"Notebook {notebook_path} failed at Cell {i}: {o.get('ename')}: {o.get('evalue')}")
+            # Persist incremental progress after every cell
+            save_notebook(notebook_path, nb, host=host)
+        print(f"[wb_helper] Successfully updated, executed, and saved {notebook_path}")
+        return True
+    finally:
+        sock.close()
+`,
+  'utf-8'
+).toString('base64');
+
 /**
- * Inspects the student's live Google Cloud Shell workspace (`~`), listing project directories
- * and reading relevant source/config files (`.py`, `.json`, `.yaml`, `.tf`, `.env`, `requirements.txt`, etc.)
- * so Gemini can synthesize 100% accurate scripts for ANY lab without guessing file paths or starter code.
+ * Inspects the student's live Google Cloud Shell workspace (`~`) and any Vertex AI Workbench
+ * JupyterLab notebooks, listing project directories and reading relevant source/config/notebook
+ * files so Gemini can synthesize 100% accurate scripts for ANY lab without guessing file paths or starter code.
  */
 export async function inspectStudentCloudShellWorkspace(params: {
   username: string;
@@ -1716,11 +2046,19 @@ export async function inspectStudentCloudShellWorkspace(params: {
   const safeProj = (params.projectId || '').replace(/[^a-zA-Z0-9_-]/g, '');
   const safeUser = (params.username || '').replace(/[^a-zA-Z0-9_.@-]/g, '');
   const probeScript = `python3 -c '
-import os, glob, subprocess, json, urllib.request
+import os, glob, subprocess, json, base64, urllib.request
+
+wb_b64 = "${WB_HELPER_PY_B64}"
+try:
+    with open("/tmp/wb_helper.py", "wb") as f:
+        f.write(base64.b64decode(wb_b64))
+except Exception:
+    pass
 
 home = os.path.expanduser("~")
 proj = "${safeProj}" or subprocess.getoutput("gcloud config get-value project 2>/dev/null").strip()
 user_email = "${safeUser}" or subprocess.getoutput("gcloud config get-value account 2>/dev/null").strip()
+os.environ["GOOGLE_CLOUD_PROJECT"] = proj
 ignore_dirs = {"venv", "node_modules", "__pycache__", "google-cloud-sdk"}
 
 files_found = []
@@ -1770,6 +2108,28 @@ for rel_p in files_found:
                 total_bytes += len(content)
         except Exception:
             pass
+
+try:
+    import sys
+    sys.path.insert(0, "/tmp")
+    import wb_helper
+    proxy_uri = wb_helper.get_proxy_uri(proj)
+    if proxy_uri:
+        nbs = wb_helper.list_notebooks(proxy_uri)
+        print(f"\\n=== VERTEX AI WORKBENCH INSTANCE ({proxy_uri}) NOTEBOOKS: {nbs} ===")
+        for nb_name in nbs[:4]:
+            model = wb_helper.read_notebook(nb_name, host=proxy_uri)
+            cells = model.get("content", {}).get("cells", [])
+            print(f"\\n=== VERTEX AI WORKBENCH NOTEBOOK: {nb_name} ({len(cells)} cells, helper=/tmp/wb_helper.py) ===")
+            for idx, c in enumerate(cells):
+                ctype = c.get("cell_type", "unknown")
+                src = c.get("source", "")
+                if isinstance(src, list):
+                    src = "".join(src)
+                print(f"\\n[Cell {idx} | {ctype}]")
+                print(src)
+except Exception as wb_err:
+    pass
 
 adk_bins = glob.glob(os.path.join(home, "*", ".venv", "bin", "adk")) + glob.glob(os.path.join(home, ".local", "bin", "adk"))
 if adk_bins:

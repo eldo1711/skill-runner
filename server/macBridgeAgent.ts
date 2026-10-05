@@ -39,7 +39,28 @@ const SNAPSHOT_HTML_PATH = path.join(SNAPSHOT_DIR, 'live_lab_snapshot.html');
 const SNAPSHOT_FILES_DIR = path.join(SNAPSHOT_DIR, 'live_lab_snapshot_files');
 const STATE_FILE_PATH = path.join(SNAPSHOT_DIR, 'runner_state.json');
 
+const SSH_BIN_DIR = path.join(SNAPSHOT_DIR, 'ssh-bin');
+
+function ensureCleanSshWrapperDir() {
+  try {
+    fs.mkdirSync(SSH_BIN_DIR, { recursive: true });
+    const sshWrapperPath = path.join(SSH_BIN_DIR, 'ssh');
+    const scpWrapperPath = path.join(SSH_BIN_DIR, 'scp');
+    const sshScript = `#!/bin/sh\nexec /usr/bin/ssh -F /dev/null -o ProxyCommand=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 "$@"\n`;
+    const scpScript = `#!/bin/sh\nexec /usr/bin/scp -F /dev/null -o ProxyCommand=none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 "$@"\n`;
+    fs.writeFileSync(sshWrapperPath, sshScript, { mode: 0o755 });
+    fs.writeFileSync(scpWrapperPath, scpScript, { mode: 0o755 });
+    fs.chmodSync(sshWrapperPath, 0o755);
+    fs.chmodSync(scpWrapperPath, 0o755);
+  } catch {
+    // Ignore
+  }
+}
+
+ensureCleanSshWrapperDir();
+
 const EXTRA_MAC_PATHS = [
+  SSH_BIN_DIR,
   '/opt/homebrew/bin',
   '/opt/homebrew/sbin',
   '/opt/homebrew/share/google-cloud-sdk/bin',
@@ -56,6 +77,9 @@ for (const p of EXTRA_MAC_PATHS) {
     process.env.PATH = `${p}:${process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'}`;
   }
 }
+if (!(process.env.PATH || '').startsWith(`${SSH_BIN_DIR}:`)) {
+  process.env.PATH = `${SSH_BIN_DIR}:${process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'}`;
+}
 
 async function runAppleScript(script, timeoutMs = 35000) {
   const { stdout } = await execFileAsync('osascript', ['-e', script], {
@@ -63,6 +87,32 @@ async function runAppleScript(script, timeoutMs = 35000) {
     maxBuffer: 10 * 1024 * 1024,
   });
   return stdout.trim();
+}
+
+let attemptedEnableAppleEventsJs = false;
+
+async function tryEnableChromeAppleEventsJs() {
+  if (attemptedEnableAppleEventsJs) return;
+  attemptedEnableAppleEventsJs = true;
+  const menuScript = `
+tell application "Google Chrome" to activate
+delay 0.2
+tell application "System Events"
+  tell process "Google Chrome"
+    try
+      set devMenu to menu 1 of menu item "Developer" of menu 1 of menu bar item "View" of menu bar 1
+      set jsItem to menu item "Allow JavaScript from Apple Events" of devMenu
+      set markChar to (value of attribute "AXMenuItemMarkChar" of jsItem)
+      if markChar is missing value or markChar is "" then
+        click jsItem
+        delay 0.3
+        key code 36
+      end if
+    end try
+  end tell
+end tell
+`;
+  await runAppleScript(menuScript, 5000).catch(() => '');
 }
 
 async function executeJsInUserChromeTab(windowId, tabIndex, jsCode, timeoutMs = 15000) {
@@ -86,9 +136,17 @@ tell application "Google Chrome"
   return "ERR:tab_not_found"
 end tell
 `;
-  const out = await runAppleScript(script, timeoutMs).catch((e) => `ERR:${e?.message || e}`);
+  let out = await runAppleScript(script, timeoutMs).catch((e) => `ERR:${e?.message || e}`);
   if (out.startsWith('OK:')) {
     return { ok: true, value: out.slice(3) };
+  }
+  const errStr = out.slice(4);
+  if (!attemptedEnableAppleEventsJs && /turned off|Allow JavaScript from Apple Events/i.test(errStr)) {
+    await tryEnableChromeAppleEventsJs();
+    out = await runAppleScript(script, timeoutMs).catch((e) => `ERR:${e?.message || e}`);
+    if (out.startsWith('OK:')) {
+      return { ok: true, value: out.slice(3) };
+    }
   }
   return { ok: false, error: out.slice(4) };
 }
@@ -1277,20 +1335,21 @@ end tell
     const signInJs = buildGoogleSignInStepJs(cleanUser, cleanPass);
     let pastedEmailViaAx = false;
     let pastedPassViaAx = false;
+    let handledSpeedbumpViaAx = false;
     let consoleReadyCount = 0;
 
-    for (let attempt = 0; attempt < 35; attempt++) {
-      await new Promise((r) => setTimeout(r, 1000));
+    for (let attempt = 0; attempt < 25; attempt++) {
+      await new Promise((r) => setTimeout(r, 900));
       const jsStep = await executeJsInUserChromeTab(windowId, 1, signInJs);
       if (jsStep.ok) {
         if (jsStep.value === 'console_ready' || jsStep.value === 'console_tos_accepted') {
           consoleReadyCount++;
-          if (consoleReadyCount >= 3) break;
+          if (consoleReadyCount >= 2) break;
         }
         continue;
       }
 
-      // Fallback when Chrome's "Allow JavaScript from Apple Events" is turned off:
+      // Fast non-JS fallback when Chrome's "Allow JavaScript from Apple Events" is turned off (never call `entire contents of w`):
       const currentUrl = await getChromeTabUrl(windowId, 1);
       if (
         currentUrl.includes('console.cloud.google.com') &&
@@ -1308,34 +1367,36 @@ end tell
         await sendTextToUserChromeTab(windowId, 1, cleanUser, true);
         pastedEmailViaAx = true;
       } else if (currentUrl.includes('/challenge/pwd') && !pastedPassViaAx) {
-        await new Promise((r) => setTimeout(r, 600));
+        await new Promise((r) => setTimeout(r, 500));
         await sendTextToUserChromeTab(windowId, 1, cleanPass, true);
         pastedPassViaAx = true;
-      } else if (currentUrl.includes('/speedbump/') || currentUrl.includes('/consent')) {
-        const axConsentScript = `
+      } else if (
+        (currentUrl.includes('/speedbump/') || currentUrl.includes('/consent')) &&
+        !handledSpeedbumpViaAx
+      ) {
+        handledSpeedbumpViaAx = true;
+        const fastSpeedbumpKeys = `
 tell application "Google Chrome" to activate
+delay 0.2
 tell application "System Events"
   tell process "Google Chrome"
-    if (count of windows) > 0 then
-      set w to front window
-      set allElems to entire contents of w
-      repeat with el in allElems
-        try
-          if (role of el) is "AXButton" then
-            set nm to (name of el) as string
-            if nm is "I understand" or nm is "Accept" or nm is "Continue" or nm is "Allow" or nm is "Agree" then
-              click el
-              return "clicked"
-            end if
-          end if
-        end try
-      end repeat
-    end if
+    key code 121
+    delay 0.2
+    key code 48
+    delay 0.15
+    key code 36
   end tell
 end tell
-return "none"
 `;
-        await runAppleScript(axConsentScript).catch(() => '');
+        await runAppleScript(fastSpeedbumpKeys, 4000).catch(() => '');
+        await new Promise((r) => setTimeout(r, 1200));
+        const afterUrl = await getChromeTabUrl(windowId, 1);
+        if (afterUrl.includes('accounts.google.com')) {
+          await navigateOrOpenInUserChromeWindow(windowId, 1, targetConsoleUrl, false);
+        }
+        break;
+      } else if (attempt >= 10) {
+        break;
       }
     }
   }
@@ -1362,6 +1423,7 @@ return "none"
  * Isolated student gcloud configuration & direct Cloud Shell SSH execution
  */
 const activeGcloudLogins = new Map();
+const cloudShellFallbackProjects = new Set();
 
 function getStudentGcloudConfigDir(username) {
   const safeUser = String(username || 'default').replace(/[^a-zA-Z0-9_.-]/g, '_');
@@ -1524,7 +1586,6 @@ async function ensureStudentGcloudAuth(username, password, projectId, preferredW
     incWinId = spawned.windowId;
   }
 
-  // Try standard gcloud auth first (fewer consent screens), or with gdrive access
   for (const enableGdrive of [false, true]) {
     try {
       const started = await startStudentGcloudAuth(username, projectId, enableGdrive);
@@ -1553,8 +1614,9 @@ end tell
       if (!oauthTabIdx) continue;
 
       const stepJs = buildGoogleSignInStepJs(username, password);
-      for (let i = 0; i < 30; i++) {
-        await new Promise((r) => setTimeout(r, 900));
+      let jsDisabledAbort = false;
+      for (let i = 0; i < 18; i++) {
+        await new Promise((r) => setTimeout(r, 800));
         const status = await checkStudentGcloudAuth(username, projectId);
         if (status.authenticated) {
           break;
@@ -1568,32 +1630,9 @@ end tell
           await new Promise((r) => setTimeout(r, 1000));
           break;
         }
-        if (!jsOut.ok) {
-          // AX fallback for Continue / Allow / Sign in button on OAuth consent screen
-          const axOauthScript = `
-tell application "Google Chrome" to activate
-tell application "System Events"
-  tell process "Google Chrome"
-    if (count of windows) > 0 then
-      set w to front window
-      set allElems to entire contents of w
-      repeat with el in allElems
-        try
-          if (role of el) is "AXButton" then
-            set nm to (name of el) as string
-            if nm is "Continue" or nm is "Allow" or nm is "Sign in" or nm is "I understand" or nm is "Accept" then
-              click el
-              return "clicked"
-            end if
-          end if
-        end try
-      end repeat
-    end if
-  end tell
-end tell
-return "none"
-`;
-          await runAppleScript(axOauthScript).catch(() => '');
+        if (!jsOut.ok && /turned off|Allow JavaScript/i.test(String(jsOut.error || ''))) {
+          jsDisabledAbort = true;
+          break;
         }
       }
 
@@ -1617,6 +1656,9 @@ end tell
       if (finalStatus.authenticated) {
         return finalStatus;
       }
+      if (jsDisabledAbort) {
+        break;
+      }
     } catch {
       // Try next mode
     }
@@ -1625,7 +1667,49 @@ end tell
   return checkStudentGcloudAuth(username, projectId);
 }
 
+async function execInLocalStudentWorkspace(authStatus, projectId, command, timeoutMs = 180000) {
+  const safeProj = String(projectId || 'default').replace(/[^a-zA-Z0-9_.-]/g, '_');
+  const workspaceDir = path.join(SNAPSHOT_DIR, 'workspaces', safeProj);
+  fs.mkdirSync(workspaceDir, { recursive: true });
+
+  const env = {
+    ...process.env,
+    HOME: workspaceDir,
+    CLOUDSDK_CONFIG: authStatus.configDir,
+    CLOUDSDK_CORE_DISABLE_PROMPTS: '1',
+    GOOGLE_CLOUD_PROJECT: projectId || '',
+    DEVSHELL_PROJECT_ID: projectId || '',
+    CLOUDSDK_CORE_PROJECT: projectId || '',
+    DRIVE_ACCESS_TOKEN: authStatus.accessToken || '',
+    PATH: `${SSH_BIN_DIR}:${process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'}`,
+  };
+
+  try {
+    const { stdout, stderr } = await execFileAsync('bash', ['-c', command], {
+      cwd: workspaceDir,
+      env,
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
+      maxBuffer: 15 * 1024 * 1024,
+    });
+    return {
+      ok: true,
+      exitCode: 0,
+      stdout: stdout.trim(),
+      stderr: stderr.trim(),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      exitCode: err?.code || 1,
+      stdout: String(err?.stdout || '').trim(),
+      stderr: String(err?.stderr || err?.message || err).trim(),
+    };
+  }
+}
+
 async function execInStudentCloudShell(username, projectId, command, timeoutMs = 180000) {
+  ensureCleanSshWrapperDir();
   const authStatus = await checkStudentGcloudAuth(username, projectId);
   if (!authStatus.authenticated) {
     return {
@@ -1636,23 +1720,35 @@ async function execInStudentCloudShell(username, projectId, command, timeoutMs =
     };
   }
 
+  if (projectId && cloudShellFallbackProjects.has(projectId)) {
+    return execInLocalStudentWorkspace(authStatus, projectId, command, timeoutMs);
+  }
+
   try {
     const driveExport = authStatus.accessToken
       ? `export DRIVE_ACCESS_TOKEN="${authStatus.accessToken}"; `
       : '';
-    const envPrefix = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1; ${driveExport}`;
+    const projExport = projectId
+      ? `export GOOGLE_CLOUD_PROJECT="${projectId}"; export DEVSHELL_PROJECT_ID="${projectId}"; `
+      : '';
+    const envPrefix = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1; ${projExport}${driveExport}`;
     const { stdout, stderr } = await execFileAsync(
       'gcloud',
       [
         'cloud-shell',
         'ssh',
         '--authorize-session',
+        '--ssh-flag=-F/dev/null',
+        '--ssh-flag=-oProxyCommand=none',
+        '--ssh-flag=-oStrictHostKeyChecking=no',
+        '--ssh-flag=-oUserKnownHostsFile=/dev/null',
         `--command=${envPrefix}${command}`,
         '--quiet',
       ],
       {
         env: {
           ...process.env,
+          PATH: `${SSH_BIN_DIR}:${process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'}`,
           CLOUDSDK_CONFIG: authStatus.configDir,
           CLOUDSDK_CORE_DISABLE_PROMPTS: '1',
         },
@@ -1668,6 +1764,19 @@ async function execInStudentCloudShell(username, projectId, command, timeoutMs =
       stderr: stderr.trim(),
     };
   } catch (err) {
+    const errText = `${err?.stderr || ''} ${err?.message || ''}`;
+    const isSshConnectionFailure =
+      err?.code === 255 ||
+      /exited with return code \[255\]|403 Forbidden|helper\.go|Failed to initialize session|Connection closed by UNKNOWN|Connection refused|Operation timed out|Cloud Shell is disabled/i.test(
+        errText
+      );
+    if (isSshConnectionFailure) {
+      if (projectId) cloudShellFallbackProjects.add(projectId);
+      console.log(
+        `ℹ️  Cloud Shell SSH unavailable (${errText.slice(0, 120).trim()}); executing in isolated local student workspace...`
+      );
+      return execInLocalStudentWorkspace(authStatus, projectId, command, timeoutMs);
+    }
     return {
       ok: false,
       exitCode: err?.code || 1,

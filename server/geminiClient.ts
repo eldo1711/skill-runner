@@ -14,9 +14,8 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-let activeModel: string = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+let activeModel: string = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 let aiClient: GoogleGenAI | null = null;
-let modelResolutionPromise: Promise<string> | null = null;
 
 export function getActiveGeminiModel(): string {
   return activeModel;
@@ -46,15 +45,41 @@ export function getGenAIClient(): GoogleGenAI {
 }
 
 /**
- * Resolves the active Gemini model, defaulting to `gemini-3.5-flash`.
+ * Resolves the active Gemini model, defaulting to `gemini-3.8-flash`.
  */
 export async function resolveLatestGeminiModel(): Promise<string> {
   if (process.env.GEMINI_MODEL) {
     activeModel = process.env.GEMINI_MODEL;
     return activeModel;
   }
-  activeModel = 'gemini-3.5-flash';
+  activeModel = 'gemini-3.8-flash';
   return activeModel;
+}
+
+/**
+ * Calls `ai.models.generateContent` using `gemini-3.8-flash` first, with transparent fallback
+ * if a regional/global endpoint does not yet expose the primary model ID.
+ */
+async function generateContentWithModelFallback(
+  ai: GoogleGenAI,
+  req: { model?: string; contents: any; config?: any }
+) {
+  const primary = req.model || (await resolveLatestGeminiModel());
+  const candidates = Array.from(
+    new Set([primary, 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-3.1-pro-preview'])
+  );
+  let lastErr: unknown = null;
+  for (const candidateModel of candidates) {
+    try {
+      return await ai.models.generateContent({
+        ...req,
+        model: candidateModel,
+      });
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
 }
 
 /**
@@ -70,7 +95,7 @@ export function interpolateLabVariables(
 
   if (creds.projectId) {
     result = result
-      .replace(/\{\{\{\s*project_0\.project_id[^}]*\}\}\}/gi, creds.projectId)
+      .replace(/\{\{\{\s*(?:project_0|primary_project)\.project_id[^}]*\}\}\}/gi, creds.projectId)
       .replace(/\[PROJECT_ID\]/gi, creds.projectId)
       .replace(/<PROJECT_ID>/gi, creds.projectId)
       .replace(/YOUR_GCP_PROJECT_ID/gi, creds.projectId)
@@ -81,7 +106,7 @@ export function interpolateLabVariables(
 
   if (creds.region) {
     result = result
-      .replace(/\{\{\{\s*project_0\.default_region[^}]*\}\}\}/gi, creds.region)
+      .replace(/\{\{\{\s*(?:project_0|primary_project)\.default_region[^}]*\}\}\}/gi, creds.region)
       .replace(/\[REGION\]/gi, creds.region)
       .replace(/<REGION>/gi, creds.region)
       .replace(/YOUR_REGION/gi, creds.region);
@@ -89,7 +114,7 @@ export function interpolateLabVariables(
 
   if (creds.zone) {
     result = result
-      .replace(/\{\{\{\s*project_0\.default_zone[^}]*\}\}\}/gi, creds.zone)
+      .replace(/\{\{\{\s*(?:project_0|primary_project)\.default_zone[^}]*\}\}\}/gi, creds.zone)
       .replace(/\[ZONE\]/gi, creds.zone)
       .replace(/<ZONE>/gi, creds.zone)
       .replace(/YOUR_ZONE/gi, creds.zone);
@@ -112,13 +137,23 @@ export function interpolateLabVariables(
     }
   }
 
-  // Resolve any {{{ variable | default_value }}} templates using the pipe default if not in extraVars
-  result = result.replace(/\{\{\{\s*[^}|]+\|\s*([^}]+)\}\}\}/g, (_m, defVal) => defVal.trim());
-
-  // Fallback for gemini_flash_model_id template if present in Qwiklabs blocks
+  // Fallback for gemini_flash_model_id / gemini_flash_lite_model_id templates if present in Qwiklabs blocks
   result = result.replace(
-    /\{\{\{\s*project_0\.startup_script\.gemini_flash_model_id[^}]*\}\}\}/gi,
-    creds.extraVars?.['project_0.startup_script.gemini_flash_model_id'] || 'gemini-3.5-flash'
+    /\{\{\{\s*(?:project_0|primary_project)\.startup_script\.gemini_flash_model_id[^}]*\}\}\}/gi,
+    creds.extraVars?.['primary_project.startup_script.gemini_flash_model_id'] ||
+      creds.extraVars?.['project_0.startup_script.gemini_flash_model_id'] ||
+      'gemini-2.5-flash'
+  );
+  result = result.replace(
+    /\{\{\{\s*(?:project_0|primary_project)\.startup_script\.gemini_flash_lite_model_id[^}]*\}\}\}/gi,
+    creds.extraVars?.['primary_project.startup_script.gemini_flash_lite_model_id'] ||
+      creds.extraVars?.['project_0.startup_script.gemini_flash_lite_model_id'] ||
+      'gemini-2.5-flash-lite'
+  );
+
+  // Resolve any {{{ variable | default_value }}} templates using the pipe default if not in extraVars
+  result = result.replace(/\{\{\{\s*[^}|]+\|\s*([^}]+)\}\}\}/g, (_m, defVal) =>
+    defVal.trim().replace(/^["']|["']$/g, '')
   );
 
   return result;
@@ -253,7 +288,7 @@ Raw Extracted Tasks:
 ${JSON.stringify(rawTasks, null, 2)}`;
 
     const model = await resolveLatestGeminiModel();
-    const response = await ai.models.generateContent({
+    const response = await generateContentWithModelFallback(ai, {
       model,
       contents: prompt,
       config: {
@@ -402,7 +437,7 @@ ${elementsSummary || '(No interactive elements detected - rely on visual coordin
     text: systemInstruction,
   });
 
-  const response = await ai.models.generateContent({
+  const response = await generateContentWithModelFallback(ai, {
     model,
     contents,
     config: {
@@ -2712,7 +2747,34 @@ ${combinedText}
     - Make all resource creation calls idempotent: check if the resource already exists (\`GET\` / \`list\`) or handle \`HTTP 409 ALREADY_EXISTS\` by falling back to \`PATCH\` / \`GET\` rather than failing the script.
 13. **Live Qwiklabs Grader Audit Check Introspection & GCS Bucket Discovery**:
     - Inspect \`=== PROJECT GCS BUCKET CONTENTS ===\` in the workspace snapshot for any starter CSVs, PDFs, SQL files, or installer scripts (\`install.sh\`, \`README.md\`) that the manual lab instructions omitted (for example, loading a \`*.csv\` into BigQuery before querying an agent).
-    - Inspect \`=== LIVE QWIKLABS GRADER AUDIT CHECKS ===\` in the workspace snapshot: it shows the exact Google Cloud API calls (\`ListLogEntries\`, \`GetIamPolicy\`, \`ListReasoningEngines\`, \`GetTable\`, etc.) and exact filter strings that Qwiklabs' grading service account (\`<project>@<project>.iam.gserviceaccount.com\` or \`admiral@qwiklabs-services-prod.iam.gserviceaccount.com\`) executed when verifying the task. Always ensure your synthesized script satisfies every resource name, IAM role, or Cloud Logging \`ListLogEntries\` filter shown in those audit checks.`;
+    - Inspect \`=== LIVE QWIKLABS GRADER AUDIT CHECKS ===\` in the workspace snapshot: it shows the exact Google Cloud API calls (\`ListLogEntries\`, \`GetIamPolicy\`, \`ListReasoningEngines\`, \`GetTable\`, etc.) and exact filter strings that Qwiklabs' grading service account (\`<project>@<project>.iam.gserviceaccount.com\` or \`admiral@qwiklabs-services-prod.iam.gserviceaccount.com\`) executed when verifying the task. Always ensure your synthesized script satisfies every resource name, IAM role, or Cloud Logging \`ListLogEntries\` filter shown in those audit checks.
+14. **Vertex AI Workbench / JupyterLab Notebook (\`.ipynb\`) Challenge Labs (e.g., \`evaluation.ipynb\`)**:
+    - When \`=== VERTEX AI WORKBENCH NOTEBOOK: <filename> ===\` appears in \`LIVE STUDENT CLOUD SHELL WORKSPACE SNAPSHOT\`, the notebook lives on a Vertex AI Workbench instance (\`/home/jupyter/<filename>\`).
+    - A pre-authenticated helper module \`/tmp/wb_helper.py\` is already installed in your execution environment and connects directly to the Workbench instance's live Jupyter Server & IPython kernel over HTTPS port 443 (\`https://<proxyUri>\`).
+    - Use \`/tmp/wb_helper.py\` in Python to patch any \`# TODO\` code cells by their 0-based cell index (shown as \`[Cell N | code]\` in the snapshot), execute all code cells up through the current task in the Workbench VM's live IPython kernel, populate each cell's \`outputs\` and \`execution_count\`, and save \`/home/jupyter/<filename>\` on the Workbench VM:
+      \`\`\`python
+      import sys
+      sys.path.insert(0, "/tmp")
+      import wb_helper
+
+      res = wb_helper.update_and_run_notebook(
+          path="evaluation.ipynb",
+          cell_patches={
+              # Map 0-based cell index -> complete replacement Python source for that cell:
+              5: """# Complete Python code replacing TODO in Cell 5""",
+          },
+          run_through_cell=12,  # 0-based index of the last cell for the current task
+      )
+      print(res.get("stdout", ""))
+      if not res.get("ok", False):
+          raise SystemExit(res.get("stderr", "Workbench notebook execution failed"))
+      \`\`\`
+    - You can also run arbitrary Python code or shell commands directly inside the Workbench VM's persistent IPython kernel using \`wb_helper.exec_on_workbench(python_code_str)\`.
+    - CRITICAL for Workbench Notebook Labs:
+      1. Inspect the exact \`[Cell <N> | code]\` indices and surrounding markdown instructions in \`=== VERTEX AI WORKBENCH NOTEBOOK ===\`.
+      2. Replace every \`# TODO\` / placeholder in the cells required for the current task (and any earlier setup cells if not yet executed) with complete, working Python code that uses the exact variable names, prompt templates, model IDs (e.g., \`gemini-3.5-flash\`, \`gemini-3.5-flash-lite\` from Extra Variables), metric objects (\`MetricPromptTemplateExamples.Pointwise.SUMMARIZATION_QUALITY\`, \`QUESTION_ANSWERING_QUALITY\`, \`GROUNDEDNESS\`, \`rouge\`, \`bleu\`, \`exact_match\`, etc.), and \`experiment\` names specified in the notebook and task instructions.
+      3. Set \`run_through_cell\` to the last cell index belonging to the current task so unpatched \`# TODO\` cells from future tasks are not executed prematurely.
+      4. Always ensure \`wb_helper.update_and_run_notebook(...)\` saves the notebook with populated cell \`outputs\` and \`execution_count\` before the task script exits, because Qwiklabs requires the notebook to be saved before clicking "Check my progress".`;
 
   const parseSynthesisResponse = (rawText: string): { script?: string; summary?: string } | null => {
     const cleaned = (rawText || '')
@@ -2750,7 +2812,13 @@ ${combinedText}
     const ai = getGenAIClient();
     const primaryModel = await resolveLatestGeminiModel();
     const candidateModels = Array.from(
-      new Set([primaryModel, 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-3.1-pro-preview'])
+      new Set([
+        primaryModel,
+        'gemini-3.8-flash',
+        'gemini-3.5-flash',
+        'gemini-2.5-flash',
+        'gemini-3.1-pro-preview',
+      ])
     );
 
     let lastErr: unknown = null;
@@ -2814,35 +2882,39 @@ ${combinedText}
           );
           const token = tokenOut.trim();
           if (token) {
-            const model = await resolveLatestGeminiModel();
-            const vUrl = `https://aiplatform.googleapis.com/v1/projects/${proj}/locations/global/publishers/google/models/${model}:generateContent`;
-            const vResp = await fetch(vUrl, {
-              method: 'POST',
-              headers: {
-                Authorization: `Bearer ${token}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                contents: [{ role: 'user', parts: [{ text: prompt }] }],
-                generationConfig: {
-                  responseMimeType: 'application/json',
-                  temperature: 0.1,
-                  maxOutputTokens: 16384,
+            const primaryModel = await resolveLatestGeminiModel();
+            for (const model of Array.from(
+              new Set([primaryModel, 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-2.5-flash'])
+            )) {
+              const vUrl = `https://aiplatform.googleapis.com/v1/projects/${proj}/locations/global/publishers/google/models/${model}:generateContent`;
+              const vResp = await fetch(vUrl, {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  'Content-Type': 'application/json',
                 },
-              }),
-            });
-            if (vResp.ok) {
-              const vData: any = await vResp.json();
-              const text = vData?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-              const parsed = parseSynthesisResponse(text);
-              if (parsed?.script && typeof parsed.script === 'string' && parsed.script.trim()) {
-                return {
-                  script: transformAgyLaunchCommand(
-                    interpolateLabVariables(parsed.script.trim(), credentials)
-                  ),
-                  summary:
-                    parsed.summary || `Synthesized Cloud Shell automation for Task #${task.number}`,
-                };
+                body: JSON.stringify({
+                  contents: [{ role: 'user', parts: [{ text: prompt }] }],
+                  generationConfig: {
+                    responseMimeType: 'application/json',
+                    temperature: 0.1,
+                    maxOutputTokens: 16384,
+                  },
+                }),
+              });
+              if (vResp.ok) {
+                const vData: any = await vResp.json();
+                const text = vData?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+                const parsed = parseSynthesisResponse(text);
+                if (parsed?.script && typeof parsed.script === 'string' && parsed.script.trim()) {
+                  return {
+                    script: transformAgyLaunchCommand(
+                      interpolateLabVariables(parsed.script.trim(), credentials)
+                    ),
+                    summary:
+                      parsed.summary || `Synthesized Cloud Shell automation for Task #${task.number}`,
+                  };
+                }
               }
             }
           }

@@ -13,7 +13,7 @@
 ### Business Rationale, Public Sector Impact & Strategic Intent
 Public sector cloud engineers, state and local government technical architects, and delivery partners regularly complete complex hands-on Google Cloud labs spanning **Vertex AI**, **Agent Development Kit (ADK)**, **Discovery Engine**, **BigQuery**, **Terraform**, **Cloud Run**, and **Antigravity (`agy`)**. Manual execution of multi-step labs—especially when debugging grader rubrics, configuring isolated student environments, and reconciling multi-turn agent evaluations—consumes hours of engineering time.
 
-**Skills Runner** pairs a stateless **Google Cloud Run** orchestration dashboard with a lightweight, on-demand **Mac Chrome Bridge** (`macBridgeAgent.ts`) that connects only when a lab is actively running. It introspects live student Cloud Shell workspaces, synthesizes stateful end-to-end bash and Python solutions powered by **`gemini-3.5-flash`**, executes them directly in the student's Cloud Shell VM or Incognito GCP Console, and closes the loop with a **3-attempt self-healing grader verification cycle** against Qwiklabs' **"Check my progress"** assessment API.
+**Skills Runner** pairs a stateless **Google Cloud Run** orchestration dashboard with a lightweight, on-demand **Mac Chrome Bridge** (`macBridgeAgent.ts`) that connects only when a lab is actively running. It introspects live student Cloud Shell workspaces, synthesizes stateful end-to-end bash and Python solutions powered by **`gemini-3.8-flash`**, executes them directly in the student's Cloud Shell VM or Incognito GCP Console, and closes the loop with a **3-attempt self-healing grader verification cycle** against Qwiklabs' **"Check my progress"** assessment API.
 
 ---
 
@@ -22,7 +22,7 @@ Public sector cloud engineers, state and local government technical architects, 
 - **Runtime & Backend**: Node.js 22+, Express 4, dual WebSocket servers (`ws` for real-time UI state streaming on `/ws` and on-demand Mac Chrome Bridge RPC on `/ws-bridge`), TypeScript (`tsx`)
 - **Frontend UI**: React 19, Vite 6, Tailwind CSS v4, Lucide Icons
 - **AI Reasoning & Code Synthesis Engine**:
-  - Primary Model: **`gemini-3.5-flash`** (with dynamic model resolution and automatic fallback to `gemini-3.1-pro-preview` / `gemini-2.5-flash`) via the Unified Google Gen AI SDK (`@google/genai`)
+  - Primary Model: **`gemini-3.8-flash`** (with dynamic model resolution and automatic fallback to `gemini-3.1-pro-preview` / `gemini-2.5-flash`) via the Unified Google Gen AI SDK (`@google/genai`)
   - Dual Authentication: Supports Vertex AI Application Default Credentials (`GOOGLE_GENAI_USE_VERTEXAI=true`), `GEMINI_API_KEY`, and automatic Vertex AI REST fallback using the active Qwiklabs student's GCP project token
 - **Cloud Infrastructure & Containerization**:
   - Hosted on **Google Cloud Run** (`us-central1`) using `mcr.microsoft.com/playwright:v1.58.2-noble`
@@ -143,7 +143,7 @@ skills-runner/
 export GOOGLE_GENAI_USE_VERTEXAI="true"
 export GOOGLE_CLOUD_PROJECT="ice-cream-cone-452722"
 export GOOGLE_CLOUD_LOCATION="global"
-export GEMINI_MODEL="gemini-3.5-flash"
+export GEMINI_MODEL="gemini-3.8-flash"
 # Optional if using Gemini Developer API instead of Vertex AI ADC:
 # export GEMINI_API_KEY="$(gcloud secrets versions access latest --secret=gemini-api-key)"
 ```
