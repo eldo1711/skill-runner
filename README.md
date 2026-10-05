@@ -1,7 +1,7 @@
 # Skills Runner — Universal Autonomous GCP & Antigravity Lab Agent
 
 [![Cloud Run Deployed](https://img.shields.io/badge/Cloud_Run-Deployed-4285F4?logo=googlecloud&logoColor=white)](https://skills-runner-621653283297.us-central1.run.app)
-[![Gemini 3.5 Flash](https://img.shields.io/badge/AI-Gemini_3.5_Flash-4285F4?logo=google&logoColor=white)](https://cloud.google.com/vertex-ai)
+[![Model Garden](https://img.shields.io/badge/Model_Garden-Gemini_3.8_Flash_%7C_3.1_Pro_%7C_Opus_5.5-4285F4?logo=google&logoColor=white)](https://cloud.google.com/vertex-ai)
 [![Playwright](https://img.shields.io/badge/Automation-Playwright_%2B_Mac_Bridge-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev/)
 [![Node.js 22+](https://img.shields.io/badge/Runtime-Node.js_22+-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/Language-TypeScript_5.7-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
