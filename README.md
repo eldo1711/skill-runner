@@ -21,8 +21,11 @@ Public sector cloud engineers, state and local government technical architects, 
 
 - **Runtime & Backend**: Node.js 22+, Express 4, dual WebSocket servers (`ws` for real-time UI state streaming on `/ws` and on-demand Mac Chrome Bridge RPC on `/ws-bridge`), TypeScript (`tsx`)
 - **Frontend UI**: React 19, Vite 6, Tailwind CSS v4, Lucide Icons
-- **AI Reasoning & Code Synthesis Engine**:
-  - Primary Model: **`gemini-3.8-flash`** (with dynamic model resolution and automatic fallback to `gemini-3.1-pro-preview` / `gemini-2.5-flash`) via the Unified Google Gen AI SDK (`@google/genai`)
+- **AI Reasoning & Code Synthesis Engine (Vertex AI Model Garden)**:
+  - Built-in **Model Garden Checker & Selector** probing live enablement and latency across:
+    - **`gemini-3.8-flash`** (Google — Default Fast Multimodal Synthesis)
+    - **`gemini-3.1-pro-preview`** (Google — Advanced Reasoning)
+    - **`claude-opus-5-5`** (Anthropic on Vertex AI Model Garden `rawPredict`)
   - Dual Authentication: Supports Vertex AI Application Default Credentials (`GOOGLE_GENAI_USE_VERTEXAI=true`), `GEMINI_API_KEY`, and automatic Vertex AI REST fallback using the active Qwiklabs student's GCP project token
 - **Cloud Infrastructure & Containerization**:
   - Hosted on **Google Cloud Run** (`us-central1`) using `mcr.microsoft.com/playwright:v1.58.2-noble`
@@ -43,11 +46,11 @@ skills-runner/
 ├── README.md
 ├── server/
 │   ├── index.ts                   # Express HTTP API + /ws UI & /ws-bridge RPC servers
-│   ├── types.ts                   # Shared domain models (Tasks, Steps, Credentials, Bridge RPC)
-│   ├── browserOrchestrator.ts     # Stateful task execution loop & 3-attempt self-healing grader
-│   ├── geminiClient.ts            # Gemini 3.5 Flash task script synthesizer & multimodal planner
+│   ├── types.ts                   # Shared domain models (Tasks, Steps, Credentials, Model Garden, Bridge RPC)
+│   ├── browserOrchestrator.ts     # Stateful task execution loop & self-healing grader
+│   ├── geminiClient.ts            # Model Garden checker + Gemini 3.8 Flash / 3.1 Pro / Opus 5.5 synthesizer
 │   ├── labParser.ts               # Deep Shadow-DOM parser for <ql-*> web components & templates
-│   ├── nativeChromeBridge.ts      # Hybrid local/remote Chrome tab & Cloud Shell SSH bridge
+│   ├── nativeChromeBridge.ts      # Hybrid local/remote Chrome tab & Cloud Shell SSH + Vertex Workbench bridge
 │   ├── macBridgeHub.ts            # Cloud Run WebSocket RPC hub for connected Mac bridge agents
 │   ├── macBridgeAgent.ts          # Downloadable on-demand macOS Chrome & Cloud Shell agent
 │   ├── consoleSignIn.ts           # Automated Qwiklabs student sign-in & GCP ToS modal handler
@@ -55,7 +58,7 @@ skills-runner/
 │   └── selfTest.ts                # End-to-end automated verification & regression test suite
 └── src/
     ├── main.tsx
-    ├── App.tsx                    # Web Control Center UI + Mac Bridge setup modal
+    ├── App.tsx                    # Web Control Center UI + 4-Tile Workflow + Model Garden Selector
     ├── index.css
     └── types.ts
 ```
@@ -64,36 +67,32 @@ skills-runner/
 
 ## 3. Core Capabilities & Key Features
 
-1. **On-Demand Mac Chrome Bridge (Zero Background Polling)**:
+1. **Vertex AI Model Garden Checker & Selector**:
+   - Live status checker (`POST /api/models/check`) and model switcher (`POST /api/models/select`) for **`gemini-3.8-flash`**, **`gemini-3.1-pro-preview`**, and **`claude-opus-5-5`** in `ice-cream-cone-452722` (`locations/global`).
+   - Displays real-time availability badges and round-trip latency (`ms`) in the UI header and Model Garden card.
+2. **Dedicated "Launch Incognito Console & Cloud Shell" Workflow Tile**:
+   - Assumes the operator launches the initial Incognito Chrome window signed in as the student account (`student-...@qwiklabs.net`) for **Cloud Console** and **Cloud Shell**, and never closes or resets the user's open Incognito windows.
+   - Provides 1-click copy chips for the Student Username, Password, Project ID, Console URL, and Cloud Shell URL, plus live tab detection badges (`✓ Console Tab Open`, `✓ Cloud Shell Open`) and a `Verify Tabs` button.
+3. **On-Demand Mac Chrome Bridge (Zero Background Polling)**:
    - When starting or parsing a lab from the Cloud Run web app, the UI checks whether the local Mac Chrome Bridge (`macBridgeAgent.ts`) is connected.
    - If not running, operators can download a 1-click launcher (`Start-Mac-Chrome-Bridge.command`) that automatically saves and updates `~/Downloads/skill-runner/macBridgeAgent.ts` and connects over `wss://.../ws-bridge`.
-   - Operates in **100% passive on-demand mode**—never touching Chrome or `osascript` in the background unless an action is explicitly triggered in the UI, preventing interference with SSO or Google login prompts.
-2. **Deep Shadow-DOM Lab Parser & Template Interpolation**:
+4. **Deep Shadow-DOM Lab Parser & Template Interpolation**:
    - Pierces modern `<ql-lab-header>`, `<ql-copyable-input>`, `<ql-code-block>`, `<ql-activity-tracking>`, and Declarative Shadow DOM templates.
-   - Automatically resolves Qwiklabs template expressions including piped default filters (`{{{ project_0.project_id | "your-gcp-project-id" }}}`, `{{{ project_0.default_region | "us-central1" }}}`) against live student credentials.
-3. **Live Student Cloud Shell, GCS Bucket & Qwiklabs Grader Audit Introspection**:
-   - Before synthesizing commands for any task, [`inspectStudentCloudShellWorkspace`](server/nativeChromeBridge.ts) connects to the student's isolated Cloud Shell VM via `gcloud cloud-shell ssh` and inspects the directory tree (`~`), starter code (`.py`, `.json`, `.tf`, `.yaml`, `.env`, `requirements.txt`), project GCS buckets (`gs://<project>*`), installed CLI `--help` output (such as `adk eval_set`), and the live **Qwiklabs Grader Audit Trail** (`cloudaudit.googleapis.com` API calls and `ListLogEntries` filters executed by the Qwiklabs grading service account).
-   - Automatically verifies student OAuth token freshness via `gcloud auth print-access-token --quiet` so expired tokens from prior labs automatically re-authenticate via headless Playwright OAuth.
-4. **Unified Stateful Task Synthesis, 4-Attempt Self-Healing Verification & Persistent State**:
-   - Rather than running disconnected single-line snippets that lose working directory or Python virtualenv (`.venv`) state, [`synthesizeTaskShellScript`](server/geminiClient.ts) generates a single idempotent, stateful bash script per task that completes both prose file edits (e.g., implementing `TODO` functions in `agent.py` or adding rubrics to `eval_config.json`) and CLI commands in sequence.
-   - Automatically clicks **"Check my progress"** via the Qwiklabs assessment API (`stepCompleteList`, `stepScoresList`, `studentMessagesList`), reloads the Qwiklabs tab when a step passes so the browser score updates immediately, and feeds any grader failure message + grader audit log checks + stdout/stderr back into Gemini for up to 4 self-healing attempts.
-   - Automatically persists runner state (`~/.cloud-skills-lab-runner/runner_state.json`) across Cloud Run deployments and container restarts, with manual 1-click **Save State** (`/api/state/save`).
-5. **Zero-Touch Antigravity (`agy`) Execution**:
-   - Automatically wraps `agy` / `antigravity` CLI invocations with `--dangerously-skip-permissions` and graceful fallback (`agy --dangerously-skip-permissions || agy`).
-   - Appends non-interactive execution directives to Antigravity prompts and auto-approves IDE confirmation buttons (`Accept All`, `Allow`, `Run Command`, `Proceed`).
+   - Automatically resolves Qwiklabs template expressions including piped default filters (`{{{ project_0.project_id | "your-gcp-project-id" }}}`, `{{{ primary_project.project_id | "your-gcp-project-id" }}}`) against live student credentials.
+5. **Live Student Cloud Shell, Vertex AI Workbench (`wb_helper`) & Grader Audit Introspection**:
+   - Connects to the student's isolated Cloud Shell VM via `gcloud cloud-shell ssh` and inspects the directory tree (`~`), starter code, project GCS buckets, Vertex AI Workbench instances (`wb_helper.py` auto-repair and execution for Jupyter `.ipynb` labs such as `evaluation.ipynb`), and the live **Qwiklabs Grader Audit Trail**.
+6. **Unified Stateful Task Synthesis & 4-Attempt Self-Healing Grader Verification**:
+   - Synthesizes idempotent bash and Python scripts per task, preserves Python indentation across heredocs, clicks **"Check my progress"** via the Qwiklabs assessment API, and self-heals up to 4 attempts per task until all progress checks pass.
 
-### Operator Workflow: Running Any Lab End-to-End in 3 Steps
-1. **Step 1 — Sign In & Connect Mac Bridge**:
-   - Sign into your Google Cloud Skills Boost / Partner Skills account in your normal desktop Google Chrome browser.
-   - In the Skills Runner UI, click **Start Mac Bridge** and either run the 1-line terminal command (`curl -fsSL .../api/bridge/start.sh | sh`) or double-click `Start-Mac-Chrome-Bridge.command`.
-2. **Step 2 — Point at Your Self-Signed-In Lab Page**:
-   - Select your open Lab Instructions tab from the **Step 2** dropdown (auto-detected from your normal Chrome window) or paste the Lab URL.
-3. **Step 3 — Click "Start & Run Lab"**:
-   - Click **Start & Run Lab**. Skills Runner autonomously executes the entire lifecycle without requiring any manual window management:
-     1. Clicks **Start Lab** in your signed-in Lab tab (if not already started) and waits for Qwiklabs to provision the temporary student credentials (`username`, `password`, `projectId`).
-     2. **Spawns a clean Incognito window in Chrome on your Mac**, signs in as the temporary lab student account (`student-...@qwiklabs.net`), accepts the Google Workspace new-account consent & GCP Console Terms of Service, and opens both the **GCP Console** tab and **Cloud Shell** tab.
-     3. Completes student `gcloud` OAuth authentication directly on your Mac inside the student Incognito session and inspects the student's Cloud Shell workspace (`~`), starter code, project GCS buckets, and Qwiklabs grader audit checks.
-     4. Synthesizes and executes stateful bash/Python solutions for each task and triggers **"Check my progress"** after every task (with up to 4 self-healing retries) until all progress checks are verified.
+### Operator Workflow: 4-Tile Guided Execution
+1. **Tile 1 — Connect Mac Bridge**:
+   - Sign into your Google Cloud Skills Boost / Partner Skills account in your normal desktop Google Chrome browser and connect the Mac Bridge.
+2. **Tile 2 — Point at Lab Tab**:
+   - Select your open Lab Instructions tab from the dropdown (or paste the Lab URL) and click **Start Lab & Get Creds** to extract the student `username`, `password`, and `projectId`.
+3. **Tile 3 — Launch Incognito Console & Cloud Shell**:
+   - Open an Incognito Chrome window (`⌘+Shift+N`), sign in with the copied Student Username & Password, open **Cloud Console** and activate **Cloud Shell**, then click **Verify Tabs**.
+4. **Tile 4 — Run Lab & Pass Progress Checks**:
+   - Choose your preferred Model Garden model (**Gemini 3.8 Flash**, **Gemini 3.1 Pro**, or **Opus 5.5**) and click **Run Lab & Pass Checks**.
 
 ---
 
@@ -101,16 +100,19 @@ skills-runner/
 
 | Endpoint | Method | Parameters / Payload | Description |
 | :--- | :--- | :--- | :--- |
-| `/api/health` | `GET` | — | Service health check, active Gemini model, and Mac Bridge connection status |
-| `/api/state` | `GET` | — | Returns complete `RunnerState` (tasks, scores, credentials, Chrome tabs, logs) |
+| `/api/health` | `GET` | — | Service health check, active Model Garden model, and Mac Bridge connection status |
+| `/api/state` | `GET` | — | Returns complete `RunnerState` (tasks, scores, credentials, Model Garden status, Chrome tabs, logs) |
 | `/api/state/save` | `POST` | `{}` | Persists current `RunnerState` to `~/.cloud-skills-lab-runner/runner_state.json` on disk and via Mac Bridge |
+| `/api/models/garden` | `GET` | — | Returns active model and cached Model Garden entries (`gemini-3.8-flash`, `gemini-3.1-pro-preview`, `claude-opus-5-5`) |
+| `/api/models/check` | `POST` | `{}` | Probes live enablement and latency (`ms`) for `gemini-3.8-flash`, `gemini-3.1-pro-preview`, and `claude-opus-5-5` in Model Garden |
+| `/api/models/select` | `POST` | `{ "model": "gemini-3.8-flash" \| "gemini-3.1-pro-preview" \| "claude-opus-5-5" }` | Switches the active model used for task synthesis and planning |
 | `/api/chrome/scan` | `POST` | `{}` | Scans open macOS Google Chrome windows/tabs (Normal + Incognito) and classifies `lab`, `console`, and `cloud_shell` roles |
 | `/api/chrome/bind` | `POST` | `{ "labTabKey": "win:tab", "consoleTabKey": "win:tab" }` | Binds selected Chrome tabs and snapshots the Lab DOM |
 | `/api/chrome/focus` | `POST` | `{ "key": "win:tab" }` | Brings a specific Chrome window and tab to the foreground |
 | `/api/lab/open` | `POST` | `{ "url": "https://..." }` | Opens a Lab URL in Chrome and parses instructions |
 | `/api/lab/parse` | `POST` | `{}` | Syncs the bound Lab tab DOM, parses tasks/credentials, and polls live assessment scores |
-| `/api/lab/start-and-signin` | `POST` | `{}` | Clicks "Start Lab", extracts student credentials, spawns an Incognito window on the Mac, and signs into GCP Console |
-| `/api/lab/start-and-run` | `POST` | `{ "labTabKey": "win:tab", "url": "https://..." }` | Unified 1-click pipeline: binds/opens the lab tab, starts the lab, spawns the student Incognito session, runs all tasks, and verifies progress checks |
+| `/api/lab/start-and-signin` | `POST` | `{}` | Clicks "Start Lab", extracts student credentials, and scans for the user's open Incognito Console & Cloud Shell tabs |
+| `/api/lab/start-and-run` | `POST` | `{ "labTabKey": "win:tab", "url": "https://..." }` | Unified pipeline: binds/opens the lab tab, starts the lab, attaches to the user's Incognito Console & Cloud Shell tabs, runs all tasks, and verifies progress checks |
 | `/api/lab/run` | `POST` | `{ "singleStep": false }` | Starts or resumes the autonomous task execution & verification loop |
 | `/api/lab/pause` | `POST` | `{}` | Pauses the active execution loop |
 | `/api/lab/skip-step` | `POST` | `{}` | Skips the currently active step |

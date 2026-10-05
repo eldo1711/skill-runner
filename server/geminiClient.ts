@@ -10,6 +10,7 @@ import {
   LabCredentials,
   LabStep,
   LabTask,
+  ModelGardenEntry,
 } from './types.js';
 
 const execFileAsync = promisify(execFile);
@@ -17,8 +18,181 @@ const execFileAsync = promisify(execFile);
 let activeModel: string = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 let aiClient: GoogleGenAI | null = null;
 
+let cachedModelGarden: ModelGardenEntry[] = [
+  {
+    id: 'gemini-3.8-flash',
+    label: 'Gemini 3.8 Flash',
+    publisher: 'google',
+    enabled: true,
+    statusMessage: 'Enabled in Model Garden (global)',
+  },
+  {
+    id: 'gemini-3.1-pro-preview',
+    label: 'Gemini 3.1 Pro',
+    publisher: 'google',
+    enabled: true,
+    statusMessage: 'Enabled in Model Garden (global)',
+  },
+  {
+    id: 'claude-opus-5-5',
+    label: 'Opus 5.5',
+    publisher: 'anthropic',
+    enabled: true,
+    statusMessage: 'Enabled in Model Garden (global)',
+  },
+];
+
 export function getActiveGeminiModel(): string {
   return activeModel;
+}
+
+export function setActiveGeminiModel(modelId: string): string {
+  const validIds = ['gemini-3.8-flash', 'gemini-3.1-pro-preview', 'claude-opus-5-5'];
+  const normalized = String(modelId || '').trim();
+  if (validIds.includes(normalized)) {
+    activeModel = normalized;
+  }
+  return activeModel;
+}
+
+export function getModelGardenEntries(): ModelGardenEntry[] {
+  return cachedModelGarden;
+}
+
+async function getHostVertexAccessToken(): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync('gcloud', ['auth', 'print-access-token', '--quiet'], {
+      timeout: 8000,
+    });
+    if (stdout.trim().length > 10) return stdout.trim();
+  } catch {
+    // Fallback to metadata server on Cloud Run
+  }
+  try {
+    const metaResp = await fetch(
+      'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token',
+      { headers: { 'Metadata-Flavor': 'Google' } }
+    );
+    if (metaResp.ok) {
+      const data: any = await metaResp.json();
+      if (data?.access_token) return String(data.access_token);
+    }
+  } catch {
+    // Ignore metadata fallback error
+  }
+  return '';
+}
+
+export async function callAnthropicVertexRawPredict(
+  promptText: string,
+  maxTokens = 8192
+): Promise<string> {
+  const project =
+    process.env.GOOGLE_CLOUD_PROJECT ||
+    process.env.GCP_PROJECT_ID ||
+    'ice-cream-cone-452722';
+  const token = await getHostVertexAccessToken();
+  if (!token) {
+    throw new Error('No Vertex AI access token available for Anthropic Model Garden call.');
+  }
+  const url = `https://aiplatform.googleapis.com/v1/projects/${project}/locations/global/publishers/anthropic/models/claude-opus-5-5:rawPredict`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      anthropic_version: 'vertex-2023-10-16',
+      max_tokens: maxTokens,
+      messages: [{ role: 'user', content: promptText }],
+    }),
+  });
+  if (!resp.ok) {
+    const errBody = await resp.text().catch(() => '');
+    throw new Error(`Opus 5.5 HTTP ${resp.status}: ${errBody.slice(0, 300)}`);
+  }
+  const data: any = await resp.json();
+  const textPart = Array.isArray(data?.content)
+    ? data.content.find((c: any) => c?.type === 'text')?.text
+    : '';
+  return String(textPart || '');
+}
+
+/**
+ * Probes the user's Vertex AI Model Garden in `ice-cream-cone-452722` (locations/global)
+ * to verify live enablement and latency of Gemini 3.8 Flash, Gemini 3.1 Pro, and Opus 5.5.
+ */
+export async function checkModelGardenAvailability(): Promise<ModelGardenEntry[]> {
+  const ai = getGenAIClient();
+  const nowIso = new Date().toISOString();
+
+  const checkGoogleModel = async (
+    id: 'gemini-3.8-flash' | 'gemini-3.1-pro-preview',
+    label: string
+  ): Promise<ModelGardenEntry> => {
+    const t0 = Date.now();
+    try {
+      await ai.models.generateContent({
+        model: id,
+        contents: 'Respond with OK',
+        config: { maxOutputTokens: 32, temperature: 0 },
+      });
+      const latencyMs = Date.now() - t0;
+      return {
+        id,
+        label,
+        publisher: 'google',
+        enabled: true,
+        latencyMs,
+        statusMessage: `Enabled in Model Garden (${latencyMs}ms)`,
+        lastCheckedAt: nowIso,
+      };
+    } catch (err: any) {
+      return {
+        id,
+        label,
+        publisher: 'google',
+        enabled: false,
+        statusMessage: String(err?.message || err).slice(0, 120),
+        lastCheckedAt: nowIso,
+      };
+    }
+  };
+
+  const checkOpusModel = async (): Promise<ModelGardenEntry> => {
+    const t0 = Date.now();
+    try {
+      await callAnthropicVertexRawPredict('Respond with OK', 16);
+      const latencyMs = Date.now() - t0;
+      return {
+        id: 'claude-opus-5-5',
+        label: 'Opus 5.5',
+        publisher: 'anthropic',
+        enabled: true,
+        latencyMs,
+        statusMessage: `Enabled in Model Garden (${latencyMs}ms)`,
+        lastCheckedAt: nowIso,
+      };
+    } catch (err: any) {
+      return {
+        id: 'claude-opus-5-5',
+        label: 'Opus 5.5',
+        publisher: 'anthropic',
+        enabled: false,
+        statusMessage: String(err?.message || err).slice(0, 120),
+        lastCheckedAt: nowIso,
+      };
+    }
+  };
+
+  const results = await Promise.all([
+    checkGoogleModel('gemini-3.8-flash', 'Gemini 3.8 Flash'),
+    checkGoogleModel('gemini-3.1-pro-preview', 'Gemini 3.1 Pro'),
+    checkOpusModel(),
+  ]);
+  cachedModelGarden = results;
+  return results;
 }
 
 export function getGenAIClient(): GoogleGenAI {
@@ -45,9 +219,13 @@ export function getGenAIClient(): GoogleGenAI {
 }
 
 /**
- * Resolves the active Gemini model, defaulting to `gemini-3.8-flash`.
+ * Resolves the active model, respecting any user selection from the Model Garden selector
+ * and defaulting to `gemini-3.8-flash`.
  */
 export async function resolveLatestGeminiModel(): Promise<string> {
+  if (activeModel) {
+    return activeModel;
+  }
   if (process.env.GEMINI_MODEL) {
     activeModel = process.env.GEMINI_MODEL;
     return activeModel;
@@ -57,16 +235,40 @@ export async function resolveLatestGeminiModel(): Promise<string> {
 }
 
 /**
- * Calls `ai.models.generateContent` using `gemini-3.8-flash` first, with transparent fallback
- * if a regional/global endpoint does not yet expose the primary model ID.
+ * Calls the active Model Garden model (`gemini-3.8-flash`, `gemini-3.1-pro-preview`, or `claude-opus-5-5`),
+ * with transparent fallback if a regional/global endpoint encounters transient errors.
  */
 async function generateContentWithModelFallback(
   ai: GoogleGenAI,
   req: { model?: string; contents: any; config?: any }
 ) {
   const primary = req.model || (await resolveLatestGeminiModel());
+  if (primary === 'claude-opus-5-5' && typeof req.contents === 'string') {
+    try {
+      const jsonInstruction =
+        req.config?.responseMimeType === 'application/json'
+          ? '\n\nIMPORTANT: Return ONLY a valid JSON object matching the requested schema (no markdown fences).'
+          : '';
+      const text = await callAnthropicVertexRawPredict(
+        req.contents + jsonInstruction,
+        req.config?.maxOutputTokens || 8192
+      );
+      if (text) {
+        return { text } as any;
+      }
+    } catch {
+      // Fallback to Gemini models below
+    }
+  }
+  const googlePrimary = primary === 'claude-opus-5-5' ? 'gemini-3.8-flash' : primary;
   const candidates = Array.from(
-    new Set([primary, 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-3.1-pro-preview'])
+    new Set([
+      googlePrimary,
+      'gemini-3.8-flash',
+      'gemini-3.1-pro-preview',
+      'gemini-3.5-flash',
+      'gemini-2.5-flash',
+    ])
   );
   let lastErr: unknown = null;
   for (const candidateModel of candidates) {
@@ -162,15 +364,16 @@ export function interpolateLabVariables(
 /**
  * Ensures any command that launches `agy` (or `antigravity`) attempts to launch with
  * `--dangerously-skip-permissions` first, and falls back to launching normally if that flag fails.
- *
- * Examples:
- * - "agy" -> "agy --dangerously-skip-permissions || agy"
- * - "agy ." -> "agy --dangerously-skip-permissions . || agy ."
- * - "cd my-app && agy ." -> "cd my-app && (agy --dangerously-skip-permissions . || agy .)"
+ * Preserves 100% of leading indentation and heredocs on all non-`agy` lines.
  */
 export function transformAgyLaunchCommand(command: string): string {
   if (!command) return command;
   const trimmed = command.trim();
+
+  // Fast-return untouched if no standalone agy or antigravity token is present (critical for preserving Python indentation!)
+  if (!/\b(?:agy|antigravity)\b/i.test(trimmed)) {
+    return command;
+  }
 
   // If already wrapped with a fallback `|| agy` or `|| antigravity`, leave untouched
   if (/\|\|\s*(?:sudo\s+)?(?:agy|antigravity)\b/i.test(trimmed)) {
@@ -179,21 +382,19 @@ export function transformAgyLaunchCommand(command: string): string {
 
   const transformSegment = (segment: string, isChained: boolean): string => {
     const segTrim = segment.trim();
-    // Match standalone or prefixed agy / antigravity invocation
-    // Avoid matching subcommands that merely mention agy inside quotes for another binary (like echo or grep)
-    const match = segTrim.match(/^((?:sudo\s+|env\s+[A-Za-z0-9_]+=[^\s]+\s+)*)(agy|antigravity)(?:\s+(.*))?$/i);
-    if (!match) return segTrim;
+    const match = segTrim.match(
+      /^((?:sudo\s+|env\s+[A-Za-z0-9_]+=[^\s]+\s+)*)(agy|antigravity)(?:\s+(.*))?$/i
+    );
+    if (!match) return isChained ? segTrim : segment;
 
     const prefix = match[1] || '';
     const bin = match[2];
     const rawArgs = (match[3] || '').trim();
 
-    // Do not wrap non-interactive help/version checks
     if (/^(--help|-h|--version|-v)\b/i.test(rawArgs)) {
-      return segTrim;
+      return isChained ? segTrim : segment;
     }
 
-    // Strip `--dangerously-skip-permissions` from fallback args if it was already present
     const cleanArgs = rawArgs
       .replace(/(?:^|\s+)--dangerously-skip-permissions(?=\s|$)/g, '')
       .trim();
@@ -209,9 +410,11 @@ export function transformAgyLaunchCommand(command: string): string {
     return isChained ? `(${combined})` : combined;
   };
 
-  // Handle multiline commands line by line
-  const lines = trimmed.split('\n');
+  const lines = command.split('\n');
   const transformedLines = lines.map((line) => {
+    if (!/\b(?:agy|antigravity)\b/i.test(line)) {
+      return line;
+    }
     if (line.includes('&&')) {
       const parts = line.split('&&');
       const updatedParts = parts.map((p) => transformSegment(p, parts.length > 1));
@@ -2670,6 +2873,47 @@ python3 -u /tmp/task4_query_invoice_agent.py`;
     };
   }
 
+  // Fast-path for "[CEPF L300]: Evaluate Single LLM Outputs with Gemini Enterprise Agent Platform Evals" (evaluation.ipynb)
+  const isEvalSingleLlmNotebookLab =
+    /Evaluate Single LLM Outputs/i.test(labTitle) ||
+    credentials.extraVars?.['primary_project.startup_script.notebook_file_name'] === 'evaluation.ipynb' ||
+    (workspaceSnapshot || '').includes('VERTEX AI WORKBENCH NOTEBOOK: evaluation.ipynb');
+
+  if (isEvalSingleLlmNotebookLab) {
+    let runThroughCell = 54;
+    if (task.number === 1 || /Set up the Agent Platform Workbench environment/i.test(task.title)) {
+      runThroughCell = 12;
+    } else if (task.number === 2 || /Establish a baseline with computation-based metrics/i.test(task.title)) {
+      runThroughCell = 18;
+    } else if (task.number === 3 || /Evaluate with model-based pointwise metrics/i.test(task.title)) {
+      runThroughCell = 26;
+    } else if (task.number === 4 || /Build a custom metric for deeper insights/i.test(task.title)) {
+      runThroughCell = 32;
+    } else if (task.number === 5 || /Compare models with pairwise evaluation/i.test(task.title)) {
+      runThroughCell = 38;
+    } else if (task.number === 6 || /Evaluate persona-driven prompts/i.test(task.title)) {
+      runThroughCell = 54;
+    }
+    const script = `python3 - << 'EOF'
+import sys
+sys.path.insert(0, "/tmp")
+import wb_helper
+
+res = wb_helper.update_and_run_notebook(
+    path="evaluation.ipynb",
+    cell_patches={},
+    run_through_cell=${runThroughCell},
+)
+print(res.get("stdout", ""))
+if not res.get("ok", False):
+    raise SystemExit(res.get("stderr", "Workbench notebook execution failed"))
+EOF`;
+    return {
+      script,
+      summary: `Patch #TODO cells and execute evaluation.ipynb on Vertex AI Workbench through Cell ${runThroughCell} for Task #${task.number}.`,
+    };
+  }
+
   return null;
   })();
 
@@ -2817,13 +3061,36 @@ ${combinedText}
   try {
     const ai = getGenAIClient();
     const primaryModel = await resolveLatestGeminiModel();
+
+    if (primaryModel === 'claude-opus-5-5') {
+      try {
+        const opusText = await callAnthropicVertexRawPredict(
+          `${prompt}\n\nReturn ONLY a valid JSON object with keys "script" (complete non-interactive bash script) and "summary" (one-sentence summary). Do not wrap in markdown fences.`,
+          8192
+        );
+        const parsedOpus = parseSynthesisResponse(opusText);
+        if (parsedOpus?.script && typeof parsedOpus.script === 'string' && parsedOpus.script.trim()) {
+          return {
+            script: transformAgyLaunchCommand(
+              interpolateLabVariables(parsedOpus.script.trim(), credentials)
+            ),
+            summary:
+              parsedOpus.summary || `Synthesized Cloud Shell automation for Task #${task.number}`,
+          };
+        }
+      } catch (opusErr) {
+        console.warn('Opus 5.5 synthesis fallback to Gemini:', opusErr);
+      }
+    }
+
+    const googlePrimary = primaryModel === 'claude-opus-5-5' ? 'gemini-3.8-flash' : primaryModel;
     const candidateModels = Array.from(
       new Set([
-        primaryModel,
+        googlePrimary,
         'gemini-3.8-flash',
+        'gemini-3.1-pro-preview',
         'gemini-3.5-flash',
         'gemini-2.5-flash',
-        'gemini-3.1-pro-preview',
       ])
     );
 

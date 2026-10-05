@@ -1406,7 +1406,7 @@ async function completeOAuthUrlWithPlaywright(
       }
 
       const btns = page.locator(
-        'button:has-text("I understand"), input#confirm, button:has-text("Continue"), button:has-text("Allow"), #submit_approve_access'
+        'button:has-text("I understand"), input#confirm, input[name="confirm"], input[value*="understand" i], div[data-identifier], div[data-email], button:has-text("Continue"), button:has-text("Allow"), button:has-text("Sign in"), #submit_approve_access'
       );
       const count = await btns.count();
       for (let b = count - 1; b >= 0; b--) {
@@ -2003,6 +2003,18 @@ def exec_on_workbench(bash_cmd, timeout=240):
         sock.close()
 
 def _auto_repair_cell_source(idx, src, cells):
+    proj = _get_project()
+    if proj and "[your-project-id]" in src:
+        src = src.replace("[your-project-id]", proj)
+    if "pointwise_single_turn_metrics =" in src and 'POINTWISE_METRIC = "coherence"' not in src:
+        src = (
+            src.rstrip()
+            + '\\nif "coherence" in pointwise_single_turn_metrics:\\n'
+            + '    dropdown.value = "coherence"\\n'
+            + '    POINTWISE_METRIC = "coherence"\\n'
+            + 'else:\\n'
+            + '    POINTWISE_METRIC = dropdown.value\\n'
+        )
     if "PAIRWISE_METRIC_NAME = dropdown.value" in src and 'PAIRWISE_METRIC_NAME = "pairwise_summarization_quality"' not in src:
         src = (
             src.rstrip()
@@ -2014,7 +2026,7 @@ def _auto_repair_cell_source(idx, src, cells):
     has_incomplete_kw = bool(re.search(r"(dataset|metrics|model|metric|metric_prompt_template|prompt_template)\\s*=\\s*(\\n|$)", src))
     if not has_todo and not has_incomplete_kw:
         return src
-    if "rouge_eval_task = EvalTask" in src and has_incomplete_kw:
+    if "rouge_eval_task = EvalTask" in src:
         return (
             "# Define an EvalTask with ROUGE-L-SUM metric\\n"
             "rouge_eval_task = EvalTask(\\n"
@@ -2026,7 +2038,7 @@ def _auto_repair_cell_source(idx, src, cells):
             '    prompt_template="# System_prompt\\\\n{system_prompt} # Question\\\\n{question}",\\n'
             ")\\n"
         )
-    if "summarization_helpfulness_metric = PointwiseMetric" in src and ("Conciseness" not in src or '"5"' not in src or '"1"' not in src):
+    if "summarization_helpfulness_metric = PointwiseMetric" in src:
         return (
             "# This new custom metric evaluates the actual quality and usefulness of the summary.\\n"
             "summarization_helpfulness_metric = PointwiseMetric(\\n"
@@ -2048,7 +2060,7 @@ def _auto_repair_cell_source(idx, src, cells):
             "    ),\\n"
             ")\\n"
         )
-    if "pointwise_result = EvalTask" in src and has_incomplete_kw:
+    if "pointwise_result = EvalTask" in src:
         recent_src = ""
         for prev_i in range(max(0, idx - 4), idx):
             ps = cells[prev_i].get("source", "")
@@ -2065,7 +2077,7 @@ def _auto_repair_cell_source(idx, src, cells):
             '    prompt_template="# System_prompt\\\\n{system_prompt} # Question\\\\n{question}",\\n'
             ")\\n"
         )
-    if "pairwise_result = EvalTask" in src and has_incomplete_kw:
+    if "pairwise_result = EvalTask" in src:
         m_base = re.search(r'GenerativeModel\\(["\\x27]([^"\\x27]+)["\\x27]\\)', src)
         base_model_id = m_base.group(1) if m_base else "gemini-3.5-flash-lite"
         return (

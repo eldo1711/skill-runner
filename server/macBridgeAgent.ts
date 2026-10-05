@@ -1253,62 +1253,36 @@ async function spawnIncognitoSessionInUserChrome({
     ? `https://shell.cloud.google.com/?project=${encodeURIComponent(cleanProject)}&show=terminal`
     : 'https://shell.cloud.google.com/?show=terminal';
 
-  // 1. Check if an existing Incognito window is already signed into this project
+  // 1. Check if an existing Incognito window is already open (the user launches the initial Incognito window for Console & Cloud Shell)
   const existingTabs = await listUserChromeTabs();
   const existingIncognitoTabs = existingTabs.filter((t) => t.windowMode === 'incognito');
-  if (cleanProject && existingIncognitoTabs.length > 0) {
-    const matchingConsole = existingIncognitoTabs.find(
-      (t) =>
-        t.url.includes('console.cloud.google.com') &&
-        !t.url.includes('accounts.google.com') &&
-        t.url.includes(cleanProject)
-    );
+  if (existingIncognitoTabs.length > 0) {
+    const matchingConsole =
+      existingIncognitoTabs.find(
+        (t) =>
+          t.url.includes('console.cloud.google.com') &&
+          !t.url.includes('accounts.google.com') &&
+          (!cleanProject || t.url.includes(cleanProject))
+      ) ||
+      existingIncognitoTabs.find((t) => t.url.includes('console.cloud.google.com')) ||
+      existingIncognitoTabs[0];
     if (matchingConsole) {
       const winId = matchingConsole.windowId;
-      let shellTab = existingIncognitoTabs.find(
-        (t) => t.windowId === winId && t.url.includes('shell.cloud.google.com')
-      );
-      if (!shellTab) {
-        await navigateOrOpenInUserChromeWindow(winId, null, targetCloudShellUrl, true);
-        await focusUserChromeTab(winId, matchingConsole.tabIndex);
-      }
-      const updatedTabs = await listUserChromeTabs();
-      const cTab =
-        updatedTabs.find(
-          (t) => t.windowId === winId && t.url.includes('console.cloud.google.com')
-        ) || matchingConsole;
-      const sTab = updatedTabs.find(
+      const shellTab = existingIncognitoTabs.find(
         (t) => t.windowId === winId && t.url.includes('shell.cloud.google.com')
       );
       return {
         ok: true,
         reused: true,
         windowId: winId,
-        consoleTabKey: cTab.key,
-        cloudShellTabKey: sTab ? sTab.key : cTab.key,
-        tabs: updatedTabs,
+        consoleTabKey: matchingConsole.key,
+        cloudShellTabKey: shellTab ? shellTab.key : matchingConsole.key,
+        tabs: existingTabs,
       };
     }
   }
 
-  // 2. Close any stale Incognito windows from previous labs so the student cookie jar starts fresh
-  if (existingIncognitoTabs.length > 0) {
-    const closeStaleIncognitoScript = `
-tell application "Google Chrome"
-  repeat with i from (count of windows) to 1 by -1
-    set w to window i
-    if (mode of w) is "incognito" then
-      close w
-    end if
-  end repeat
-  return "closed"
-end tell
-`;
-    await runAppleScript(closeStaleIncognitoScript).catch(() => '');
-    await new Promise((r) => setTimeout(r, 500));
-  }
-
-  // 3. Create a fresh Incognito window on the user's Mac
+  // 2. Only create an Incognito window if none is open yet
   const initialLoginUrl = cleanUser
     ? `https://accounts.google.com/AccountChooser?Email=${encodeURIComponent(
         cleanUser
@@ -1496,9 +1470,18 @@ async function startStudentGcloudAuth(username, projectId, enableGdrive = true) 
     return { alreadyAuthenticated: true, configDir: existing.configDir };
   }
 
+  const prevEntry = activeGcloudLogins.get(username);
+  if (prevEntry?.proc) {
+    try {
+      prevEntry.proc.kill();
+    } catch {}
+    activeGcloudLogins.delete(username);
+  }
+
   const configDir = existing.configDir;
   return new Promise((resolve, reject) => {
     const args = ['auth', 'login', '--quiet'];
+    if (username) args.push(String(username).trim());
     if (enableGdrive) args.push('--enable-gdrive-access');
     if (projectId) args.push(`--project=${projectId}`);
 
@@ -1565,7 +1548,7 @@ async function finishStudentGcloudAuth(username, callbackUrl) {
 
 /**
  * Completes the student `gcloud auth login` OAuth flow directly on the user's Mac
- * using the student's Incognito Chrome window (where localhost callback hits local gcloud directly).
+ * using the user's already-launched student Incognito Chrome window (where localhost callback hits local gcloud directly).
  */
 async function ensureStudentGcloudAuth(username, password, projectId, preferredWindowId) {
   const initialCheck = await checkStudentGcloudAuth(username, projectId);
@@ -1574,19 +1557,17 @@ async function ensureStudentGcloudAuth(username, password, projectId, preferredW
   let incWinId = Number(preferredWindowId) || 0;
   if (!incWinId) {
     const tabs = await listUserChromeTabs();
-    const incTab = tabs.find((t) => t.windowMode === 'incognito');
+    const incTab =
+      tabs.find((t) => t.windowMode === 'incognito' && t.suggestedRole === 'console') ||
+      tabs.find((t) => t.windowMode === 'incognito' && t.suggestedRole === 'cloud_shell') ||
+      tabs.find((t) => t.windowMode === 'incognito');
     if (incTab) incWinId = incTab.windowId;
   }
   if (!incWinId) {
-    const spawned = await spawnIncognitoSessionInUserChrome({
-      username,
-      password,
-      projectId,
-    });
-    incWinId = spawned.windowId;
+    return checkStudentGcloudAuth(username, projectId);
   }
 
-  for (const enableGdrive of [false, true]) {
+  for (const enableGdrive of [true, false]) {
     try {
       const started = await startStudentGcloudAuth(username, projectId, enableGdrive);
       if (started.alreadyAuthenticated) {
@@ -1603,6 +1584,8 @@ tell application "Google Chrome"
       set newTab to make new tab at end of tabs of w with properties {URL:"${escapedOauthUrl}"}
       set tIdx to count of tabs of w
       set active tab index of w to tIdx
+      set index of w to 1
+      activate
       return tIdx as string
     end if
   end repeat
@@ -1614,29 +1597,30 @@ end tell
       if (!oauthTabIdx) continue;
 
       const stepJs = buildGoogleSignInStepJs(username, password);
-      let jsDisabledAbort = false;
-      for (let i = 0; i < 18; i++) {
-        await new Promise((r) => setTimeout(r, 800));
+      let jsDisabled = false;
+      for (let i = 0; i < 35; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
         const status = await checkStudentGcloudAuth(username, projectId);
         if (status.authenticated) {
           break;
         }
-        const jsOut = await executeJsInUserChromeTab(incWinId, oauthTabIdx, stepJs);
-        if (jsOut.ok && jsOut.value && jsOut.value.startsWith('oauth_redirected:')) {
-          const redirectedUrl = jsOut.value.slice('oauth_redirected:'.length);
-          if (redirectedUrl.startsWith('http://localhost:')) {
-            await fetch(redirectedUrl).catch(() => {});
+        if (!jsDisabled) {
+          const jsOut = await executeJsInUserChromeTab(incWinId, oauthTabIdx, stepJs);
+          if (jsOut.ok && jsOut.value && jsOut.value.startsWith('oauth_redirected:')) {
+            const redirectedUrl = jsOut.value.slice('oauth_redirected:'.length);
+            if (redirectedUrl.startsWith('http://localhost:')) {
+              await fetch(redirectedUrl).catch(() => {});
+            }
+            await new Promise((r) => setTimeout(r, 1000));
+            break;
           }
-          await new Promise((r) => setTimeout(r, 1000));
-          break;
-        }
-        if (!jsOut.ok && /turned off|Allow JavaScript/i.test(String(jsOut.error || ''))) {
-          jsDisabledAbort = true;
-          break;
+          if (!jsOut.ok && /turned off|Allow JavaScript/i.test(String(jsOut.error || ''))) {
+            jsDisabled = true;
+          }
         }
       }
 
-      // Close the temporary OAuth tab in the Incognito window
+      // Close the temporary OAuth tab in the Incognito window once done
       const closeOauthTabScript = `
 tell application "Google Chrome"
   repeat with w in windows
@@ -1656,7 +1640,7 @@ end tell
       if (finalStatus.authenticated) {
         return finalStatus;
       }
-      if (jsDisabledAbort) {
+      if (jsDisabled) {
         break;
       }
     } catch {

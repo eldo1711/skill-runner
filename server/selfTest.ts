@@ -2,6 +2,7 @@ import { chromium } from 'playwright';
 import { parseLabPageDom } from './labParser.js';
 import {
   formatAutonomousAntigravityPrompt,
+  getModelGardenEntries,
   interpolateLabVariables,
   resolveLatestGeminiModel,
   synthesizeTaskShellScript,
@@ -18,11 +19,34 @@ async function runVerificationTests() {
 
   const latestModel = await resolveLatestGeminiModel();
   console.log(`✓ Resolved latest available Gemini model: ${latestModel}`);
-  if (!latestModel.startsWith('gemini-')) {
-    throw new Error(`Expected latest model to start with gemini-, got: ${latestModel}`);
+  if (!latestModel.startsWith('gemini-') && !latestModel.startsWith('claude-')) {
+    throw new Error(`Expected latest model to start with gemini- or claude-, got: ${latestModel}`);
   }
 
-  // 0. Unit-test `transformAgyLaunchCommand` (--dangerously-skip-permissions + fallback)
+  const gardenEntries = getModelGardenEntries();
+  const gardenIds = gardenEntries.map((m) => m.id);
+  if (
+    !gardenIds.includes('gemini-3.8-flash') ||
+    !gardenIds.includes('gemini-3.1-pro-preview') ||
+    !gardenIds.includes('claude-opus-5-5')
+  ) {
+    throw new Error(`Unexpected Model Garden entries: ${JSON.stringify(gardenIds)}`);
+  }
+  console.log(`✓ Model Garden entries verified: ${gardenIds.join(', ')}`);
+
+  // 0. Unit-test `transformAgyLaunchCommand` (--dangerously-skip-permissions + fallback + preserve Python indentation)
+  const multilinePythonHeredoc = [
+    "python3 - << 'EOF'",
+    'import wb_helper',
+    'if True:',
+    '    wb_helper.update_and_run_notebook(',
+    '        path="evaluation.ipynb",',
+    '        cell_patches={},',
+    '        run_through_cell=18,',
+    '    )',
+    'EOF',
+  ].join('\n');
+
   const cases: Array<[string, string]> = [
     ['agy', 'agy --dangerously-skip-permissions || agy'],
     ['agy .', 'agy --dangerously-skip-permissions . || agy .'],
@@ -38,6 +62,7 @@ async function runVerificationTests() {
       'gcloud services enable aiplatform.googleapis.com',
       'gcloud services enable aiplatform.googleapis.com',
     ],
+    [multilinePythonHeredoc, multilinePythonHeredoc],
   ];
 
   for (const [input, expected] of cases) {
@@ -49,7 +74,7 @@ async function runVerificationTests() {
     }
   }
   console.log(
-    '✓ transformAgyLaunchCommand verified (--dangerously-skip-permissions with automatic fallback)'
+    '✓ transformAgyLaunchCommand verified (--dangerously-skip-permissions with fallback & Python indentation preserved)'
   );
 
   const browser = await chromium.launch({ headless: true });
@@ -462,6 +487,28 @@ async function runVerificationTests() {
     } catch {}
   }
   console.log('✓ wb_helper.py Python syntax and notebook TODO auto-repair verified.');
+
+  // 12. Verify CEPF L300 evaluation.ipynb fast-path synthesis & indentation preservation
+  const cepfTask2 = await synthesizeTaskShellScript({
+    labTitle: '[CEPF L300]: Evaluate Single LLM Outputs with Gemini Enterprise Agent Platform Evals',
+    task: {
+      number: 2,
+      title: 'Task 2. Evaluate model responses with a computation-based metric',
+      hasCheckProgress: true,
+      checkProgressStepNumber: 2,
+      rawSectionText: 'Complete the ROUGE evaluation task in evaluation.ipynb and run the cell.',
+      steps: [],
+    },
+    credentials: modernParsed.credentials,
+  });
+  if (
+    !cepfTask2 ||
+    !cepfTask2.script.includes('wb_helper.update_and_run_notebook') ||
+    transformAgyLaunchCommand(cepfTask2.script) !== cepfTask2.script
+  ) {
+    throw new Error('CEPF L300 Task 2 fast-path synthesis or indentation check failed.');
+  }
+  console.log('✓ CEPF L300 evaluation.ipynb fast-path synthesis & indentation verified.');
 
   await browser.close();
   console.log('✅ All verification tests passed!');

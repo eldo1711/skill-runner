@@ -140,6 +140,16 @@ export interface ChromeTabDescriptor {
   suggestedRole: 'lab' | 'console' | 'cloud_shell' | 'other';
 }
 
+export interface ModelGardenEntry {
+  id: 'gemini-3.8-flash' | 'gemini-3.1-pro-preview' | 'claude-opus-5-5';
+  label: string;
+  publisher: 'google' | 'anthropic';
+  enabled: boolean;
+  latencyMs?: number;
+  statusMessage?: string;
+  lastCheckedAt?: string;
+}
+
 export interface RunnerState {
   status: RunnerStatus;
   executionMode: ExecutionMode;
@@ -163,9 +173,11 @@ export interface RunnerState {
   selectedConsoleTabKey?: string | null;
   selectedCloudShellTabKey?: string | null;
   activeModel?: string;
+  modelGarden?: ModelGardenEntry[];
   macBridgeConnected?: boolean;
   labInstanceId?: string;
   totalScore?: number;
   maxScore?: number;
 }
+
 

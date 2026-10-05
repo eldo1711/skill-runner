@@ -9,6 +9,7 @@ import {
   LabStep,
   LabTask,
   LogEntry,
+  ModelGardenEntry,
   RunnerState,
   RunnerStatus,
 } from './types.js';
@@ -45,12 +46,15 @@ import {
   sendPromptToAntigravity,
 } from './pageInspector.js';
 import {
+  checkModelGardenAvailability,
   decideNextStepAction,
   formatAutonomousAntigravityPrompt,
   getActiveGeminiModel,
+  getModelGardenEntries,
   interpolateLabVariables,
   refineParsedTasksWithGemini,
   resolveLatestGeminiModel,
+  setActiveGeminiModel,
   synthesizeTaskShellScript,
   transformAgyLaunchCommand,
 } from './geminiClient.js';
@@ -111,6 +115,7 @@ export class LabBrowserOrchestrator {
       selectedConsoleTabKey: null,
       selectedCloudShellTabKey: null,
       activeModel: getActiveGeminiModel(),
+      modelGarden: getModelGardenEntries(),
       macBridgeConnected: macBridgeHub.isConnected(),
     };
 
@@ -144,13 +149,35 @@ export class LabBrowserOrchestrator {
       }
     });
 
-    // Resolve the latest available Gemini model on startup
+    // Resolve the latest available model and probe Model Garden on startup
     resolveLatestGeminiModel()
       .then((model) => {
         this.state.activeModel = model;
         this.emitState();
       })
       .catch(() => {});
+    this.checkModels().catch(() => {});
+  }
+
+  public async checkModels(): Promise<ModelGardenEntry[]> {
+    const entries = await checkModelGardenAvailability();
+    this.state.modelGarden = entries;
+    this.state.activeModel = getActiveGeminiModel();
+    this.emitState();
+    return entries;
+  }
+
+  public selectModel(modelId: string): string {
+    const updated = setActiveGeminiModel(modelId);
+    this.state.activeModel = updated;
+    const entry = (this.state.modelGarden || []).find((m) => m.id === updated);
+    this.addLog(
+      'info',
+      'gemini',
+      `Selected Model Garden model: ${entry ? `${entry.label} (${entry.id})` : updated}`
+    );
+    this.emitState();
+    return updated;
   }
 
   private isUserChromeBridgeAvailable(): boolean {
@@ -899,82 +926,40 @@ export class LabBrowserOrchestrator {
       await this.parseLabInstructions();
     }
 
-    // When connected to the user's Mac Chrome Bridge (or running on macOS), spawn or reuse an Incognito window
-    // on the user's Mac signed into the temporary student account (Console + Cloud Shell tabs).
-    if (this.isUserChromeBridgeAvailable() && this.state.credentials.username) {
-      this.setStatus('signing_in_console');
-      this.addLog(
-        'action',
-        'incognito_console',
-        `Spawning Incognito Chrome window on your Mac and signing in as ${this.state.credentials.username} (Project: ${this.state.credentials.projectId || 'detecting'})...`
-      );
-      const incognitoRes = await spawnIncognitoSessionInUserChrome({
-        username: this.state.credentials.username,
-        password: this.state.credentials.password,
-        projectId: this.state.credentials.projectId,
-        consoleUrl: this.state.credentials.consoleUrl,
-      });
+    // Scan open Chrome windows to detect the user's manually launched Incognito Console & Cloud Shell tabs
+    await this.scanOpenChromeWindows(false);
+    const tabs = this.state.availableChromeTabs || [];
+    const incConsoleTab =
+      tabs.find((t) => t.windowMode === 'incognito' && t.suggestedRole === 'console') ||
+      tabs.find((t) => t.key === this.state.selectedConsoleTabKey);
+    const incShellTab =
+      tabs.find((t) => t.windowMode === 'incognito' && t.suggestedRole === 'cloud_shell') ||
+      tabs.find((t) => t.key === this.state.selectedCloudShellTabKey);
 
-      if (incognitoRes?.ok) {
-        if (Array.isArray(incognitoRes.tabs) && incognitoRes.tabs.length > 0) {
-          this.applyScannedTabs(incognitoRes.tabs);
-        } else {
-          await this.scanOpenChromeWindows(false);
-        }
-        if (incognitoRes.consoleTabKey) {
-          this.state.selectedConsoleTabKey = incognitoRes.consoleTabKey;
-          const cTab = (this.state.availableChromeTabs || []).find(
-            (t) => t.key === incognitoRes.consoleTabKey
-          );
-          if (cTab) this.state.consoleCurrentUrl = cTab.url;
-        }
-        if (incognitoRes.cloudShellTabKey) {
-          this.state.selectedCloudShellTabKey = incognitoRes.cloudShellTabKey;
-        }
-        this.state.isConsoleSignedIn = true;
-        this.addLog(
-          'success',
-          'incognito_console',
-          incognitoRes.reused
-            ? `Attached to existing Incognito student session for Project ${this.state.credentials.projectId}!`
-            : `Signed into Incognito GCP Console & opened Cloud Shell as ${this.state.credentials.username}!`
-        );
-        this.setStatus('lab_parsed');
-        await this.refreshScreenshots();
-        return;
-      }
+    if (incConsoleTab) {
+      this.state.selectedConsoleTabKey = incConsoleTab.key;
+      this.state.consoleCurrentUrl = incConsoleTab.url;
+    }
+    if (incShellTab) {
+      this.state.selectedCloudShellTabKey = incShellTab.key;
     }
 
-    // Check if the user already has a Console / Cloud Shell tab selected in their native Chrome
-    await this.scanOpenChromeWindows(false);
-    const nativeConsoleTarget = parseTabKey(
-      this.state.selectedConsoleTabKey || this.state.selectedCloudShellTabKey
-    );
-
-    if (nativeConsoleTarget) {
+    if (incConsoleTab || incShellTab) {
       this.state.isConsoleSignedIn = true;
-      await focusUserChromeTab(nativeConsoleTarget.windowId, nativeConsoleTarget.tabIndex);
       this.addLog(
         'success',
         'incognito_console',
-        `Attached to your authenticated Chrome Console window (${this.state.consoleCurrentUrl})!`
+        `Connected to your Incognito Console & Cloud Shell session for ${this.state.credentials.username || 'student'} (Project: ${this.state.credentials.projectId || 'active'})!`
       );
-      this.setStatus('lab_parsed');
-      await this.refreshScreenshots();
-      return;
+    } else {
+      this.state.isConsoleSignedIn = false;
+      this.addLog(
+        'warn',
+        'incognito_console',
+        `Lab started (${this.state.credentials.username} | ${this.state.credentials.projectId}). Please launch your initial Incognito Chrome window for Cloud Console and Cloud Shell using the tile above.`
+      );
     }
 
-    // Fallback: launch isolated Playwright Incognito browser window and sign into Cloud Console
-    this.setStatus('signing_in_console');
-    await this.ensureIncognitoConsoleWindow();
-
-    const signedIn = await signInToCloudConsoleIncognito(
-      this.consolePage!,
-      this.state.credentials,
-      (msg) => this.addLog('action', 'incognito_console', msg)
-    );
-
-    this.state.isConsoleSignedIn = signedIn;
     this.setStatus('lab_parsed');
     await this.refreshScreenshots();
   }

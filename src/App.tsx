@@ -76,8 +76,10 @@ export default function App() {
   const [credDraft, setCredDraft] = useState<LabCredentials>(INITIAL_STATE.credentials);
   const [scanningWindows, setScanningWindows] = useState<boolean>(false);
   const [syncingLab, setSyncingLab] = useState<boolean>(false);
+  const [startingLabOnly, setStartingLabOnly] = useState<boolean>(false);
   const [startingAndRunning, setStartingAndRunning] = useState<boolean>(false);
   const [checkingAllProgress, setCheckingAllProgress] = useState<boolean>(false);
+  const [checkingModels, setCheckingModels] = useState<boolean>(false);
   const [endingLab, setEndingLab] = useState<boolean>(false);
   const [showSwitchCourseModal, setShowSwitchCourseModal] = useState<boolean>(false);
   const [switchingCourse, setSwitchingCourse] = useState<boolean>(false);
@@ -331,10 +333,21 @@ export default function App() {
     });
   };
 
+  const handleStartLabOnly = async () => {
+    await ensureMacBridgeConnected('Start Lab & Extract Student Credentials', async () => {
+      setStartingLabOnly(true);
+      try {
+        await apiPost('/api/lab/start-and-signin');
+      } finally {
+        setStartingLabOnly(false);
+      }
+    });
+  };
+
   /**
-   * Primary 1-Click Workflow:
-   * Points at the selected Lab tab (or URL), starts the lab, spawns the student Incognito window,
-   * signs in as the lab student account, runs all tasks, and verifies all progress checks.
+   * Primary Workflow:
+   * Points at the selected Lab tab (or URL), starts the lab, attaches to the user's Incognito
+   * Console & Cloud Shell session, runs all tasks, and verifies all progress checks.
    */
   const handleStartAndRunLab = async () => {
     await ensureMacBridgeConnected('Start & Run Lab', async () => {
@@ -348,6 +361,33 @@ export default function App() {
         setStartingAndRunning(false);
       }
     });
+  };
+
+  const handleCheckModels = async () => {
+    setCheckingModels(true);
+    try {
+      const data = await apiPost('/api/models/check');
+      if (data?.modelGarden) {
+        setState((prev) => ({
+          ...prev,
+          modelGarden: data.modelGarden,
+          activeModel: data.activeModel || prev.activeModel,
+        }));
+      }
+    } finally {
+      setCheckingModels(false);
+    }
+  };
+
+  const handleSelectModel = async (modelId: string) => {
+    const data = await apiPost('/api/models/select', { model: modelId });
+    if (data?.activeModel) {
+      setState((prev) => ({
+        ...prev,
+        activeModel: data.activeModel,
+        modelGarden: data.modelGarden || prev.modelGarden,
+      }));
+    }
   };
 
   const handleCheckAllProgress = async () => {
@@ -508,6 +548,58 @@ export default function App() {
   const selectedConsoleTab = chromeTabs.find((t) => t.key === state.selectedConsoleTabKey);
   const selectedShellTab = chromeTabs.find((t) => t.key === state.selectedCloudShellTabKey);
 
+  const incognitoConsoleTab =
+    chromeTabs.find(
+      (t) =>
+        t.windowMode === 'incognito' &&
+        (t.suggestedRole === 'console' || t.url.includes('console.cloud.google.com'))
+    ) ||
+    (selectedConsoleTab?.windowMode === 'incognito' ? selectedConsoleTab : undefined);
+
+  const incognitoShellTab =
+    chromeTabs.find(
+      (t) =>
+        t.windowMode === 'incognito' &&
+        (t.suggestedRole === 'cloud_shell' || t.url.includes('shell.cloud.google.com'))
+    ) ||
+    (selectedShellTab?.windowMode === 'incognito' ? selectedShellTab : undefined);
+
+  const bothIncognitoTabsReady = Boolean(incognitoConsoleTab && incognitoShellTab);
+
+  const consoleQuickUrl = state.credentials.projectId
+    ? `https://console.cloud.google.com/?project=${state.credentials.projectId}`
+    : state.credentials.consoleUrl || 'https://console.cloud.google.com/';
+  const cloudShellQuickUrl = state.credentials.projectId
+    ? `https://shell.cloud.google.com/?project=${state.credentials.projectId}&show=terminal`
+    : 'https://shell.cloud.google.com/?show=terminal';
+
+  const modelGardenList =
+    state.modelGarden && state.modelGarden.length > 0
+      ? state.modelGarden
+      : [
+          {
+            id: 'gemini-3.8-flash' as const,
+            label: 'Gemini 3.8 Flash',
+            publisher: 'google' as const,
+            enabled: true,
+            statusMessage: 'Enabled in Model Garden',
+          },
+          {
+            id: 'gemini-3.1-pro-preview' as const,
+            label: 'Gemini 3.1 Pro',
+            publisher: 'google' as const,
+            enabled: true,
+            statusMessage: 'Enabled in Model Garden',
+          },
+          {
+            id: 'claude-opus-5-5' as const,
+            label: 'Opus 5.5',
+            publisher: 'anthropic' as const,
+            enabled: true,
+            statusMessage: 'Enabled in Model Garden',
+          },
+        ];
+
   const formatTabLabel = (t: (typeof chromeTabs)[number]) => {
     const roleTag =
       t.suggestedRole === 'lab'
@@ -605,11 +697,11 @@ export default function App() {
           </div>
         </div>
 
-        {/* Streamlined 3-Step Guided Workflow Bar */}
-        <div className="max-w-[1600px] mx-auto mt-3 grid grid-cols-1 lg:grid-cols-12 gap-3">
-          {/* STEP 1: Connect Mac Bridge */}
+        {/* Streamlined 4-Tile Guided Workflow Bar */}
+        <div className="max-w-[1600px] mx-auto mt-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-12 gap-3">
+          {/* TILE 1: Connect Mac Bridge */}
           <div
-            className={`lg:col-span-3 rounded-xl p-3 border flex flex-col justify-between gap-2 transition ${
+            className={`xl:col-span-3 rounded-xl p-3 border flex flex-col justify-between gap-2 transition ${
               state.macBridgeConnected
                 ? 'bg-emerald-950/20 border-emerald-500/30'
                 : 'bg-amber-950/20 border-amber-500/40'
@@ -644,7 +736,7 @@ export default function App() {
 
             <p className="text-[11px] text-slate-300 leading-snug">
               {state.macBridgeConnected
-                ? 'Signed-in Chrome tabs detected. Ready to spawn student Incognito sessions.'
+                ? 'Bridge connected to your desktop Chrome windows.'
                 : 'Sign into Skills Boost in Chrome, then start the Mac Bridge.'}
             </p>
 
@@ -707,8 +799,8 @@ export default function App() {
             </div>
           </div>
 
-          {/* STEP 2: Point at Your Self-Signed-In Lab Page */}
-          <div className="lg:col-span-5 rounded-xl bg-slate-900/90 border border-slate-800 p-3 flex flex-col justify-between gap-2">
+          {/* TILE 2: Point at Your Self-Signed-In Lab Page */}
+          <div className="xl:col-span-3 rounded-xl bg-slate-900/90 border border-slate-800 p-3 flex flex-col justify-between gap-2">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <span
@@ -721,7 +813,7 @@ export default function App() {
                   {state.tasks.length > 0 ? '✓' : '2'}
                 </span>
                 <span className="text-xs font-bold text-white">
-                  Point at Your Lab Instructions Page
+                  Lab Instructions Page
                 </span>
               </div>
 
@@ -735,7 +827,7 @@ export default function App() {
                       : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  Open Chrome Tab
+                  Chrome Tab
                 </button>
                 <button
                   type="button"
@@ -746,13 +838,13 @@ export default function App() {
                       : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  Paste Lab URL
+                  Lab URL
                 </button>
               </div>
             </div>
 
             {sourceMode === 'tab' ? (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
                 <select
                   value={state.selectedLabTabKey || ''}
                   onChange={(e) =>
@@ -760,10 +852,10 @@ export default function App() {
                       labTabKey: e.target.value || null,
                     })
                   }
-                  className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 font-mono focus:outline-none focus:border-cyan-500"
+                  className="flex-1 min-w-0 bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 font-mono focus:outline-none focus:border-cyan-500"
                 >
                   <option value="">
-                    -- Select Your Open Self-Signed-In Lab Tab --
+                    -- Select Your Signed-In Lab Tab --
                   </option>
                   {allLabSelectTabs.map((t) => (
                     <option key={t.key} value={t.key}>
@@ -775,91 +867,174 @@ export default function App() {
                   type="button"
                   onClick={handleParseLab}
                   disabled={syncingLab}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shrink-0 disabled:opacity-60"
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-xs font-semibold flex items-center gap-1 cursor-pointer transition shrink-0 disabled:opacity-60"
                   title="Sync and parse instructions from the selected Chrome tab"
                 >
                   <RefreshCw
                     className={`w-3.5 h-3.5 ${syncingLab ? 'animate-spin' : ''}`}
                   />
-                  {syncingLab ? 'Syncing...' : 'Sync'}
+                  {syncingLab ? 'Syncing' : 'Sync'}
                 </button>
               </div>
             ) : (
-              <form onSubmit={handleOpenLabUrl} className="flex items-center gap-2">
+              <form onSubmit={handleOpenLabUrl} className="flex items-center gap-1.5">
                 <input
                   type="url"
                   value={urlInput}
                   onChange={(e) => setUrlInput(e.target.value)}
-                  placeholder="https://www.cloudskillsboost.google/focuses/... or https://partner.skills.google/..."
-                  className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none focus:border-cyan-500"
+                  placeholder="https://www.cloudskillsboost.google/focuses/..."
+                  className="flex-1 min-w-0 bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none focus:border-cyan-500"
                 />
                 <button
                   type="submit"
                   disabled={syncingLab}
-                  className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shrink-0 disabled:opacity-60"
+                  className="px-2.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1 cursor-pointer transition shrink-0 disabled:opacity-60"
                 >
                   <ExternalLink className="w-3.5 h-3.5" />
-                  Open & Sync
+                  Open
                 </button>
               </form>
             )}
 
-            <div className="flex items-center justify-between text-[11px] text-slate-400">
+            <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400">
               <span className="truncate">
                 {state.labTitle
                   ? `Loaded: ${state.labTitle}`
-                  : 'Select your signed-in lab tab or paste a lab URL.'}
+                  : 'Select your signed-in lab tab or paste a URL.'}
               </span>
-              {selectedLabTab && (
+              {!state.isLabStarted && state.tasks.length > 0 && (
                 <button
                   type="button"
-                  onClick={() => handleFocusChromeTarget(selectedLabTab.key)}
-                  className="text-cyan-400 hover:text-cyan-300 font-medium shrink-0 ml-2 cursor-pointer"
+                  onClick={handleStartLabOnly}
+                  disabled={startingLabOnly}
+                  className="text-emerald-400 hover:text-emerald-300 font-semibold shrink-0 cursor-pointer"
                 >
-                  Focus Lab Tab
+                  {startingLabOnly ? 'Starting...' : 'Start Lab'}
                 </button>
               )}
             </div>
           </div>
 
-          {/* STEP 3: Start & Run Lab Autonomously */}
-          <div className="lg:col-span-4 rounded-xl bg-gradient-to-br from-slate-900 to-indigo-950/40 border border-indigo-500/30 p-3 flex flex-col justify-between gap-2">
+          {/* TILE 3: Launch Initial Incognito Window for Console & Cloud Shell */}
+          <div
+            className={`xl:col-span-3 rounded-xl p-3 border flex flex-col justify-between gap-2 transition ${
+              bothIncognitoTabsReady
+                ? 'bg-emerald-950/20 border-emerald-500/30'
+                : 'bg-indigo-950/30 border-indigo-500/40'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span
+                  className={`w-5 h-5 rounded-full text-[11px] font-bold flex items-center justify-center ${
+                    bothIncognitoTabsReady
+                      ? 'bg-emerald-500 text-slate-950'
+                      : 'bg-indigo-400 text-slate-950'
+                  }`}
+                >
+                  {bothIncognitoTabsReady ? '✓' : '3'}
+                </span>
+                <span className="text-xs font-bold text-white">
+                  Launch Incognito Console & Cloud Shell
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={handleScanChromeWindows}
+                disabled={scanningWindows}
+                className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-cyan-300 border border-slate-700 cursor-pointer"
+                title="Rescan open Chrome windows for your Incognito Console and Cloud Shell tabs"
+              >
+                {scanningWindows ? 'Scanning...' : 'Verify Tabs'}
+              </button>
+            </div>
+
+            <p className="text-[11px] text-slate-300 leading-snug">
+              Open an <strong>Incognito Chrome window</strong> signed in as the student account for both{' '}
+              <strong>Cloud Console</strong> and <strong>Cloud Shell</strong>.
+            </p>
+
+            <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+              <div
+                className={`px-2 py-1 rounded border flex items-center justify-between ${
+                  incognitoConsoleTab
+                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                    : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+                }`}
+              >
+                <span className="truncate font-medium">
+                  {incognitoConsoleTab ? '✓ Console Tab Open' : '⚠ Open Console Tab'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard('inc_console_url', consoleQuickUrl)}
+                  className="ml-1 underline hover:text-white shrink-0 cursor-pointer"
+                  title="Copy GCP Console URL for your Incognito window"
+                >
+                  {copiedField === 'inc_console_url' ? 'Copied' : 'Copy URL'}
+                </button>
+              </div>
+
+              <div
+                className={`px-2 py-1 rounded border flex items-center justify-between ${
+                  incognitoShellTab
+                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                    : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+                }`}
+              >
+                <span className="truncate font-medium">
+                  {incognitoShellTab ? '✓ Cloud Shell Open' : '⚠ Open Cloud Shell'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard('inc_shell_url', cloudShellQuickUrl)}
+                  className="ml-1 underline hover:text-white shrink-0 cursor-pointer"
+                  title="Copy Cloud Shell URL for your Incognito window"
+                >
+                  {copiedField === 'inc_shell_url' ? 'Copied' : 'Copy URL'}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* TILE 4: Run Lab & Verify Progress Checks */}
+          <div className="xl:col-span-3 rounded-xl bg-gradient-to-br from-slate-900 to-indigo-950/40 border border-indigo-500/30 p-3 flex flex-col justify-between gap-2">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <span className="w-5 h-5 rounded-full bg-emerald-500 text-slate-950 text-[11px] font-bold flex items-center justify-center">
-                  3
+                  4
                 </span>
                 <span className="text-xs font-bold text-white">
-                  Run Lab & Verify Progress Checks
+                  Run Lab & Verify Progress
                 </span>
               </div>
-              {state.isConsoleSignedIn && (
-                <span className="px-2 py-0.5 text-[10px] font-mono rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+              {bothIncognitoTabsReady && (
+                <span className="px-2 py-0.5 text-[10px] font-mono rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                   Incognito Ready
                 </span>
               )}
             </div>
 
             <p className="text-[11px] text-slate-300 leading-snug">
-              Starts the lab, spawns Incognito as the student account, runs all tasks, and clicks "Check my progress".
+              Executes all lab tasks using your selected Model Garden model and verifies every progress check.
             </p>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               {!isRunning ? (
                 <button
                   type="button"
                   onClick={handleStartAndRunLab}
                   disabled={startingAndRunning}
-                  className="flex-1 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition shadow-md shadow-emerald-600/20 disabled:opacity-60"
+                  className="flex-1 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition shadow-md shadow-emerald-600/20 disabled:opacity-60"
                 >
                   {startingAndRunning ? (
                     <>
-                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                       Launching...
                     </>
                   ) : (
                     <>
-                      <Play className="w-4 h-4 fill-current" />
+                      <Play className="w-3.5 h-3.5 fill-current" />
                       Start & Run Lab
                     </>
                   )}
@@ -868,10 +1043,10 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handlePause}
-                  className="flex-1 px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition"
+                  className="flex-1 px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition"
                 >
-                  <Pause className="w-4 h-4 fill-current" />
-                  Pause Execution
+                  <Pause className="w-3.5 h-3.5 fill-current" />
+                  Pause
                 </button>
               )}
 
@@ -880,13 +1055,13 @@ export default function App() {
                   type="button"
                   onClick={handleCheckAllProgress}
                   disabled={checkingAllProgress}
-                  className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-500/30 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shrink-0 disabled:opacity-60"
+                  className="px-2.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-500/30 text-xs font-semibold flex items-center gap-1 cursor-pointer transition shrink-0 disabled:opacity-60"
                   title="Run Check my progress across all graded tasks"
                 >
                   <CheckCircle2
                     className={`w-3.5 h-3.5 ${checkingAllProgress ? 'animate-spin' : ''}`}
                   />
-                  Check Progress
+                  Check
                 </button>
               )}
 
@@ -895,11 +1070,11 @@ export default function App() {
                   type="button"
                   onClick={handleEndLab}
                   disabled={endingLab}
-                  className="px-3 py-2 rounded-lg bg-red-600/20 hover:bg-red-600/35 text-red-200 border border-red-500/40 text-xs font-semibold flex items-center gap-1 cursor-pointer transition shrink-0 disabled:opacity-60"
+                  className="px-2.5 py-2 rounded-lg bg-red-600/20 hover:bg-red-600/35 text-red-200 border border-red-500/40 text-xs font-semibold flex items-center gap-1 cursor-pointer transition shrink-0 disabled:opacity-60"
                   title="Click End Lab in Chrome and clean up credentials"
                 >
                   <Power className="w-3.5 h-3.5 text-red-400" />
-                  {endingLab ? 'Ending...' : 'End Lab'}
+                  {endingLab ? '...' : 'End'}
                 </button>
               )}
             </div>
@@ -931,36 +1106,130 @@ export default function App() {
 
       {/* Main Content Grid */}
       <main className="flex-1 max-w-[1600px] w-full mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column (5 cols): Auto-Provisioned Student Account + Tasks & Progress Checklist */}
+        {/* Left Column (5 cols): Model Garden Checker + Student Account & Incognito Setup + Tasks */}
         <div className="lg:col-span-5 flex flex-col gap-5">
-          {/* Student Credentials & Incognito Session Card */}
+          {/* Model Garden Checker & Selector Card */}
           <section className="rounded-xl bg-slate-900 border border-slate-800 p-4 shadow-sm">
             <div className="flex items-center justify-between mb-3 gap-2">
               <div className="flex items-center gap-2">
-                <KeyRound className="w-4 h-4 text-indigo-400" />
-                <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300">
-                  Lab Student Account (Auto-Spawned Incognito)
+                <Sparkles className="w-4 h-4 text-cyan-400" />
+                <h2 className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                  Model Garden Checker & Selector
                 </h2>
               </div>
+              <button
+                type="button"
+                onClick={handleCheckModels}
+                disabled={checkingModels}
+                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer transition disabled:opacity-60"
+              >
+                <RefreshCw className={`w-3 h-3 ${checkingModels ? 'animate-spin' : ''}`} />
+                {checkingModels ? 'Checking Garden...' : 'Check Models'}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              {modelGardenList.map((m) => {
+                const isSelected = (state.activeModel || 'gemini-3.8-flash') === m.id;
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => handleSelectModel(m.id)}
+                    className={`text-left rounded-lg p-2.5 border transition cursor-pointer flex flex-col justify-between gap-1.5 ${
+                      isSelected
+                        ? 'bg-blue-950/40 border-blue-500/70 ring-1 ring-blue-500/40'
+                        : 'bg-slate-950/80 border-slate-800 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-xs font-bold text-white truncate">
+                        {m.label}
+                      </span>
+                      {isSelected && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-blue-500 text-slate-950">
+                          Active
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[10px] font-mono text-slate-400 truncate">
+                      {m.id}
+                    </div>
+                    <div className="flex items-center justify-between gap-1 pt-0.5">
+                      <span
+                        className={`inline-flex items-center gap-1 text-[10px] font-medium ${
+                          m.enabled ? 'text-emerald-400' : 'text-red-400'
+                        }`}
+                      >
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full ${
+                            m.enabled ? 'bg-emerald-400' : 'bg-red-400'
+                          }`}
+                        />
+                        {m.enabled ? 'Enabled' : 'Unavailable'}
+                      </span>
+                      {m.latencyMs !== undefined && (
+                        <span className="text-[10px] font-mono text-slate-400">
+                          {m.latencyMs}ms
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+
+          {/* Student Credentials & Manual Incognito Console / Cloud Shell Card */}
+          <section className="rounded-xl bg-slate-900 border border-slate-800 p-4 shadow-sm space-y-3">
+            <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                {selectedConsoleTab && (
+                <KeyRound className="w-4 h-4 text-indigo-400" />
+                <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                  Student Account & Your Incognito Console / Cloud Shell
+                </h2>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {incognitoConsoleTab && (
                   <button
                     type="button"
-                    onClick={() => handleFocusChromeTarget(selectedConsoleTab.key)}
-                    className="px-2.5 py-1 rounded bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/30 text-[11px] font-medium flex items-center gap-1 cursor-pointer"
+                    onClick={() => handleFocusChromeTarget(incognitoConsoleTab.key)}
+                    className="px-2 py-1 rounded bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/30 text-[11px] font-medium flex items-center gap-1 cursor-pointer"
                   >
-                    <ExternalLink className="w-3 h-3" /> Focus Incognito Console
+                    <ExternalLink className="w-3 h-3" /> Console
                   </button>
                 )}
-                {selectedShellTab && (
+                {incognitoShellTab && (
                   <button
                     type="button"
-                    onClick={() => handleFocusChromeTarget(selectedShellTab.key)}
-                    className="px-2.5 py-1 rounded bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 text-[11px] font-medium flex items-center gap-1 cursor-pointer"
+                    onClick={() => handleFocusChromeTarget(incognitoShellTab.key)}
+                    className="px-2 py-1 rounded bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 text-[11px] font-medium flex items-center gap-1 cursor-pointer"
                   >
-                    <Terminal className="w-3 h-3" /> Focus Cloud Shell
+                    <Terminal className="w-3 h-3" /> Cloud Shell
                   </button>
                 )}
+              </div>
+            </div>
+
+            <div className="rounded-lg bg-indigo-950/25 border border-indigo-500/30 px-3 py-2 text-[11px] text-indigo-200 flex items-center justify-between gap-2">
+              <span>
+                Launch your initial <strong>Incognito window</strong> signed in with the student credentials below and open both <strong>Console</strong> and <strong>Cloud Shell</strong>.
+              </span>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard('console_url_card', consoleQuickUrl)}
+                  className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-[10px] font-mono cursor-pointer"
+                >
+                  {copiedField === 'console_url_card' ? '✓ Copied Console' : 'Copy Console URL'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard('shell_url_card', cloudShellQuickUrl)}
+                  className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 text-[10px] font-mono cursor-pointer"
+                >
+                  {copiedField === 'shell_url_card' ? '✓ Copied Shell' : 'Copy Cloud Shell URL'}
+                </button>
               </div>
             </div>
 

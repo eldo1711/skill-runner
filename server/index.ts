@@ -328,6 +328,49 @@ app.post('/api/chrome/focus', async (req, res) => {
   }
 });
 
+// 16b. Model Garden Checker & Selector (Gemini 3.8 Flash, Gemini 3.1 Pro, Opus 5.5)
+app.get('/api/models/garden', (_req, res) => {
+  const st = orchestrator.getState();
+  res.json({
+    ok: true,
+    activeModel: st.activeModel || 'gemini-3.8-flash',
+    modelGarden: st.modelGarden || [],
+  });
+});
+
+app.post('/api/models/check', async (_req, res) => {
+  try {
+    const modelGarden = await orchestrator.checkModels();
+    const st = orchestrator.getState();
+    res.json({
+      ok: true,
+      activeModel: st.activeModel || 'gemini-3.8-flash',
+      modelGarden,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || String(err) });
+  }
+});
+
+app.post('/api/models/select', (req, res) => {
+  try {
+    const model = req.body?.model || req.body?.modelId;
+    if (!model || typeof model !== 'string') {
+      res.status(400).json({ error: 'model is required' });
+      return;
+    }
+    const activeModel = orchestrator.selectModel(model);
+    const st = orchestrator.getState();
+    res.json({
+      ok: true,
+      activeModel,
+      modelGarden: st.modelGarden || [],
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || String(err) });
+  }
+});
+
 // 17. Mac Bridge Status, Download & Stop Endpoints
 function resolvePublicBaseUrls(req: express.Request) {
   const protoHeader = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
