@@ -14,7 +14,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-let activeModel: string = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+let activeModel: string = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
 let aiClient: GoogleGenAI | null = null;
 let modelResolutionPromise: Promise<string> | null = null;
 
@@ -46,49 +46,15 @@ export function getGenAIClient(): GoogleGenAI {
 }
 
 /**
- * Dynamically queries the Vertex AI / Gemini Model Garden to select the newest available
- * Gemini model (e.g., `gemini-3.8-flash`), falling back to `gemini-3.8-flash`.
+ * Resolves the active Gemini model, defaulting to `gemini-3.5-flash`.
  */
 export async function resolveLatestGeminiModel(): Promise<string> {
   if (process.env.GEMINI_MODEL) {
     activeModel = process.env.GEMINI_MODEL;
     return activeModel;
   }
-  if (modelResolutionPromise) return modelResolutionPromise;
-
-  modelResolutionPromise = (async () => {
-    try {
-      const ai = getGenAIClient();
-      const pager = await ai.models.list();
-      const candidates: { id: string; major: number; minor: number }[] = [];
-
-      for await (const m of pager) {
-        const rawName = m.name || '';
-        const id = rawName
-          .replace(/^publishers\/google\/models\//, '')
-          .replace(/^models\//, '');
-        const match = id.match(/^gemini-(\d+)(?:\.(\d+))?-(flash|pro)(?:-(preview))?$/i);
-        if (match) {
-          const major = parseInt(match[1], 10);
-          const minor = match[2] ? parseInt(match[2], 10) : 0;
-          candidates.push({ id, major, minor });
-        }
-      }
-
-      if (candidates.length > 0) {
-        candidates.sort((a, b) => {
-          if (b.major !== a.major) return b.major - a.major;
-          return b.minor - a.minor;
-        });
-        activeModel = candidates[0].id;
-      }
-    } catch {
-      // Keep default `gemini-3.8-flash`
-    }
-    return activeModel;
-  })();
-
-  return modelResolutionPromise;
+  activeModel = 'gemini-3.5-flash';
+  return activeModel;
 }
 
 /**

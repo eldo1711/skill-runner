@@ -45,17 +45,16 @@ export function parseTabKey(
  * (`lab`, `console`, `cloud_shell`, or `other`).
  */
 export async function listUserChromeTabs(): Promise<ChromeTabDescriptor[]> {
-  if (process.platform !== 'darwin') {
-    if (!macBridgeHub.isConnected()) {
-      return [];
-    }
-    try {
-      const remoteTabs = await macBridgeHub.invoke<ChromeTabDescriptor[]>('list_tabs', {});
-      return Array.isArray(remoteTabs) ? remoteTabs : [];
-    } catch {
-      return [];
-    }
+  if (!macBridgeHub.isConnected()) {
+    return [];
   }
+  try {
+    const remoteTabs = await macBridgeHub.invoke<ChromeTabDescriptor[]>('list_tabs', {});
+    if (Array.isArray(remoteTabs)) return remoteTabs;
+  } catch {
+    if (process.platform !== 'darwin') return [];
+  }
+  if (process.platform !== 'darwin') return [];
 
   const script = `
 tell application "Google Chrome"
@@ -150,8 +149,11 @@ export async function focusUserChromeTab(
   windowId: number,
   tabIndex: number
 ): Promise<boolean> {
-  if (process.platform !== 'darwin' && macBridgeHub.isConnected()) {
-    return macBridgeHub.invoke<boolean>('focus_tab', { windowId, tabIndex }).catch(() => false);
+  if (!macBridgeHub.isConnected()) return false;
+  try {
+    return await macBridgeHub.invoke<boolean>('focus_tab', { windowId, tabIndex });
+  } catch {
+    if (process.platform !== 'darwin') return false;
   }
 
   const script = `
@@ -181,104 +183,11 @@ export async function openOrFocusLabInUserChrome(
   requestedUrl: string,
   onLog: (msg: string) => void
 ): Promise<UserChromeTabInfo> {
-  if (process.platform !== 'darwin' && macBridgeHub.isConnected()) {
-    onLog(`Connecting to your Mac Google Chrome via live WebSocket bridge for: ${requestedUrl}`);
-    return macBridgeHub.invoke<UserChromeTabInfo>('open_or_focus_lab', { requestedUrl });
+  if (!macBridgeHub.isConnected()) {
+    throw new Error('Mac Chrome Bridge is not connected.');
   }
-
-  let pathKey = '';
-  try {
-    const parsed = new URL(requestedUrl);
-    if (
-      parsed.pathname &&
-      parsed.pathname !== '/' &&
-      parsed.pathname !== '/focuses/'
-    ) {
-      pathKey = parsed.pathname;
-    }
-  } catch {
-    // Ignore URL parse error
-  }
-
-  const escapedUrl = requestedUrl.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  const escapedPathKey = pathKey.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-
-  const script = `
-tell application "Google Chrome"
-  activate
-  -- 1. First look for an existing tab matching the requested lab path
-  if "${escapedPathKey}" is not "" then
-    repeat with wIdx from 1 to count of windows
-      set w to window wIdx
-      repeat with tIdx from 1 to count of tabs of w
-        set t to tab tIdx of w
-        set u to URL of t
-        if u contains "${escapedPathKey}" then
-          set active tab index of w to tIdx
-          set index of w to 1
-          return ((id of w) as string) & "|||" & (wIdx as string) & "|||" & (tIdx as string) & "|||" & u & "|||" & (title of t)
-        end if
-      end repeat
-    end repeat
-  end if
-
-  -- 2. Next look for any open Skills Boost / Partner Skills lab focus tab
-  repeat with wIdx from 1 to count of windows
-    set w to window wIdx
-    repeat with tIdx from 1 to count of tabs of w
-      set t to tab tIdx of w
-      set u to URL of t
-      if (u contains "skills.google/focuses/" or u contains "skills.google/course_templates/" or u contains "skills.google/labs/" or u contains "cloudskillsboost.google/focuses/" or u contains "skills.google/catalog_lab/" or u contains "qwiklabs.com/focuses/") then
-        if "${escapedPathKey}" is "" then
-          set active tab index of w to tIdx
-          set index of w to 1
-          return ((id of w) as string) & "|||" & (wIdx as string) & "|||" & (tIdx as string) & "|||" & u & "|||" & (title of t)
-        end if
-      end if
-    end repeat
-  end repeat
-
-  -- 3. Otherwise, open the requested URL in the user's google.com Chrome window
-  set targetWinIdx to 1
-  repeat with wIdx from 1 to count of windows
-    set w to window wIdx
-    if (mode of w) is not "incognito" then
-      repeat with tIdx from 1 to count of tabs of w
-        set u to URL of tab tIdx of w
-        if (u contains "partner.skills.google" or u contains "skills.google" or u contains "mail.google.com" or u contains "corp.google.com") then
-          set targetWinIdx to wIdx
-          exit repeat
-        end if
-      end repeat
-    end if
-    if targetWinIdx is not 1 then exit repeat
-  end repeat
-
-  if (count of windows) is 0 then
-    make new window
-    set targetWinIdx to 1
-  end if
-
-  set targetWin to window targetWinIdx
-  set newTab to make new tab at end of tabs of targetWin with properties {URL:"${escapedUrl}"}
-  set index of targetWin to 1
-  set newTabIdx to count of tabs of targetWin
-  return ((id of targetWin) as string) & "|||1|||" & (newTabIdx as string) & "|||" & (URL of newTab) & "|||" & (title of newTab)
-end tell
-`;
-
-  onLog(
-    `Connecting to your active Google Chrome (google.com session) for Lab URL: ${requestedUrl}`
-  );
-  const raw = await runAppleScript(script);
-  const [wIdStr, wStr, tStr, url, title] = raw.split('|||');
-  return {
-    windowId: parseInt(wIdStr, 10) || undefined,
-    windowIndex: parseInt(wStr, 10) || 1,
-    tabIndex: parseInt(tStr, 10) || 1,
-    url: url || requestedUrl,
-    title: title || 'Google Cloud Skills Lab',
-  };
+  onLog(`Connecting to your Mac Google Chrome via live WebSocket bridge for: ${requestedUrl}`);
+  return macBridgeHub.invoke<UserChromeTabInfo>('open_or_focus_lab', { requestedUrl });
 }
 
 /**
@@ -288,26 +197,25 @@ export async function snapshotUserChromeTabByTarget(
   windowId: number,
   tabIndex: number
 ): Promise<{ htmlPath: string; url: string; title: string } | null> {
+  if (!macBridgeHub.isConnected()) return null;
   fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
 
-  if (process.platform !== 'darwin' && macBridgeHub.isConnected()) {
-    try {
-      const remoteSnap = await macBridgeHub.invoke<{
-        htmlContent: string;
-        url: string;
-        title: string;
-      } | null>('snapshot_tab_by_target', { windowId, tabIndex }, 30000);
-      if (remoteSnap && remoteSnap.htmlContent) {
-        fs.writeFileSync(SNAPSHOT_HTML_PATH, remoteSnap.htmlContent, 'utf8');
-        return {
-          htmlPath: SNAPSHOT_HTML_PATH,
-          url: remoteSnap.url,
-          title: remoteSnap.title,
-        };
-      }
-    } catch {
-      // Fall through
+  try {
+    const remoteSnap = await macBridgeHub.invoke<{
+      htmlContent: string;
+      url: string;
+      title: string;
+    } | null>('snapshot_tab_by_target', { windowId, tabIndex }, 30000);
+    if (remoteSnap && remoteSnap.htmlContent) {
+      fs.writeFileSync(SNAPSHOT_HTML_PATH, remoteSnap.htmlContent, 'utf8');
+      return {
+        htmlPath: SNAPSHOT_HTML_PATH,
+        url: remoteSnap.url,
+        title: remoteSnap.title,
+      };
     }
+  } catch {
+    if (process.platform !== 'darwin') return null;
   }
 
   try {
@@ -414,7 +322,7 @@ export async function snapshotUserChromeLabTab(
   preferredUrl?: string,
   preferredTarget?: { windowId: number; tabIndex: number } | null
 ): Promise<{ htmlPath: string; url: string; title: string } | null> {
-  if (preferredTarget) {
+  if (preferredTarget && macBridgeHub.isConnected()) {
     const byTarget = await snapshotUserChromeTabByTarget(
       preferredTarget.windowId,
       preferredTarget.tabIndex
@@ -424,7 +332,7 @@ export async function snapshotUserChromeLabTab(
 
   fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
 
-  if (process.platform !== 'darwin' && macBridgeHub.isConnected()) {
+  if (macBridgeHub.isConnected()) {
     try {
       const remoteSnap = await macBridgeHub.invoke<{
         htmlContent: string;
@@ -444,10 +352,12 @@ export async function snapshotUserChromeLabTab(
     }
   }
 
-  const tabs = await listUserChromeTabs();
-  const labTab = tabs.find((t) => t.suggestedRole === 'lab');
-  if (labTab) {
-    return snapshotUserChromeTabByTarget(labTab.windowId, labTab.tabIndex);
+  if (macBridgeHub.isConnected()) {
+    const tabs = await listUserChromeTabs();
+    const labTab = tabs.find((t) => t.suggestedRole === 'lab');
+    if (labTab) {
+      return snapshotUserChromeTabByTarget(labTab.windowId, labTab.tabIndex);
+    }
   }
 
   const seedSnapshotPath = path.resolve(process.cwd(), 'server/seed_lab_snapshot.html');
@@ -470,10 +380,16 @@ export async function navigateOrOpenInUserChromeWindow(
   url: string,
   openInNewTab = false
 ): Promise<boolean> {
-  if (process.platform !== 'darwin' && macBridgeHub.isConnected()) {
-    return macBridgeHub
-      .invoke<boolean>('navigate_tab', { windowId, tabIndex, url, openInNewTab })
-      .catch(() => false);
+  if (!macBridgeHub.isConnected()) return false;
+  try {
+    return await macBridgeHub.invoke<boolean>('navigate_tab', {
+      windowId,
+      tabIndex,
+      url,
+      openInNewTab,
+    });
+  } catch {
+    if (process.platform !== 'darwin') return false;
   }
 
   const escapedUrl = url.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -534,10 +450,16 @@ export async function sendTextToUserChromeTab(
   pressEnter = true,
   onLog?: (msg: string) => void
 ): Promise<boolean> {
-  if (process.platform !== 'darwin' && macBridgeHub.isConnected()) {
-    return macBridgeHub
-      .invoke<boolean>('send_text', { windowId, tabIndex, text, pressEnter })
-      .catch(() => false);
+  if (!macBridgeHub.isConnected()) return false;
+  try {
+    return await macBridgeHub.invoke<boolean>('send_text', {
+      windowId,
+      tabIndex,
+      text,
+      pressEnter,
+    });
+  } catch {
+    if (process.platform !== 'darwin') return false;
   }
 
   const focused = await focusUserChromeTab(windowId, tabIndex);
@@ -630,11 +552,15 @@ export async function clickStartLabInUserChrome(
   preferredUrl?: string,
   preferredTarget?: { windowId: number; tabIndex: number } | null
 ): Promise<boolean> {
-  if (process.platform !== 'darwin') {
-    if (!macBridgeHub.isConnected()) return false;
-    return macBridgeHub
-      .invoke<boolean>('start_lab', { preferredUrl, preferredTarget }, 30000)
-      .catch(() => false);
+  if (!macBridgeHub.isConnected()) return false;
+  try {
+    return await macBridgeHub.invoke<boolean>(
+      'start_lab',
+      { preferredUrl, preferredTarget },
+      30000
+    );
+  } catch {
+    if (process.platform !== 'darwin') return false;
   }
 
   let target = preferredTarget || null;
@@ -719,28 +645,30 @@ export async function clickEndLabInUserChrome(
   preferredUrl?: string,
   preferredTarget?: { windowId: number; tabIndex: number } | null
 ): Promise<{ ended: boolean; message: string }> {
-  if (process.platform !== 'darwin') {
-    if (!macBridgeHub.isConnected()) {
-      return {
-        ended: false,
-        message: 'Mac Chrome Bridge is not connected — cannot click End Lab in Chrome.',
-      };
+  if (!macBridgeHub.isConnected()) {
+    return {
+      ended: false,
+      message: 'Mac Chrome Bridge is not connected — cannot click End Lab in Chrome.',
+    };
+  }
+  try {
+    const res = await macBridgeHub.invoke<{ ended: boolean; message: string }>(
+      'end_lab',
+      { preferredUrl, preferredTarget },
+      30000
+    );
+    if (res && typeof res.ended === 'boolean') {
+      return res;
     }
-    try {
-      const res = await macBridgeHub.invoke<{ ended: boolean; message: string }>(
-        'end_lab',
-        { preferredUrl, preferredTarget },
-        30000
-      );
-      if (res && typeof res.ended === 'boolean') {
-        return res;
-      }
-    } catch (err: any) {
+  } catch (err: any) {
+    if (process.platform !== 'darwin') {
       return {
         ended: false,
         message: `End Lab RPC failed: ${err?.message || String(err)}`,
       };
     }
+  }
+  if (process.platform !== 'darwin') {
     return { ended: false, message: 'End Lab did not return a status.' };
   }
 
@@ -903,34 +831,36 @@ export async function clickCheckProgressInUserChrome(
 }> {
   const stepNo = Math.max(1, Number(stepNumber) || 1);
 
-  if (process.platform !== 'darwin') {
-    if (!macBridgeHub.isConnected()) {
-      return {
-        verified: false,
-        message: 'Mac Chrome Bridge is not connected — cannot trigger Check my progress.',
-      };
+  if (!macBridgeHub.isConnected()) {
+    return {
+      verified: false,
+      message: 'Mac Chrome Bridge is not connected — cannot trigger Check my progress.',
+    };
+  }
+  try {
+    const res = await macBridgeHub.invoke<any>(
+      'check_progress',
+      {
+        stepNumber: stepNo,
+        labUrl: preferredUrl,
+        labInstanceId: options?.labInstanceId,
+        windowId: options?.windowId,
+        tabIndex: options?.tabIndex,
+      },
+      30000
+    );
+    if (res && typeof res.verified === 'boolean') {
+      return res;
     }
-    try {
-      const res = await macBridgeHub.invoke<any>(
-        'check_progress',
-        {
-          stepNumber: stepNo,
-          labUrl: preferredUrl,
-          labInstanceId: options?.labInstanceId,
-          windowId: options?.windowId,
-          tabIndex: options?.tabIndex,
-        },
-        30000
-      );
-      if (res && typeof res.verified === 'boolean') {
-        return res;
-      }
-    } catch (err: any) {
+  } catch (err: any) {
+    if (process.platform !== 'darwin') {
       return {
         verified: false,
         message: `Check my progress RPC failed: ${err?.message || String(err)}`,
       };
     }
+  }
+  if (process.platform !== 'darwin') {
     return {
       verified: false,
       message: 'Check my progress did not return a valid status.',
@@ -1082,6 +1012,323 @@ end tell
   }
 }
 
+export interface SpawnIncognitoResult {
+  ok: boolean;
+  reused?: boolean;
+  windowId?: number;
+  consoleTabKey?: string;
+  cloudShellTabKey?: string;
+  tabs?: ChromeTabDescriptor[];
+}
+
+function buildGoogleSignInStepJsForTab(username: string, password: string): string {
+  const safeUser = JSON.stringify(String(username || '').trim());
+  const safePass = JSON.stringify(String(password || ''));
+  return `(function(user, pass) {
+    try {
+      function isVis(el) {
+        if (!el) return false;
+        var r = el.getBoundingClientRect();
+        var s = window.getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+      }
+      function setNativeValue(el, val) {
+        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value') &&
+                     Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        if (setter) setter.call(el, val);
+        else el.value = val;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      var href = window.location.href || '';
+      if (
+        (href.indexOf('console.cloud.google.com') !== -1 || href.indexOf('shell.cloud.google.com') !== -1) &&
+        href.indexOf('accounts.google.com') === -1
+      ) {
+        var dialogs = document.querySelectorAll('.mat-mdc-dialog-container, mat-dialog-container, [role="dialog"]');
+        for (var d = 0; d < dialogs.length; d++) {
+          var dlg = dialogs[d];
+          if (!isVis(dlg)) continue;
+          var cbs = dlg.querySelectorAll('input[type="checkbox"]:not(:checked)');
+          for (var c = 0; c < cbs.length; c++) {
+            cbs[c].click();
+          }
+          var btns = dlg.querySelectorAll('button, [role="button"]');
+          for (var b = 0; b < btns.length; b++) {
+            var txt = (btns[b].innerText || btns[b].textContent || '').trim().toLowerCase();
+            if (txt.indexOf('agree and continue') !== -1 || txt === 'agree' || txt === 'accept' || txt === 'continue') {
+              btns[b].click();
+              return 'console_tos_accepted';
+            }
+          }
+        }
+        return 'console_ready';
+      }
+      if (href.indexOf('http://localhost:') === 0 || href.indexOf('http://127.0.0.1:') === 0 || href.indexOf('sdk/auth_success') !== -1) {
+        return 'oauth_redirected:' + href;
+      }
+
+      var passInput = document.querySelector('input[type="password"][name="Passwd"], input[type="password"]');
+      if (passInput && isVis(passInput) && pass) {
+        if (passInput.dataset.srSubmitted === '1' && Date.now() - Number(passInput.dataset.srTime || 0) < 4000) {
+          return 'waiting_after_password';
+        }
+        passInput.focus();
+        setNativeValue(passInput, pass);
+        passInput.dataset.srSubmitted = '1';
+        passInput.dataset.srTime = String(Date.now());
+        var pNext = document.querySelector('#passwordNext button, #passwordNext, button[type="submit"], input[type="submit"]');
+        if (pNext && isVis(pNext)) pNext.click();
+        else passInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+        return 'submitted_password';
+      }
+
+      var emailInput = document.querySelector('input[type="email"], input#identifierId, input[name="identifier"]');
+      if (emailInput && isVis(emailInput) && user) {
+        if (emailInput.dataset.srSubmitted === '1' && Date.now() - Number(emailInput.dataset.srTime || 0) < 4000) {
+          return 'waiting_after_email';
+        }
+        emailInput.focus();
+        setNativeValue(emailInput, user);
+        emailInput.dataset.srSubmitted = '1';
+        emailInput.dataset.srTime = String(Date.now());
+        var eNext = document.querySelector('#identifierNext button, #identifierNext, button[type="submit"], input[type="submit"]');
+        if (eNext && isVis(eNext)) eNext.click();
+        else emailInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+        return 'submitted_email';
+      }
+
+      var acctItems = document.querySelectorAll('[data-identifier], [data-email]');
+      if (acctItems.length > 0 && user) {
+        for (var i = 0; i < acctItems.length; i++) {
+          var idVal = (acctItems[i].getAttribute('data-identifier') || acctItems[i].getAttribute('data-email') || '').toLowerCase();
+          if (idVal === user.toLowerCase() && isVis(acctItems[i])) {
+            acctItems[i].click();
+            return 'clicked_matching_account';
+          }
+        }
+        var allLis = document.querySelectorAll('li, [role="link"], [role="button"]');
+        for (var j = 0; j < allLis.length; j++) {
+          var lTxt = (allLis[j].innerText || allLis[j].textContent || '').trim().toLowerCase();
+          if (lTxt.indexOf('use another account') !== -1 && isVis(allLis[j])) {
+            allLis[j].click();
+            return 'clicked_use_another_account';
+          }
+        }
+      }
+
+      var confirmInput = document.querySelector('input#confirm, input[name="confirm"]');
+      if (confirmInput && isVis(confirmInput)) {
+        confirmInput.click();
+        return 'clicked_confirm_input';
+      }
+      var checkboxes = document.querySelectorAll('input[type="checkbox"]:not(:checked)');
+      for (var k = 0; k < checkboxes.length; k++) {
+        if (isVis(checkboxes[k])) checkboxes[k].click();
+      }
+      var buttons = document.querySelectorAll('button, input[type="button"], input[type="submit"], [role="button"]');
+      var matchedBtn = null;
+      var matchedLabel = '';
+      for (var m = 0; m < buttons.length; m++) {
+        var btn = buttons[m];
+        if (!isVis(btn)) continue;
+        var bTxt = (btn.innerText || btn.value || btn.textContent || '').trim().toLowerCase();
+        if (
+          bTxt === 'i understand' ||
+          bTxt === 'accept' ||
+          bTxt === 'agree' ||
+          bTxt === 'agree and continue' ||
+          bTxt === 'continue' ||
+          bTxt === 'allow' ||
+          bTxt === 'confirm' ||
+          bTxt === 'sign in'
+        ) {
+          matchedBtn = btn;
+          matchedLabel = bTxt;
+        }
+      }
+      if (matchedBtn) {
+        matchedBtn.click();
+        return 'clicked_consent_' + matchedLabel;
+      }
+      return 'waiting:' + href;
+    } catch (e) {
+      return 'err:' + (e && e.message ? e.message : String(e));
+    }
+  })(${safeUser}, ${safePass})`;
+}
+
+async function executeJsInChromeWindowTab(
+  windowId: number,
+  tabIndex: number,
+  jsCode: string
+): Promise<{ ok: boolean; value: string }> {
+  const escapedJs = jsCode.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const script = `
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${windowId}" then
+      if ${tabIndex} <= (count of tabs of w) then
+        set t to tab ${tabIndex} of w
+        try
+          set res to execute t javascript "${escapedJs}"
+          if res is missing value then return "OK:"
+          return "OK:" & (res as string)
+        on error errMsg
+          return "ERR:" & errMsg
+        end try
+      end if
+    end if
+  end repeat
+  return "ERR:tab_not_found"
+end tell
+`;
+  const out = await runAppleScript(script).catch((e) => `ERR:${e?.message || e}`);
+  if (out.startsWith('OK:')) {
+    return { ok: true, value: out.slice(3) };
+  }
+  return { ok: false, value: out.slice(4) };
+}
+
+/**
+ * Spawns (or reuses) an Incognito window in the user's Mac Google Chrome, automatically
+ * signs in as the provisioned lab student account (`student-...@qwiklabs.net`), accepts
+ * Google Workspace and GCP Console Terms of Service modals, and opens both the GCP Console
+ * and Cloud Shell tabs.
+ */
+export async function spawnIncognitoSessionInUserChrome(params: {
+  username: string;
+  password?: string;
+  projectId?: string;
+  consoleUrl?: string;
+}): Promise<SpawnIncognitoResult | null> {
+  if (!macBridgeHub.isConnected()) return null;
+  try {
+    return await macBridgeHub.invoke<SpawnIncognitoResult>(
+      'spawn_incognito_session',
+      params,
+      90000
+    );
+  } catch {
+    if (process.platform !== 'darwin') return null;
+  }
+
+  const cleanUser = String(params.username || '').trim();
+  const cleanPass = String(params.password || '').trim();
+  const cleanProject = String(params.projectId || '').trim();
+  const targetConsoleUrl = cleanProject
+    ? `https://console.cloud.google.com/?project=${encodeURIComponent(cleanProject)}`
+    : String(params.consoleUrl || 'https://console.cloud.google.com/');
+  const targetCloudShellUrl = cleanProject
+    ? `https://shell.cloud.google.com/?project=${encodeURIComponent(cleanProject)}&show=terminal`
+    : 'https://shell.cloud.google.com/?show=terminal';
+
+  const existingTabs = await listUserChromeTabs();
+  const existingIncognitoTabs = existingTabs.filter((t) => t.windowMode === 'incognito');
+  if (cleanProject && existingIncognitoTabs.length > 0) {
+    const matchingConsole = existingIncognitoTabs.find(
+      (t) =>
+        t.url.includes('console.cloud.google.com') &&
+        !t.url.includes('accounts.google.com') &&
+        t.url.includes(cleanProject)
+    );
+    if (matchingConsole) {
+      const winId = matchingConsole.windowId;
+      const shellTab = existingIncognitoTabs.find(
+        (t) => t.windowId === winId && t.url.includes('shell.cloud.google.com')
+      );
+      if (!shellTab) {
+        await navigateOrOpenInUserChromeWindow(winId, null, targetCloudShellUrl, true);
+        await focusUserChromeTab(winId, matchingConsole.tabIndex);
+      }
+      const updatedTabs = await listUserChromeTabs();
+      const cTab =
+        updatedTabs.find(
+          (t) => t.windowId === winId && t.url.includes('console.cloud.google.com')
+        ) || matchingConsole;
+      const sTab = updatedTabs.find(
+        (t) => t.windowId === winId && t.url.includes('shell.cloud.google.com')
+      );
+      return {
+        ok: true,
+        reused: true,
+        windowId: winId,
+        consoleTabKey: cTab.key,
+        cloudShellTabKey: sTab ? sTab.key : cTab.key,
+        tabs: updatedTabs,
+      };
+    }
+  }
+
+  if (existingIncognitoTabs.length > 0) {
+    const closeStaleIncognitoScript = `
+tell application "Google Chrome"
+  repeat with i from (count of windows) to 1 by -1
+    set w to window i
+    if (mode of w) is "incognito" then
+      close w
+    end if
+  end repeat
+  return "closed"
+end tell
+`;
+    await runAppleScript(closeStaleIncognitoScript).catch(() => '');
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  const initialLoginUrl = cleanUser
+    ? `https://accounts.google.com/AccountChooser?Email=${encodeURIComponent(
+        cleanUser
+      )}&continue=${encodeURIComponent(targetConsoleUrl)}`
+    : targetConsoleUrl;
+  const escapedLoginUrl = initialLoginUrl.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
+  const createIncognitoScript = `
+tell application "Google Chrome"
+  activate
+  set incWin to make new window with properties {mode:"incognito"}
+  set URL of active tab of incWin to "${escapedLoginUrl}"
+  return (id of incWin) as string
+end tell
+`;
+  const winIdStr = await runAppleScript(createIncognitoScript).catch(() => '');
+  const windowId = parseInt(winIdStr, 10);
+  if (!Number.isFinite(windowId)) {
+    return null;
+  }
+
+  if (cleanUser && cleanPass) {
+    const signInJs = buildGoogleSignInStepJsForTab(cleanUser, cleanPass);
+    let consoleReadyCount = 0;
+    for (let attempt = 0; attempt < 35; attempt++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const jsStep = await executeJsInChromeWindowTab(windowId, 1, signInJs);
+      if (jsStep.ok) {
+        if (jsStep.value === 'console_ready' || jsStep.value === 'console_tos_accepted') {
+          consoleReadyCount++;
+          if (consoleReadyCount >= 3) break;
+        }
+      }
+    }
+  }
+
+  await navigateOrOpenInUserChromeWindow(windowId, null, targetCloudShellUrl, true);
+  await focusUserChromeTab(windowId, 1);
+
+  const tabs = await listUserChromeTabs();
+  const consoleTab = tabs.find((t) => t.windowId === windowId && t.tabIndex === 1);
+  const cloudShellTab = tabs.find((t) => t.windowId === windowId && t.tabIndex === 2);
+
+  return {
+    ok: true,
+    reused: false,
+    windowId,
+    consoleTabKey: consoleTab ? consoleTab.key : `${windowId}:1`,
+    cloudShellTabKey: cloudShellTab ? cloudShellTab.key : `${windowId}:2`,
+    tabs,
+  };
+}
+
 /**
  * Completes a Google OAuth2 login flow (`gcloud auth login`) headlessly using Playwright Chromium
  * with `--disable-blink-features=AutomationControlled` and returns the `http://localhost:<port>/?code=...`
@@ -1199,26 +1446,39 @@ export async function execInStudentCloudShellBridge(
     };
   }
 
-  // Remote Cloud Run -> Mac Bridge path
-  if (process.platform !== 'darwin') {
-    if (!macBridgeHub.isConnected()) {
-      return {
-        ok: false,
-        stdout: '',
-        stderr: 'Mac Chrome Bridge is not connected.',
-        exitCode: -1,
-      };
-    }
+  if (!macBridgeHub.isConnected()) {
+    return {
+      ok: false,
+      stdout: '',
+      stderr: 'Mac Chrome Bridge is not connected.',
+      exitCode: -1,
+    };
+  }
 
-    try {
-      const authCheck = await macBridgeHub.invoke<any>('check_gcloud_auth', {
-        username,
-        projectId,
-      });
+  // WebSocket Mac Bridge path (used for both Cloud Run and local server testing)
+  try {
+    let authCheck = await macBridgeHub.invoke<any>('check_gcloud_auth', {
+      username,
+      projectId,
+    });
+    if (!authCheck?.authenticated) {
+      if (onLog) {
+        onLog(`Authenticating isolated Cloud Shell SSH session for ${username} on Mac...`);
+      }
+      // Complete student gcloud OAuth directly on the user's Mac in the student Incognito window
+      authCheck = await macBridgeHub
+        .invoke<any>(
+          'ensure_gcloud_auth',
+          {
+            username,
+            password,
+            projectId,
+          },
+          90000
+        )
+        .catch(() => null);
+
       if (!authCheck?.authenticated) {
-        if (onLog) {
-          onLog(`Authenticating isolated Cloud Shell SSH session for ${username}...`);
-        }
         const started = await macBridgeHub.invoke<any>('start_gcloud_auth', {
           username,
           projectId,
@@ -1237,24 +1497,26 @@ export async function execInStudentCloudShellBridge(
           }
         }
       }
+    }
 
-      const execRes = await macBridgeHub.invoke<any>(
-        'exec_cloud_shell',
-        {
-          username,
-          projectId,
-          command,
-          timeoutMs,
-        },
-        timeoutMs + 15000
-      );
-      return {
-        ok: Boolean(execRes?.ok),
-        stdout: String(execRes?.stdout || ''),
-        stderr: String(execRes?.stderr || ''),
-        exitCode: Number(execRes?.exitCode ?? (execRes?.ok ? 0 : 1)),
-      };
-    } catch (err: any) {
+    const execRes = await macBridgeHub.invoke<any>(
+      'exec_cloud_shell',
+      {
+        username,
+        projectId,
+        command,
+        timeoutMs,
+      },
+      timeoutMs + 15000
+    );
+    return {
+      ok: Boolean(execRes?.ok),
+      stdout: String(execRes?.stdout || ''),
+      stderr: String(execRes?.stderr || ''),
+      exitCode: Number(execRes?.exitCode ?? (execRes?.ok ? 0 : 1)),
+    };
+  } catch (err: any) {
+    if (process.platform !== 'darwin') {
       return {
         ok: false,
         stdout: '',
@@ -1306,7 +1568,7 @@ export async function execInStudentCloudShellBridge(
       onLog(`Authenticating isolated Cloud Shell SSH session for ${username}...`);
     }
     await new Promise<void>((resolve) => {
-      const args = ['auth', 'login', '--enable-gdrive-access', '--quiet'];
+      const args = ['auth', 'login', '--quiet'];
       if (projectId) args.push(`--project=${projectId}`);
       const proc = spawn('gcloud', args, {
         env: { ...process.env, CLOUDSDK_CONFIG: activeConfigDir, BROWSER: '/usr/bin/true' },
@@ -1318,9 +1580,74 @@ export async function execInStudentCloudShellBridge(
         const m = out.match(/https:\/\/accounts\.google\.com\/o\/oauth2\/auth[^\s"]+/);
         if (m && !handled) {
           handled = true;
-          const cbUrl = await completeOAuthUrlWithPlaywright(m[0], username, password);
-          if (cbUrl) {
-            await fetch(cbUrl).catch(() => {});
+          const oauthUrl = m[0];
+          // First try completing OAuth inside the local student Incognito window on macOS
+          let completedInIncognito = false;
+          try {
+            const tabs = await listUserChromeTabs();
+            let incWinId = tabs.find((t) => t.windowMode === 'incognito')?.windowId || 0;
+            if (!incWinId) {
+              const spawned = await spawnIncognitoSessionInUserChrome({
+                username,
+                password,
+                projectId,
+              });
+              incWinId = spawned?.windowId || 0;
+            }
+            if (incWinId) {
+              const escapedOauthUrl = oauthUrl.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+              const tabIdxStr = await runAppleScript(`
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${incWinId}" then
+      set newTab to make new tab at end of tabs of w with properties {URL:"${escapedOauthUrl}"}
+      set tIdx to count of tabs of w
+      set active tab index of w to tIdx
+      return tIdx as string
+    end if
+  end repeat
+  return "0"
+end tell
+`).catch(() => '0');
+              const oauthTabIdx = parseInt(tabIdxStr, 10) || 0;
+              if (oauthTabIdx > 0) {
+                const stepJs = buildGoogleSignInStepJsForTab(username, password);
+                for (let i = 0; i < 25; i++) {
+                  await new Promise((r) => setTimeout(r, 900));
+                  const jsOut = await executeJsInChromeWindowTab(incWinId, oauthTabIdx, stepJs);
+                  if (jsOut.ok && jsOut.value.startsWith('oauth_redirected:')) {
+                    const redir = jsOut.value.slice('oauth_redirected:'.length);
+                    if (redir.startsWith('http://localhost:')) {
+                      await fetch(redir).catch(() => {});
+                    }
+                    completedInIncognito = true;
+                    break;
+                  }
+                }
+                await runAppleScript(`
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${incWinId}" then
+      if ${oauthTabIdx} <= (count of tabs of w) then
+        close tab ${oauthTabIdx} of w
+      end if
+      set active tab index of w to 1
+      exit repeat
+    end if
+  end repeat
+end tell
+`).catch(() => '');
+              }
+            }
+          } catch {
+            // Fall through to Playwright
+          }
+
+          if (!completedInIncognito) {
+            const cbUrl = await completeOAuthUrlWithPlaywright(oauthUrl, username, password);
+            if (cbUrl) {
+              await fetch(cbUrl).catch(() => {});
+            }
           }
         }
       };
@@ -1332,7 +1659,7 @@ export async function execInStudentCloudShellBridge(
           proc.kill();
         } catch {}
         resolve();
-      }, 30000);
+      }, 35000);
     });
     try {
       const { stdout: tokenOut } = await execFileAsync(

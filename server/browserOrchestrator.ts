@@ -28,6 +28,7 @@ import {
   parseTabKey,
   sendTextToUserChromeTab,
   snapshotUserChromeLabTab,
+  spawnIncognitoSessionInUserChrome,
 } from './nativeChromeBridge.js';
 import {
   dismissGcpConsoleTermsModal,
@@ -110,19 +111,19 @@ export class LabBrowserOrchestrator {
       selectedConsoleTabKey: null,
       selectedCloudShellTabKey: null,
       activeModel: getActiveGeminiModel(),
-      macBridgeConnected: process.platform === 'darwin' || macBridgeHub.isConnected(),
+      macBridgeConnected: macBridgeHub.isConnected(),
     };
 
     // Restore persisted state from disk on startup if available
     this.restoreSavedState().catch(() => {});
 
     macBridgeHub.onConnectionChange((connected) => {
-      this.state.macBridgeConnected = process.platform === 'darwin' || connected;
+      this.state.macBridgeConnected = connected;
       if (connected) {
         this.addLog(
           'success',
           'system',
-          'Live Mac Chrome Bridge connected (Passive Mode) — open Chrome tabs synced. Click "Bind Selected Windows & Sync Lab" when ready.'
+          'Live Mac Chrome Bridge connected (Passive Mode) — open Chrome tabs synced.'
         );
         this.restoreSavedState()
           .catch(() => {})
@@ -130,9 +131,7 @@ export class LabBrowserOrchestrator {
             this.scanOpenChromeWindows(false).catch(() => {});
           });
       } else {
-        if (process.platform !== 'darwin') {
-          this.state.availableChromeTabs = [];
-        }
+        this.state.availableChromeTabs = [];
         this.addLog('info', 'system', 'Mac Chrome Bridge disconnected.');
         this.emitState();
       }
@@ -152,6 +151,10 @@ export class LabBrowserOrchestrator {
         this.emitState();
       })
       .catch(() => {});
+  }
+
+  private isUserChromeBridgeAvailable(): boolean {
+    return macBridgeHub.isConnected();
   }
 
   private getSerializableState(): Partial<RunnerState> {
@@ -209,7 +212,7 @@ export class LabBrowserOrchestrator {
       // Ignore local write error in read-only environments
     }
 
-    if (process.platform !== 'darwin' && macBridgeHub.isConnected()) {
+    if (macBridgeHub.isConnected()) {
       try {
         const res = await macBridgeHub.invoke<any>(
           'save_state',
@@ -239,7 +242,7 @@ export class LabBrowserOrchestrator {
     }
 
     let loadedPayload: any = null;
-    if (process.platform !== 'darwin' && macBridgeHub.isConnected()) {
+    if (macBridgeHub.isConnected()) {
       try {
         loadedPayload = await macBridgeHub.invoke<any>('load_state', {}, 8000);
       } catch {
@@ -260,11 +263,13 @@ export class LabBrowserOrchestrator {
       return false;
     }
 
+    const connected = macBridgeHub.isConnected();
     this.state = {
       ...this.state,
       ...saved,
+      availableChromeTabs: connected ? this.state.availableChromeTabs : [],
       activeModel: this.state.activeModel || saved.activeModel || getActiveGeminiModel(),
-      macBridgeConnected: process.platform === 'darwin' || macBridgeHub.isConnected(),
+      macBridgeConnected: connected,
     };
     this.emitState();
     return true;
@@ -362,9 +367,13 @@ export class LabBrowserOrchestrator {
   }
 
   private applyScannedTabs(tabs: ChromeTabDescriptor[]) {
+    const connected = macBridgeHub.isConnected();
+    this.state.macBridgeConnected = connected;
+    if (!connected) {
+      this.state.availableChromeTabs = [];
+      return;
+    }
     this.state.availableChromeTabs = tabs;
-    this.state.macBridgeConnected =
-      process.platform === 'darwin' || macBridgeHub.isConnected();
 
     const findByKey = (k?: string | null) => tabs.find((t) => t.key === k);
 
@@ -408,6 +417,12 @@ export class LabBrowserOrchestrator {
    * Never triggers `save tab` automatically so in-progress navigations or SSO logins are never interrupted.
    */
   public async scanOpenChromeWindows(_autoBindOnStartup = false): Promise<ChromeTabDescriptor[]> {
+    if (!macBridgeHub.isConnected()) {
+      this.state.macBridgeConnected = false;
+      this.state.availableChromeTabs = [];
+      this.emitState();
+      return [];
+    }
     const tabs = await listUserChromeTabs();
     this.applyScannedTabs(tabs);
     this.emitState();
@@ -849,11 +864,12 @@ export class LabBrowserOrchestrator {
 
   /**
    * Step 3: Starts the lab (if not already started), extracts temporary student credentials,
-   * and connects to the user's selected Incognito Console window (or launches one if none is open).
+   * and spawns (or attaches to) the student Incognito Console & Cloud Shell window on the user's Mac.
    */
   public async startLabAndLaunchIncognito(): Promise<void> {
     await this.ensureLabPreviewPage();
 
+    const wasAlreadyStarted = this.state.isLabStarted && Boolean(this.state.labInstanceId);
     this.setStatus('starting_lab');
     const creds = await triggerStartLabAndExtractCredentials(
       this.labPage!,
@@ -878,8 +894,55 @@ export class LabBrowserOrchestrator {
     );
     this.emitState();
 
-    if (this.state.tasks.length === 0) {
+    // Always re-parse after starting the lab so labInstanceId and interpolated code blocks are populated
+    if (this.state.tasks.length === 0 || !wasAlreadyStarted || !this.state.labInstanceId) {
       await this.parseLabInstructions();
+    }
+
+    // When connected to the user's Mac Chrome Bridge (or running on macOS), spawn or reuse an Incognito window
+    // on the user's Mac signed into the temporary student account (Console + Cloud Shell tabs).
+    if (this.isUserChromeBridgeAvailable() && this.state.credentials.username) {
+      this.setStatus('signing_in_console');
+      this.addLog(
+        'action',
+        'incognito_console',
+        `Spawning Incognito Chrome window on your Mac and signing in as ${this.state.credentials.username} (Project: ${this.state.credentials.projectId || 'detecting'})...`
+      );
+      const incognitoRes = await spawnIncognitoSessionInUserChrome({
+        username: this.state.credentials.username,
+        password: this.state.credentials.password,
+        projectId: this.state.credentials.projectId,
+        consoleUrl: this.state.credentials.consoleUrl,
+      });
+
+      if (incognitoRes?.ok) {
+        if (Array.isArray(incognitoRes.tabs) && incognitoRes.tabs.length > 0) {
+          this.applyScannedTabs(incognitoRes.tabs);
+        } else {
+          await this.scanOpenChromeWindows(false);
+        }
+        if (incognitoRes.consoleTabKey) {
+          this.state.selectedConsoleTabKey = incognitoRes.consoleTabKey;
+          const cTab = (this.state.availableChromeTabs || []).find(
+            (t) => t.key === incognitoRes.consoleTabKey
+          );
+          if (cTab) this.state.consoleCurrentUrl = cTab.url;
+        }
+        if (incognitoRes.cloudShellTabKey) {
+          this.state.selectedCloudShellTabKey = incognitoRes.cloudShellTabKey;
+        }
+        this.state.isConsoleSignedIn = true;
+        this.addLog(
+          'success',
+          'incognito_console',
+          incognitoRes.reused
+            ? `Attached to existing Incognito student session for Project ${this.state.credentials.projectId}!`
+            : `Signed into Incognito GCP Console & opened Cloud Shell as ${this.state.credentials.username}!`
+        );
+        this.setStatus('lab_parsed');
+        await this.refreshScreenshots();
+        return;
+      }
     }
 
     // Check if the user already has a Console / Cloud Shell tab selected in their native Chrome
@@ -901,7 +964,7 @@ export class LabBrowserOrchestrator {
       return;
     }
 
-    // Otherwise launch isolated Incognito browser window and sign into Cloud Console
+    // Fallback: launch isolated Playwright Incognito browser window and sign into Cloud Console
     this.setStatus('signing_in_console');
     await this.ensureIncognitoConsoleWindow();
 
@@ -914,6 +977,63 @@ export class LabBrowserOrchestrator {
     this.state.isConsoleSignedIn = signedIn;
     this.setStatus('lab_parsed');
     await this.refreshScreenshots();
+  }
+
+  /**
+   * Unified end-to-end entry point:
+   * 1. Points at the user's self-signed-in Lab Instructions tab (or opens the provided Lab URL in Chrome).
+   * 2. Starts the lab (if not yet started) and extracts temporary student credentials.
+   * 3. Spawns the Incognito window on the user's Mac signed in as the lab student account (Console + Cloud Shell).
+   * 4. Runs all tasks autonomously and completes every "Check my progress" assessment check.
+   */
+  public async startAndRunLab(params?: {
+    url?: string;
+    labTabKey?: string | null;
+  }): Promise<void> {
+    if (this.isLoopRunning) {
+      this.pauseRequested = false;
+      this.setStatus('running_autonomous');
+      return;
+    }
+
+    const requestedTabKey = params?.labTabKey?.trim() || null;
+    const requestedUrl = params?.url?.trim() || '';
+
+    if (requestedTabKey) {
+      if (
+        requestedTabKey !== this.state.selectedLabTabKey ||
+        this.state.tasks.length === 0
+      ) {
+        await this.bindChromeTargets({
+          labTabKey: requestedTabKey,
+          consoleTabKey: this.state.selectedConsoleTabKey,
+          cloudShellTabKey: this.state.selectedCloudShellTabKey,
+        });
+      }
+    } else if (requestedUrl) {
+      if (
+        this.state.tasks.length === 0 ||
+        (this.state.labUrl !== requestedUrl && this.state.labCurrentUrl !== requestedUrl)
+      ) {
+        await this.openLabUrl(requestedUrl);
+      }
+    } else if (this.state.tasks.length === 0) {
+      await this.scanOpenChromeWindows(true);
+      if (this.state.selectedLabTabKey) {
+        await this.syncLabPageFromUserChrome();
+        await this.parseLabInstructions();
+      }
+    }
+
+    await this.startLabAndLaunchIncognito();
+    this.setExecutionMode('autonomous');
+    this.startExecutionLoop(false).catch((err) => {
+      this.addLog(
+        'error',
+        'system',
+        `Autonomous execution error: ${err?.message || String(err)}`
+      );
+    });
   }
 
   /**
@@ -1814,6 +1934,49 @@ export class LabBrowserOrchestrator {
       'lab_window',
       `Task #${taskNumber} Check Result: ${res.message} (${res.stepScore ?? task?.stepScore ?? 0}/${res.stepMaxScore ?? task?.stepMaxScore ?? 0} pts | Total: ${this.state.totalScore ?? 0}/${this.state.maxScore ?? 100})`
     );
+    await this.refreshScreenshots();
+  }
+
+  public async checkAllTasksProgress(): Promise<void> {
+    await this.ensureLabPreviewPage();
+    if (!this.labPage || this.labPage.isClosed()) {
+      throw new Error('Lab window is not open.');
+    }
+    const gradableTasks = this.state.tasks.filter((t) => t.hasCheckProgress);
+    if (gradableTasks.length === 0) {
+      this.addLog('info', 'lab_window', 'No graded progress checks found in this lab.');
+      return;
+    }
+    this.addLog(
+      'action',
+      'lab_window',
+      `Running "Check my progress" across ${gradableTasks.length} graded task(s)...`
+    );
+    for (const task of gradableTasks) {
+      const res = await clickCheckMyProgress(
+        this.labPage,
+        task.number,
+        this.state.labCurrentUrl || this.state.labUrl,
+        this.getCheckProgressOptions(task)
+      );
+      this.applyCheckResultToState(task, res);
+      this.addLog(
+        res.verified ? 'success' : 'warn',
+        'lab_window',
+        `Task #${task.number} (${task.title}): ${res.message} (${res.stepScore ?? task.stepScore ?? 0}/${res.stepMaxScore ?? task.stepMaxScore ?? 0} pts)`
+      );
+    }
+    if (
+      gradableTasks.every((t) => t.progressVerified) ||
+      (this.state.maxScore > 0 && this.state.totalScore >= this.state.maxScore)
+    ) {
+      this.setStatus('completed');
+      this.addLog(
+        'success',
+        'lab_window',
+        `All progress checks verified! Final Score: ${this.state.totalScore}/${this.state.maxScore}.`
+      );
+    }
     await this.refreshScreenshots();
   }
 

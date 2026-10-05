@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { spawn } from 'child_process';
 import express from 'express';
 import cors from 'cors';
 import fs from 'fs';
@@ -123,6 +124,32 @@ app.post('/api/lab/start-and-signin', async (_req, res) => {
   }
 });
 
+// 3b. Unified One-Click "Start & Run Lab" (points at lab tab/URL, starts lab, spawns student Incognito, runs tasks & checks progress)
+app.post('/api/lab/start-and-run', async (req, res) => {
+  try {
+    const { url, labTabKey } = req.body || {};
+    orchestrator
+      .startAndRunLab({
+        url: typeof url === 'string' ? url : undefined,
+        labTabKey: labTabKey !== undefined ? labTabKey : undefined,
+      })
+      .catch((err) => {
+        orchestrator.addLog(
+          'error',
+          'system',
+          `Start & Run Lab error: ${err?.message || String(err)}`
+        );
+      });
+    res.json({
+      ok: true,
+      message:
+        'Starting lab, spawning student Incognito window, and launching autonomous execution...',
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || String(err) });
+  }
+});
+
 // 4. Start or Resume Execution Loop (Autonomous or Single-Step)
 app.post('/api/lab/run', async (req, res) => {
   try {
@@ -221,6 +248,16 @@ app.post('/api/lab/check-progress', async (req, res) => {
   }
 });
 
+// 11b. Trigger "Check my progress" across all graded tasks
+app.post('/api/lab/check-all-progress', async (_req, res) => {
+  try {
+    await orchestrator.checkAllTasksProgress();
+    res.json({ ok: true, state: orchestrator.getState() });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || String(err) });
+  }
+});
+
 // 12. Send a direct prompt to Antigravity in the Cloud Console Incognito window
 app.post('/api/lab/antigravity-prompt', async (req, res) => {
   try {
@@ -309,9 +346,56 @@ app.get('/api/bridge/status', (req, res) => {
   res.json({
     ok: true,
     connected: Boolean(orchestrator.getState().macBridgeConnected),
+    canStartLocally: process.platform === 'darwin',
     wsUrl,
     httpBase,
   });
+});
+
+app.post('/api/bridge/start', async (req, res) => {
+  try {
+    if (macBridgeHub.isConnected()) {
+      await orchestrator.scanOpenChromeWindows(false);
+      res.json({ ok: true, started: true, state: orchestrator.getState() });
+      return;
+    }
+
+    if (process.platform !== 'darwin') {
+      res.status(400).json({
+        ok: false,
+        started: false,
+        error:
+          'Server is running remotely on Cloud Run. Run the 1-line terminal command or Start-Mac-Chrome-Bridge.command on your Mac.',
+      });
+      return;
+    }
+
+    const { wsUrl } = resolvePublicBaseUrls(req);
+    const agentPath = path.resolve(__dirname, 'macBridgeAgent.ts');
+    const child = spawn(process.execPath, [agentPath], {
+      env: { ...process.env, CLOUD_RUN_WS_URL: wsUrl },
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+
+    for (let i = 0; i < 20; i++) {
+      if (macBridgeHub.isConnected()) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+
+    if (macBridgeHub.isConnected()) {
+      await orchestrator.scanOpenChromeWindows(false);
+    }
+
+    res.json({
+      ok: true,
+      started: macBridgeHub.isConnected(),
+      state: orchestrator.getState(),
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || String(err) });
+  }
 });
 
 app.post('/api/bridge/stop', (_req, res) => {
@@ -353,22 +437,32 @@ app.get(['/api/bridge/start.sh', '/api/bridge/Start-Mac-Chrome-Bridge.command'],
   const script = `#!/usr/bin/env bash
 set -euo pipefail
 
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/opt/homebrew/share/google-cloud-sdk/bin:/usr/local/bin:/usr/local/sbin:/usr/local/share/google-cloud-sdk/bin:/usr/local/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/bin:$HOME/google-cloud-sdk/bin:$HOME/.volta/bin:$HOME/.asdf/shims:$PATH"
+if [ -d "$HOME/.nvm/versions/node" ]; then
+  LATEST_NVM_NODE="$(ls -1d "$HOME/.nvm/versions/node/"* 2>/dev/null | tail -n 1 || true)"
+  if [ -n "$LATEST_NVM_NODE" ] && [ -d "$LATEST_NVM_NODE/bin" ]; then
+    export PATH="$LATEST_NVM_NODE/bin:$PATH"
+  fi
+fi
+
 BRIDGE_DIR="$HOME/Downloads/skill-runner"
 mkdir -p "$BRIDGE_DIR"
-AGENT_FILE="$BRIDGE_DIR/macBridgeAgent.ts"
+AGENT_MJS="$BRIDGE_DIR/macBridgeAgent.mjs"
+AGENT_TS="$BRIDGE_DIR/macBridgeAgent.ts"
 PKG_FILE="$BRIDGE_DIR/package.json"
 
 if [ ! -f "$PKG_FILE" ]; then
   echo '{"name":"skills-runner-bridge","private":true,"type":"module"}' > "$PKG_FILE"
 fi
 
-echo "⬇️  Saving latest On-Demand Mac Chrome Bridge to $AGENT_FILE..."
-curl -fsSL "${httpBase}/api/bridge/macBridgeAgent.ts" -o "$AGENT_FILE" || true
-chmod +x "$AGENT_FILE"
+echo "⬇️  Saving latest On-Demand Mac Chrome Bridge to $BRIDGE_DIR..."
+curl -fsSL "${httpBase}/api/bridge/macBridgeAgent.mjs" -o "$AGENT_MJS" || true
+cp -f "$AGENT_MJS" "$AGENT_TS" 2>/dev/null || true
+chmod +x "$AGENT_MJS" "$AGENT_TS" 2>/dev/null || true
 
-echo "🚀 Starting Mac Chrome Bridge from $AGENT_FILE (Passive Mode — zero background polling)..."
+echo "🚀 Starting Mac Chrome Bridge (Passive Mode — zero background polling)..."
 export CLOUD_RUN_WS_URL="${wsUrl}"
-exec node "$AGENT_FILE"
+exec node "$AGENT_MJS"
 `;
   res.setHeader('Content-Type', 'text/x-shellscript; charset=utf-8');
   if (isCommandFile || req.query.download === '1') {

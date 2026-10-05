@@ -1020,8 +1020,8 @@ export async function triggerStartLabAndExtractCredentials(
     onLog('Waiting for Google Cloud lab resources and student credentials to provision...');
   }
 
-  // Poll up to 60 seconds for username / projectId to populate
-  for (let i = 0; i < 20; i++) {
+  // Poll up to 120 seconds for username / projectId to populate (some labs provision GKE/Vertex resources on start)
+  for (let i = 0; i < 40; i++) {
     await page.waitForTimeout(3000);
     if (syncFromUserChrome) {
       await syncFromUserChrome();
@@ -1032,6 +1032,11 @@ export async function triggerStartLabAndExtractCredentials(
         `Credentials provisioned: ${parsed.credentials.username} | Project: ${parsed.credentials.projectId}`
       );
       return parsed.credentials;
+    }
+    if (i > 0 && i % 5 === 0) {
+      onLog(
+        `Still waiting for lab environment provisioning to complete (${i * 3}s elapsed)...`
+      );
     }
   }
 

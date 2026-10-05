@@ -25,6 +25,7 @@ import {
   Download,
   Power,
   X,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { ExecutionMode, LabCredentials, RunnerState, TargetSurface } from './types';
 
@@ -58,25 +59,25 @@ const INITIAL_STATE: RunnerState = {
   selectedLabTabKey: null,
   selectedConsoleTabKey: null,
   selectedCloudShellTabKey: null,
-  activeModel: 'gemini-3.8-flash',
+  activeModel: 'gemini-3.5-flash',
   macBridgeConnected: false,
 };
 
 export default function App() {
   const [state, setState] = useState<RunnerState>(INITIAL_STATE);
-  const [urlInput, setUrlInput] = useState<string>(
-    'https://partner.skills.google/focuses/130021?parent=catalog'
-  );
+  const [urlInput, setUrlInput] = useState<string>('');
+  const [sourceMode, setSourceMode] = useState<'tab' | 'url'>('tab');
   const [overrideInput, setOverrideInput] = useState<string>('');
   const [antigravityInput, setAntigravityInput] = useState<string>('');
   const [shellInput, setShellInput] = useState<string>('');
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [expandedTasks, setExpandedTasks] = useState<Record<string, boolean>>({});
-  const [viewportTab, setViewportTab] = useState<'split' | 'console' | 'lab'>('split');
   const [editingCreds, setEditingCreds] = useState<boolean>(false);
   const [credDraft, setCredDraft] = useState<LabCredentials>(INITIAL_STATE.credentials);
   const [scanningWindows, setScanningWindows] = useState<boolean>(false);
   const [syncingLab, setSyncingLab] = useState<boolean>(false);
+  const [startingAndRunning, setStartingAndRunning] = useState<boolean>(false);
+  const [checkingAllProgress, setCheckingAllProgress] = useState<boolean>(false);
   const [endingLab, setEndingLab] = useState<boolean>(false);
   const [showSwitchCourseModal, setShowSwitchCourseModal] = useState<boolean>(false);
   const [switchingCourse, setSwitchingCourse] = useState<boolean>(false);
@@ -84,11 +85,13 @@ export default function App() {
   const [newCourseTabKey, setNewCourseTabKey] = useState<string>('');
   const [endCurrentBeforeSwitch, setEndCurrentBeforeSwitch] = useState<boolean>(true);
   const [showBridgeModal, setShowBridgeModal] = useState<boolean>(false);
+  const [canStartLocally, setCanStartLocally] = useState<boolean>(false);
+  const [startingBridge, setStartingBridge] = useState<boolean>(false);
+  const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
   const [pendingActionLabel, setPendingActionLabel] = useState<string | null>(null);
   const pendingActionRef = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
-    // Initial fetch
     fetch('/api/state')
       .then((r) => r.json())
       .then((data: RunnerState) => {
@@ -97,7 +100,15 @@ export default function App() {
       })
       .catch(() => {});
 
-    // Connect WebSocket for live telemetry
+    fetch('/api/bridge/status')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data && typeof data.canStartLocally === 'boolean') {
+          setCanStartLocally(data.canStartLocally);
+        }
+      })
+      .catch(() => {});
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
     let ws: WebSocket | null = null;
@@ -134,6 +145,9 @@ export default function App() {
       try {
         const res = await fetch('/api/bridge/status');
         const data = await res.json();
+        if (data && typeof data.canStartLocally === 'boolean') {
+          setCanStartLocally(data.canStartLocally);
+        }
         if (data?.connected) {
           setState((prev) => ({ ...prev, macBridgeConnected: true }));
         }
@@ -189,13 +203,14 @@ export default function App() {
           setUrlInput(data.state.labUrl);
         }
       }
+      return data;
     } catch {
-      // Ignore non-JSON responses
+      return null;
     }
   };
 
   /**
-   * Verifies that `macBridgeAgent.ts` is connected before executing an action that interacts with desktop Chrome.
+   * Verifies that the Mac Chrome Bridge is connected before executing an action that interacts with desktop Chrome.
    * If not running, opens the Download & Launch modal and queues the action to run automatically once connected.
    */
   const ensureMacBridgeConnected = async (
@@ -209,6 +224,9 @@ export default function App() {
     try {
       const res = await fetch('/api/bridge/status');
       const data = await res.json();
+      if (data && typeof data.canStartLocally === 'boolean') {
+        setCanStartLocally(data.canStartLocally);
+      }
       if (data?.connected) {
         setState((prev) => ({ ...prev, macBridgeConnected: true }));
         await action();
@@ -222,12 +240,30 @@ export default function App() {
     setShowBridgeModal(true);
   };
 
+  const handleStartMacBridge = async () => {
+    if (!canStartLocally) {
+      setShowBridgeModal(true);
+      return;
+    }
+    setStartingBridge(true);
+    try {
+      const data = await apiPost('/api/bridge/start');
+      if (!data?.started && !data?.state?.macBridgeConnected) {
+        setShowBridgeModal(true);
+      }
+    } catch {
+      setShowBridgeModal(true);
+    } finally {
+      setStartingBridge(false);
+    }
+  };
+
   const handleStopMacBridge = async () => {
     await apiPost('/api/bridge/stop');
   };
 
   const handleScanChromeWindows = async () => {
-    await ensureMacBridgeConnected('Scan Open Chrome Windows', async () => {
+    await ensureMacBridgeConnected('Refresh Open Chrome Tabs', async () => {
       setScanningWindows(true);
       try {
         await apiPost('/api/chrome/scan');
@@ -242,7 +278,7 @@ export default function App() {
     consoleTabKey?: string | null;
     cloudShellTabKey?: string | null;
   }) => {
-    await ensureMacBridgeConnected('Bind Selected Windows & Sync Lab', async () => {
+    await ensureMacBridgeConnected('Select Lab Instructions Tab', async () => {
       setSyncingLab(true);
       try {
         await apiPost('/api/chrome/bind', {
@@ -270,7 +306,7 @@ export default function App() {
     });
   };
 
-  const handleOpenLab = async (e: React.FormEvent) => {
+  const handleOpenLabUrl = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!urlInput.trim()) return;
     const targetUrl = urlInput.trim();
@@ -285,7 +321,7 @@ export default function App() {
   };
 
   const handleParseLab = async () => {
-    await ensureMacBridgeConnected('Re-Parse Selected Lab', async () => {
+    await ensureMacBridgeConnected('Sync & Parse Lab Instructions', async () => {
       setSyncingLab(true);
       try {
         await apiPost('/api/lab/parse');
@@ -295,16 +331,33 @@ export default function App() {
     });
   };
 
-  const handleStartAndSignIn = async () => {
-    await ensureMacBridgeConnected('Start Lab & Sign Into Incognito', async () => {
-      await apiPost('/api/lab/start-and-signin');
+  /**
+   * Primary 1-Click Workflow:
+   * Points at the selected Lab tab (or URL), starts the lab, spawns the student Incognito window,
+   * signs in as the lab student account, runs all tasks, and verifies all progress checks.
+   */
+  const handleStartAndRunLab = async () => {
+    await ensureMacBridgeConnected('Start & Run Lab', async () => {
+      setStartingAndRunning(true);
+      try {
+        await apiPost('/api/lab/start-and-run', {
+          labTabKey: sourceMode === 'tab' ? state.selectedLabTabKey : undefined,
+          url: sourceMode === 'url' && urlInput.trim() ? urlInput.trim() : undefined,
+        });
+      } finally {
+        setStartingAndRunning(false);
+      }
     });
   };
 
-  const handleRunAutonomous = async () => {
-    await ensureMacBridgeConnected('Run Lab Autonomously', async () => {
-      await apiPost('/api/lab/mode', { mode: 'autonomous' });
-      await apiPost('/api/lab/run', { singleStep: false });
+  const handleCheckAllProgress = async () => {
+    await ensureMacBridgeConnected('Check All Progress', async () => {
+      setCheckingAllProgress(true);
+      try {
+        await apiPost('/api/lab/check-all-progress');
+      } finally {
+        setCheckingAllProgress(false);
+      }
     });
   };
 
@@ -344,7 +397,7 @@ export default function App() {
   };
 
   const handleConfirmSwitchCourse = async (autoRun: boolean) => {
-    await ensureMacBridgeConnected('Run a Different Skill Course', async () => {
+    await ensureMacBridgeConnected('Switch Lab', async () => {
       setSwitchingCourse(true);
       try {
         await apiPost('/api/lab/switch-course', {
@@ -405,7 +458,7 @@ export default function App() {
       case 'antigravity':
         return (
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-purple-500/20 text-purple-300 border border-purple-500/30">
-            <Bot className="w-3 h-3" /> Antigravity IDE
+            <Bot className="w-3 h-3" /> Antigravity
           </span>
         );
       case 'cloud_shell':
@@ -417,7 +470,7 @@ export default function App() {
       case 'browser_link':
         return (
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
-            <ExternalLink className="w-3 h-3" /> Active Link
+            <ExternalLink className="w-3 h-3" /> Console Link
           </span>
         );
       case 'console_ui':
@@ -436,40 +489,46 @@ export default function App() {
   };
 
   const isRunning =
-    state.status === 'running_autonomous' || state.status === 'running_step';
+    state.status === 'running_autonomous' ||
+    state.status === 'running_step' ||
+    state.status === 'starting_lab' ||
+    state.status === 'signing_in_console';
 
-  const completedStepsCount = state.tasks.reduce(
-    (acc, t) => acc + t.steps.filter((s) => s.status === 'completed').length,
-    0
-  );
-  const totalStepsCount = state.tasks.reduce((acc, t) => acc + t.steps.length, 0);
+  const completedTasksCount = state.tasks.filter(
+    (t) => t.status === 'completed' || t.progressVerified
+  ).length;
+  const totalTasksCount = state.tasks.length;
 
   const chromeTabs = state.availableChromeTabs || [];
+  // Normal (non-incognito) tabs prioritized for picking the self-signed-in Lab Instructions page
+  const labCandidateTabs = chromeTabs.filter((t) => t.windowMode !== 'incognito');
+  const allLabSelectTabs = labCandidateTabs.length > 0 ? labCandidateTabs : chromeTabs;
+
   const selectedLabTab = chromeTabs.find((t) => t.key === state.selectedLabTabKey);
   const selectedConsoleTab = chromeTabs.find((t) => t.key === state.selectedConsoleTabKey);
   const selectedShellTab = chromeTabs.find((t) => t.key === state.selectedCloudShellTabKey);
 
   const formatTabLabel = (t: (typeof chromeTabs)[number]) => {
-    const modeTag = t.windowMode === 'incognito' ? '🕶️ INCOGNITO' : '👤 NORMAL';
     const roleTag =
       t.suggestedRole === 'lab'
-        ? ' [LAB]'
+        ? '★ LAB • '
         : t.suggestedRole === 'console'
-        ? ' [GCP CONSOLE]'
+        ? 'CONSOLE • '
         : t.suggestedRole === 'cloud_shell'
-        ? ' [CLOUD SHELL]'
+        ? 'CLOUD SHELL • '
         : '';
-    const shortTitle = t.title.length > 48 ? `${t.title.slice(0, 48)}…` : t.title;
-    return `[Win #${t.windowIndex} ${modeTag} • Tab #${t.tabIndex}]${roleTag} ${shortTitle}`;
+    const modeTag = t.windowMode === 'incognito' ? ' (Incognito)' : '';
+    const shortTitle = t.title.length > 58 ? `${t.title.slice(0, 58)}…` : t.title;
+    return `${roleTag}${shortTitle}${modeTag}`;
   };
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-      {/* Top Header & Workflow Bar */}
-      <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-30 px-6 py-3.5">
-        <div className="max-w-[1800px] mx-auto flex flex-wrap items-center justify-between gap-4">
+      {/* Clean Top Header */}
+      <header className="border-b border-slate-800 bg-slate-900/95 backdrop-blur sticky top-0 z-30 px-6 py-3">
+        <div className="max-w-[1600px] mx-auto flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-600/20">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-600/20">
               <Sparkles className="w-5 h-5 text-white" />
             </div>
             <div>
@@ -478,28 +537,32 @@ export default function App() {
                   Skills Runner
                 </h1>
                 <span className="px-2 py-0.5 text-[11px] font-semibold font-mono rounded-full bg-blue-500/15 text-blue-300 border border-blue-500/30">
-                  {state.activeModel || 'gemini-3.8-flash'}
+                  {state.activeModel || 'gemini-3.5-flash'}
                 </span>
                 <span
-                  className="px-2 py-0.5 text-[11px] font-mono rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30"
-                  title="All agy launches automatically attempt --dangerously-skip-permissions first and fall back to normal launch if unsupported; all confirmation prompts are auto-accepted."
+                  className={`px-2.5 py-0.5 text-[11px] font-mono font-semibold rounded-full border ${
+                    state.status === 'completed'
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      : isRunning
+                      ? 'bg-blue-500/20 text-blue-300 border-blue-500/40 animate-pulse'
+                      : state.status === 'error'
+                      ? 'bg-red-500/20 text-red-300 border-red-500/40'
+                      : 'bg-slate-800 text-slate-300 border-slate-700'
+                  }`}
                 >
-                  agy --dangerously-skip-permissions || agy (Zero-Touch)
-                </span>
-                <span className="px-2 py-0.5 text-[11px] font-mono rounded-full bg-slate-800 text-slate-300 border border-slate-700">
-                  Status: {state.status.replace(/_/g, ' ').toUpperCase()}
+                  {state.status.replace(/_/g, ' ').toUpperCase()}
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                Attach Directly to Your Authenticated Chrome Windows • Window 1: @google.com Lab Session + Window 2: Incognito Lab Account & Zero-Touch Antigravity
+                Autonomous Google Cloud Skills Boost Lab Runner & Progress Grader
               </p>
             </div>
           </div>
 
-          {/* Lab Timer & Progress Summary */}
-          <div className="flex items-center gap-4">
+          {/* Live Telemetry Pills */}
+          <div className="flex items-center gap-3 flex-wrap">
             {state.labTimer && state.labTimer !== '00:00:00' && (
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700 text-xs font-mono text-amber-300">
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800/90 border border-slate-700 text-xs font-mono text-amber-300">
                 <Clock className="w-3.5 h-3.5" />
                 <span>{state.labTimer}</span>
               </div>
@@ -507,617 +570,505 @@ export default function App() {
 
             {(state.maxScore ?? 0) > 0 && (
               <div
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-mono ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-mono ${
                   (state.totalScore ?? 0) >= (state.maxScore ?? 100)
                     ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
-                    : 'bg-slate-800/80 border-slate-700 text-cyan-300'
+                    : 'bg-slate-800/90 border-slate-700 text-cyan-300'
                 }`}
               >
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 <span className="font-semibold">
-                  Lab Score: {state.totalScore ?? 0} / {state.maxScore ?? 100} pts
+                  Score: {state.totalScore ?? 0} / {state.maxScore ?? 100}
                 </span>
               </div>
             )}
 
-            {totalStepsCount > 0 && (
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700 text-xs">
+            {totalTasksCount > 0 && (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800/90 border border-slate-700 text-xs">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
                 <span className="font-medium text-slate-200">
-                  {completedStepsCount} / {totalStepsCount} Steps
+                  {completedTasksCount} / {totalTasksCount} Tasks Verified
                 </span>
               </div>
             )}
 
-            {/* Save State Button */}
-            <button
-              type="button"
-              onClick={async () => {
-                await apiPost('/api/state/save');
-                setCopiedField('save_state');
-                setTimeout(() => setCopiedField(null), 2000);
-              }}
-              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition"
-              title="Save current lab state, tasks, scores, and Chrome bindings to disk"
-            >
-              {copiedField === 'save_state' ? (
-                <>
-                  <Check className="w-3.5 h-3.5 text-emerald-400" />
-                  <span className="text-emerald-300">State Saved</span>
-                </>
-              ) : (
-                <>
-                  <CheckCircle2 className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>Save State</span>
-                </>
-              )}
-            </button>
-
-            {/* Execution Mode Switch */}
-            <div className="inline-flex rounded-lg bg-slate-950 p-1 border border-slate-800">
+            {state.tasks.length > 0 && (
               <button
                 type="button"
-                onClick={() => handleModeChange('autonomous')}
-                className={`px-3 py-1 rounded-md text-xs font-medium transition ${
-                  state.executionMode === 'autonomous'
-                    ? 'bg-blue-600 text-white shadow'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
+                onClick={handleOpenSwitchCourseModal}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition"
               >
-                Autonomous Mode
+                <Layers className="w-3.5 h-3.5 text-indigo-400" />
+                Switch Lab
               </button>
-              <button
-                type="button"
-                onClick={() => handleModeChange('step_by_step')}
-                className={`px-3 py-1 rounded-md text-xs font-medium transition ${
-                  state.executionMode === 'step_by_step'
-                    ? 'bg-blue-600 text-white shadow'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Step-by-Step Mode
-              </button>
-            </div>
+            )}
           </div>
         </div>
 
-        {/* Authenticated Chrome Window & Tab Selector Bar */}
-        <div className="max-w-[1800px] mx-auto mt-3 pt-3 border-t border-slate-800/90 bg-slate-950/60 rounded-xl p-3 border border-slate-800">
-          <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
-            <div className="flex items-center gap-2 flex-wrap">
-              <Monitor className="w-4 h-4 text-cyan-400" />
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-200">
-                Select Your Authenticated Chrome Windows & Tabs
-              </span>
-              <span className="text-[11px] text-slate-400">
-                ({chromeTabs.length} open Chrome tabs detected across Normal & Incognito windows)
-              </span>
+        {/* Streamlined 3-Step Guided Workflow Bar */}
+        <div className="max-w-[1600px] mx-auto mt-3 grid grid-cols-1 lg:grid-cols-12 gap-3">
+          {/* STEP 1: Connect Mac Bridge */}
+          <div
+            className={`lg:col-span-3 rounded-xl p-3 border flex flex-col justify-between gap-2 transition ${
+              state.macBridgeConnected
+                ? 'bg-emerald-950/20 border-emerald-500/30'
+                : 'bg-amber-950/20 border-amber-500/40'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span
+                  className={`w-5 h-5 rounded-full text-[11px] font-bold flex items-center justify-center ${
+                    state.macBridgeConnected
+                      ? 'bg-emerald-500 text-slate-950'
+                      : 'bg-amber-500 text-slate-950'
+                  }`}
+                >
+                  {state.macBridgeConnected ? '✓' : '1'}
+                </span>
+                <span className="text-xs font-bold text-white">
+                  Mac Chrome Bridge
+                </span>
+              </div>
               {state.macBridgeConnected ? (
-                <div className="inline-flex items-center gap-1.5">
-                  <span className="px-2 py-0.5 text-[10px] font-mono rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    Mac Chrome Bridge: LIVE (Passive Mode)
-                  </span>
+                <span className="px-2 py-0.5 text-[10px] font-mono rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  Connected
+                </span>
+              ) : (
+                <span className="px-2 py-0.5 text-[10px] font-mono rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                  Not Connected
+                </span>
+              )}
+            </div>
+
+            <p className="text-[11px] text-slate-300 leading-snug">
+              {state.macBridgeConnected
+                ? 'Signed-in Chrome tabs detected. Ready to spawn student Incognito sessions.'
+                : 'Sign into Skills Boost in Chrome, then start the Mac Bridge.'}
+            </p>
+
+            <div className="flex items-center gap-2">
+              {state.macBridgeConnected ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleScanChromeWindows}
+                    disabled={scanningWindows}
+                    className="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium flex items-center justify-center gap-1.5 cursor-pointer transition"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 text-cyan-400 ${
+                        scanningWindows ? 'animate-spin' : ''
+                      }`}
+                    />
+                    {scanningWindows ? 'Scanning...' : `Refresh Tabs (${chromeTabs.length})`}
+                  </button>
                   <button
                     type="button"
                     onClick={handleStopMacBridge}
-                    className="px-2 py-0.5 text-[10px] font-semibold rounded-full bg-red-500/15 hover:bg-red-500/25 text-red-300 border border-red-500/30 flex items-center gap-1 cursor-pointer transition"
-                    title="Stop the local macBridgeAgent.ts process on your Mac"
+                    className="px-2.5 py-1.5 rounded-lg bg-red-500/15 hover:bg-red-500/25 text-red-300 border border-red-500/30 text-xs font-medium flex items-center gap-1 cursor-pointer transition"
+                    title="Stop the local Mac Chrome Bridge process"
                   >
-                    <Power className="w-2.5 h-2.5" />
-                    Stop Bridge
+                    <Power className="w-3.5 h-3.5" />
+                    <span>Stop</span>
                   </button>
-                </div>
+                </>
               ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleStartMacBridge}
+                    disabled={startingBridge}
+                    className="flex-1 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition shadow-sm disabled:opacity-60"
+                  >
+                    {startingBridge ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        Starting Bridge...
+                      </>
+                    ) : (
+                      <>
+                        <Play className="w-3.5 h-3.5 fill-current" />
+                        Start Mac Bridge
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowBridgeModal(true)}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium flex items-center gap-1 cursor-pointer transition"
+                    title="View terminal command & downloadable Mac Bridge launcher"
+                  >
+                    <Download className="w-3.5 h-3.5 text-cyan-400" />
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* STEP 2: Point at Your Self-Signed-In Lab Page */}
+          <div className="lg:col-span-5 rounded-xl bg-slate-900/90 border border-slate-800 p-3 flex flex-col justify-between gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span
+                  className={`w-5 h-5 rounded-full text-[11px] font-bold flex items-center justify-center ${
+                    state.tasks.length > 0
+                      ? 'bg-emerald-500 text-slate-950'
+                      : 'bg-cyan-500 text-slate-950'
+                  }`}
+                >
+                  {state.tasks.length > 0 ? '✓' : '2'}
+                </span>
+                <span className="text-xs font-bold text-white">
+                  Point at Your Lab Instructions Page
+                </span>
+              </div>
+
+              <div className="inline-flex rounded-md bg-slate-950 p-0.5 border border-slate-800 text-[11px]">
                 <button
                   type="button"
-                  onClick={() => setShowBridgeModal(true)}
-                  className="px-2.5 py-0.5 text-[10px] font-semibold rounded-full bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 flex items-center gap-1 cursor-pointer transition"
+                  onClick={() => setSourceMode('tab')}
+                  className={`px-2 py-0.5 rounded cursor-pointer transition ${
+                    sourceMode === 'tab'
+                      ? 'bg-cyan-600 text-white font-semibold'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
                 >
-                  <Download className="w-3 h-3" />
-                  Mac Chrome Bridge: Offline — Click to Download & Start
+                  Open Chrome Tab
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSourceMode('url')}
+                  className={`px-2 py-0.5 rounded cursor-pointer transition ${
+                    sourceMode === 'url'
+                      ? 'bg-cyan-600 text-white font-semibold'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Paste Lab URL
+                </button>
+              </div>
+            </div>
+
+            {sourceMode === 'tab' ? (
+              <div className="flex items-center gap-2">
+                <select
+                  value={state.selectedLabTabKey || ''}
+                  onChange={(e) =>
+                    handleBindChromeTargets({
+                      labTabKey: e.target.value || null,
+                    })
+                  }
+                  className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 font-mono focus:outline-none focus:border-cyan-500"
+                >
+                  <option value="">
+                    -- Select Your Open Self-Signed-In Lab Tab --
+                  </option>
+                  {allLabSelectTabs.map((t) => (
+                    <option key={t.key} value={t.key}>
+                      {formatTabLabel(t)}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={handleParseLab}
+                  disabled={syncingLab}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shrink-0 disabled:opacity-60"
+                  title="Sync and parse instructions from the selected Chrome tab"
+                >
+                  <RefreshCw
+                    className={`w-3.5 h-3.5 ${syncingLab ? 'animate-spin' : ''}`}
+                  />
+                  {syncingLab ? 'Syncing...' : 'Sync'}
+                </button>
+              </div>
+            ) : (
+              <form onSubmit={handleOpenLabUrl} className="flex items-center gap-2">
+                <input
+                  type="url"
+                  value={urlInput}
+                  onChange={(e) => setUrlInput(e.target.value)}
+                  placeholder="https://www.cloudskillsboost.google/focuses/... or https://partner.skills.google/..."
+                  className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none focus:border-cyan-500"
+                />
+                <button
+                  type="submit"
+                  disabled={syncingLab}
+                  className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shrink-0 disabled:opacity-60"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Open & Sync
+                </button>
+              </form>
+            )}
+
+            <div className="flex items-center justify-between text-[11px] text-slate-400">
+              <span className="truncate">
+                {state.labTitle
+                  ? `Loaded: ${state.labTitle}`
+                  : 'Select your signed-in lab tab or paste a lab URL.'}
+              </span>
+              {selectedLabTab && (
+                <button
+                  type="button"
+                  onClick={() => handleFocusChromeTarget(selectedLabTab.key)}
+                  className="text-cyan-400 hover:text-cyan-300 font-medium shrink-0 ml-2 cursor-pointer"
+                >
+                  Focus Lab Tab
                 </button>
               )}
             </div>
+          </div>
+
+          {/* STEP 3: Start & Run Lab Autonomously */}
+          <div className="lg:col-span-4 rounded-xl bg-gradient-to-br from-slate-900 to-indigo-950/40 border border-indigo-500/30 p-3 flex flex-col justify-between gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="w-5 h-5 rounded-full bg-emerald-500 text-slate-950 text-[11px] font-bold flex items-center justify-center">
+                  3
+                </span>
+                <span className="text-xs font-bold text-white">
+                  Run Lab & Verify Progress Checks
+                </span>
+              </div>
+              {state.isConsoleSignedIn && (
+                <span className="px-2 py-0.5 text-[10px] font-mono rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                  Incognito Ready
+                </span>
+              )}
+            </div>
+
+            <p className="text-[11px] text-slate-300 leading-snug">
+              Starts the lab, spawns Incognito as the student account, runs all tasks, and clicks "Check my progress".
+            </p>
 
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleScanChromeWindows}
-                disabled={scanningWindows}
-                className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition disabled:opacity-60"
-              >
-                <RefreshCw
-                  className={`w-3.5 h-3.5 text-cyan-400 ${
-                    scanningWindows ? 'animate-spin' : ''
-                  }`}
-                />
-                {scanningWindows ? 'Scanning Chrome...' : 'Scan Open Chrome Windows'}
-              </button>
-              <button
-                type="button"
-                onClick={() => handleBindChromeTargets()}
-                disabled={syncingLab}
-                className="px-3.5 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shadow-sm disabled:opacity-60"
-              >
-                {syncingLab ? (
-                  <>
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    Syncing Lab & Windows...
-                  </>
-                ) : (
-                  <>
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    Bind Selected Windows & Sync Lab
-                  </>
-                )}
-              </button>
+              {!isRunning ? (
+                <button
+                  type="button"
+                  onClick={handleStartAndRunLab}
+                  disabled={startingAndRunning}
+                  className="flex-1 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition shadow-md shadow-emerald-600/20 disabled:opacity-60"
+                >
+                  {startingAndRunning ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      Launching...
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-4 h-4 fill-current" />
+                      Start & Run Lab
+                    </>
+                  )}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handlePause}
+                  className="flex-1 px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition"
+                >
+                  <Pause className="w-4 h-4 fill-current" />
+                  Pause Execution
+                </button>
+              )}
+
+              {state.tasks.some((t) => t.hasCheckProgress) && (
+                <button
+                  type="button"
+                  onClick={handleCheckAllProgress}
+                  disabled={checkingAllProgress}
+                  className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-500/30 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shrink-0 disabled:opacity-60"
+                  title="Run Check my progress across all graded tasks"
+                >
+                  <CheckCircle2
+                    className={`w-3.5 h-3.5 ${checkingAllProgress ? 'animate-spin' : ''}`}
+                  />
+                  Check Progress
+                </button>
+              )}
+
+              {state.isLabStarted && (
+                <button
+                  type="button"
+                  onClick={handleEndLab}
+                  disabled={endingLab}
+                  className="px-3 py-2 rounded-lg bg-red-600/20 hover:bg-red-600/35 text-red-200 border border-red-500/40 text-xs font-semibold flex items-center gap-1 cursor-pointer transition shrink-0 disabled:opacity-60"
+                  title="Click End Lab in Chrome and clean up credentials"
+                >
+                  <Power className="w-3.5 h-3.5 text-red-400" />
+                  {endingLab ? 'Ending...' : 'End Lab'}
+                </button>
+              )}
             </div>
           </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            {/* 1. Lab Instructions Window (@google.com) */}
-            <div className="bg-slate-900/90 border border-slate-800 rounded-lg p-2.5 flex flex-col gap-1.5">
-              <div className="flex items-center justify-between">
-                <label className="text-[11px] font-semibold text-cyan-300 flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-cyan-400" />
-                  1. Lab Instructions Tab (Your @google.com Login)
-                </label>
-                {state.selectedLabTabKey && (
-                  <button
-                    type="button"
-                    onClick={() => handleFocusChromeTarget(state.selectedLabTabKey)}
-                    className="text-[10px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 cursor-pointer"
-                    title="Bring this Chrome window and tab to the front"
-                  >
-                    Focus Window
-                  </button>
-                )}
-              </div>
-              <select
-                value={state.selectedLabTabKey || ''}
-                onChange={(e) =>
-                  handleBindChromeTargets({
-                    labTabKey: e.target.value || null,
-                  })
-                }
-                className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-100 font-mono focus:outline-none focus:border-cyan-500"
-              >
-                <option value="">-- Select Open Lab Instructions Tab --</option>
-                {chromeTabs.map((t) => (
-                  <option key={t.key} value={t.key}>
-                    {formatTabLabel(t)}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* 2. Cloud Console Window (Incognito Student Account) */}
-            <div className="bg-slate-900/90 border border-indigo-500/30 rounded-lg p-2.5 flex flex-col gap-1.5">
-              <div className="flex items-center justify-between">
-                <label className="text-[11px] font-semibold text-indigo-300 flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-indigo-400" />
-                  2. Cloud Console Tab (Incognito Lab Student Login)
-                </label>
-                {state.selectedConsoleTabKey && (
-                  <button
-                    type="button"
-                    onClick={() => handleFocusChromeTarget(state.selectedConsoleTabKey)}
-                    className="text-[10px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700 cursor-pointer"
-                    title="Bring this Chrome window and tab to the front"
-                  >
-                    Focus Window
-                  </button>
-                )}
-              </div>
-              <select
-                value={state.selectedConsoleTabKey || ''}
-                onChange={(e) =>
-                  handleBindChromeTargets({
-                    consoleTabKey: e.target.value || null,
-                  })
-                }
-                className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
-              >
-                <option value="">-- Select Open GCP Console Tab --</option>
-                {chromeTabs.map((t) => (
-                  <option key={t.key} value={t.key}>
-                    {formatTabLabel(t)}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* 3. Cloud Shell / Antigravity Terminal Tab */}
-            <div className="bg-slate-900/90 border border-emerald-500/30 rounded-lg p-2.5 flex flex-col gap-1.5">
-              <div className="flex items-center justify-between">
-                <label className="text-[11px] font-semibold text-emerald-300 flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                  3. Cloud Shell / Antigravity (agy) Terminal Tab
-                </label>
-                {state.selectedCloudShellTabKey && (
-                  <button
-                    type="button"
-                    onClick={() => handleFocusChromeTarget(state.selectedCloudShellTabKey)}
-                    className="text-[10px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 cursor-pointer"
-                    title="Bring this Chrome window and tab to the front"
-                  >
-                    Focus Window
-                  </button>
-                )}
-              </div>
-              <select
-                value={state.selectedCloudShellTabKey || ''}
-                onChange={(e) =>
-                  handleBindChromeTargets({
-                    cloudShellTabKey: e.target.value || null,
-                  })
-                }
-                className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-100 font-mono focus:outline-none focus:border-emerald-500"
-              >
-                <option value="">-- Select Open Cloud Shell / Antigravity Tab --</option>
-                {chromeTabs.map((t) => (
-                  <option key={t.key} value={t.key}>
-                    {formatTabLabel(t)}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-        </div>
-
-        {/* Lab URL & Execution Controls */}
-        <div className="max-w-[1800px] mx-auto mt-3 pt-3 border-t border-slate-800/80 flex flex-wrap items-center gap-2.5">
-          <form onSubmit={handleOpenLab} className="flex-1 min-w-[340px] flex gap-2">
-            <input
-              type="url"
-              value={urlInput}
-              onChange={(e) => setUrlInput(e.target.value)}
-              placeholder="Paste Google Cloud Skills Boost Lab URL (or select your open tab above)"
-              className="flex-1 bg-slate-950 border border-slate-700/80 rounded-lg px-3.5 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono"
-            />
-            <button
-              type="submit"
-              className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-600 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition"
-            >
-              <ExternalLink className="w-3.5 h-3.5 text-blue-400" />
-              Open URL
-            </button>
-          </form>
-
-          <button
-            type="button"
-            onClick={handleParseLab}
-            disabled={syncingLab}
-            className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition disabled:opacity-60"
-          >
-            {syncingLab ? (
-              <RefreshCw className="w-3.5 h-3.5 text-cyan-400 animate-spin" />
-            ) : (
-              <FileSearch className="w-3.5 h-3.5 text-cyan-400" />
-            )}
-            {syncingLab ? 'Syncing Lab DOM...' : 'Re-Parse Selected Lab'}
-          </button>
-
-          <div className="h-6 w-px bg-slate-800 mx-1" />
-
-          {!isRunning ? (
-            <>
-              <button
-                type="button"
-                onClick={handleRunAutonomous}
-                className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shadow-sm"
-              >
-                <Play className="w-3.5 h-3.5 fill-current" />
-                Run Autonomous in Selected Windows
-              </button>
-              <button
-                type="button"
-                onClick={handleRunSingleStep}
-                className="px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition"
-              >
-                <Zap className="w-3.5 h-3.5" />
-                Execute Next Step
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              onClick={handlePause}
-              className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition"
-            >
-              <Pause className="w-3.5 h-3.5 fill-current" />
-              Pause Agent
-            </button>
-          )}
-
-          <button
-            type="button"
-            onClick={handleSkipStep}
-            className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-medium flex items-center gap-1 cursor-pointer transition"
-            title="Skip current step"
-          >
-            <SkipForward className="w-3.5 h-3.5" />
-            Skip Step
-          </button>
-
-          <button
-            type="button"
-            onClick={handleEndLab}
-            disabled={endingLab}
-            className="px-3.5 py-2 rounded-lg bg-red-600/20 hover:bg-red-600/35 text-red-200 border border-red-500/40 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition disabled:opacity-60"
-            title="Stop execution, click End Lab in Chrome, and clear temporary credentials"
-          >
-            {endingLab ? (
-              <RefreshCw className="w-3.5 h-3.5 text-red-400 animate-spin" />
-            ) : (
-              <Power className="w-3.5 h-3.5 text-red-400" />
-            )}
-            {endingLab ? 'Ending Lab...' : 'End Lab'}
-          </button>
-
-          <button
-            type="button"
-            onClick={handleOpenSwitchCourseModal}
-            disabled={switchingCourse}
-            className="px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shadow-sm disabled:opacity-60"
-            title="End or clear the current lab and switch to a different Skill Course or open Chrome tab"
-          >
-            <Layers className="w-3.5 h-3.5" />
-            Run a Different Skill Course
-          </button>
         </div>
       </header>
 
       {/* Login Notice Banner if awaiting user login */}
       {state.status === 'awaiting_login' && (
         <div className="bg-amber-500/15 border-b border-amber-500/30 px-6 py-2.5">
-          <div className="max-w-[1800px] mx-auto flex items-center justify-between">
+          <div className="max-w-[1600px] mx-auto flex items-center justify-between gap-4">
             <div className="flex items-center gap-2.5 text-amber-200 text-xs">
               <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
               <span>
-                <strong>Action Required in Desktop Chrome:</strong> Complete your initial Cloud Skills Boost login in the opened Chrome window. Once the lab page is visible, click{' '}
-                <strong>"2. Parse Instructions"</strong> followed by{' '}
-                <strong>"3. Start Lab & Sign Into Incognito"</strong>.
+                <strong>Sign-In Needed in Chrome:</strong> Please sign into your Google Cloud Skills Boost account in the opened Chrome tab, then click{' '}
+                <strong>"Start & Run Lab"</strong>.
               </span>
             </div>
             <button
               type="button"
-              onClick={handleParseLab}
-              className="px-3 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs cursor-pointer"
+              onClick={handleStartAndRunLab}
+              className="px-3 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs cursor-pointer shrink-0"
             >
-              I'm Logged In — Parse Lab Now
+              I'm Signed In — Start & Run Lab
             </button>
           </div>
         </div>
       )}
 
       {/* Main Content Grid */}
-      <main className="flex-1 max-w-[1800px] w-full mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column (5 cols): Credentials Vault + Structured Tasks & Steps Checklist */}
+      <main className="flex-1 max-w-[1600px] w-full mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+        {/* Left Column (5 cols): Auto-Provisioned Student Account + Tasks & Progress Checklist */}
         <div className="lg:col-span-5 flex flex-col gap-5">
-          {/* Credentials & Environment Card */}
+          {/* Student Credentials & Incognito Session Card */}
           <section className="rounded-xl bg-slate-900 border border-slate-800 p-4 shadow-sm">
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center justify-between mb-3 gap-2">
               <div className="flex items-center gap-2">
                 <KeyRound className="w-4 h-4 text-indigo-400" />
                 <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300">
-                  Lab Credentials & Incognito Target
+                  Lab Student Account (Auto-Spawned Incognito)
                 </h2>
               </div>
               <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setEditingCreds(!editingCreds)}
-                  className="text-xs text-blue-400 hover:text-blue-300 cursor-pointer"
-                >
-                  {editingCreds ? 'Cancel' : 'Edit / Override'}
-                </button>
-                {state.credentials.consoleUrl && (
+                {selectedConsoleTab && (
                   <button
                     type="button"
-                    onClick={() =>
-                      apiPost('/api/lab/open-incognito-link', {
-                        url: state.credentials.consoleUrl,
-                      })
-                    }
+                    onClick={() => handleFocusChromeTarget(selectedConsoleTab.key)}
                     className="px-2.5 py-1 rounded bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/30 text-[11px] font-medium flex items-center gap-1 cursor-pointer"
                   >
-                    <ExternalLink className="w-3 h-3" /> Open Console in Incognito
+                    <ExternalLink className="w-3 h-3" /> Focus Incognito Console
+                  </button>
+                )}
+                {selectedShellTab && (
+                  <button
+                    type="button"
+                    onClick={() => handleFocusChromeTarget(selectedShellTab.key)}
+                    className="px-2.5 py-1 rounded bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 text-[11px] font-medium flex items-center gap-1 cursor-pointer"
+                  >
+                    <Terminal className="w-3 h-3" /> Focus Cloud Shell
                   </button>
                 )}
               </div>
             </div>
 
-            {editingCreds ? (
-              <div className="grid grid-cols-2 gap-2.5 text-xs">
-                <div className="col-span-2">
-                  <label className="block text-slate-400 mb-1">Student Username</label>
-                  <input
-                    type="text"
-                    value={credDraft.username}
-                    onChange={(e) =>
-                      setCredDraft({ ...credDraft, username: e.target.value })
-                    }
-                    className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 font-mono text-slate-100"
-                  />
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="bg-slate-950/90 border border-slate-800/90 rounded-lg p-2.5 flex items-center justify-between">
+                <div className="truncate pr-2">
+                  <span className="text-[10px] uppercase text-slate-500 block">
+                    Student Username
+                  </span>
+                  <span className="font-mono text-slate-200">
+                    {state.credentials.username || 'Provisioned on Start'}
+                  </span>
                 </div>
-                <div>
-                  <label className="block text-slate-400 mb-1">Password</label>
-                  <input
-                    type="text"
-                    value={credDraft.password}
-                    onChange={(e) =>
-                      setCredDraft({ ...credDraft, password: e.target.value })
-                    }
-                    className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 font-mono text-slate-100"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-400 mb-1">GCP Project ID</label>
-                  <input
-                    type="text"
-                    value={credDraft.projectId}
-                    onChange={(e) =>
-                      setCredDraft({ ...credDraft, projectId: e.target.value })
-                    }
-                    className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 font-mono text-slate-100"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-400 mb-1">Default Region</label>
-                  <input
-                    type="text"
-                    value={credDraft.region}
-                    onChange={(e) =>
-                      setCredDraft({ ...credDraft, region: e.target.value })
-                    }
-                    className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 font-mono text-slate-100"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-400 mb-1">Default Zone</label>
-                  <input
-                    type="text"
-                    value={credDraft.zone}
-                    onChange={(e) =>
-                      setCredDraft({ ...credDraft, zone: e.target.value })
-                    }
-                    className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 font-mono text-slate-100"
-                  />
-                </div>
-                <div className="col-span-2 flex justify-end mt-1">
+                {state.credentials.username && (
                   <button
                     type="button"
-                    onClick={handleSaveCredentials}
-                    className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white font-semibold cursor-pointer"
+                    onClick={() => copyToClipboard('user', state.credentials.username)}
+                    className="text-slate-400 hover:text-white cursor-pointer"
                   >
-                    Save Credentials
+                    {copiedField === 'user' ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
                   </button>
+                )}
+              </div>
+
+              <div className="bg-slate-950/90 border border-slate-800/90 rounded-lg p-2.5 flex items-center justify-between">
+                <div className="truncate pr-2">
+                  <span className="text-[10px] uppercase text-slate-500 block">
+                    Password
+                  </span>
+                  <span className="font-mono text-slate-200">
+                    {state.credentials.password || 'Provisioned on Start'}
+                  </span>
+                </div>
+                {state.credentials.password && (
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard('pass', state.credentials.password)}
+                    className="text-slate-400 hover:text-white cursor-pointer"
+                  >
+                    {copiedField === 'pass' ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                )}
+              </div>
+
+              <div className="bg-slate-950/90 border border-slate-800/90 rounded-lg p-2.5 flex items-center justify-between">
+                <div className="truncate pr-2">
+                  <span className="text-[10px] uppercase text-slate-500 block">
+                    GCP Project ID
+                  </span>
+                  <span className="font-mono text-emerald-300">
+                    {state.credentials.projectId || 'Pending'}
+                  </span>
+                </div>
+                {state.credentials.projectId && (
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard('proj', state.credentials.projectId)}
+                    className="text-slate-400 hover:text-white cursor-pointer"
+                  >
+                    {copiedField === 'proj' ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                )}
+              </div>
+
+              <div className="bg-slate-950/90 border border-slate-800/90 rounded-lg p-2.5 flex items-center justify-between">
+                <div className="truncate">
+                  <span className="text-[10px] uppercase text-slate-500 block">
+                    Region / Zone
+                  </span>
+                  <span className="font-mono text-blue-300">
+                    {state.credentials.region || 'auto'}{' '}
+                    {state.credentials.zone ? `/ ${state.credentials.zone}` : ''}
+                  </span>
                 </div>
               </div>
-            ) : (
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="bg-slate-950/90 border border-slate-800/90 rounded-lg p-2.5 flex items-center justify-between">
-                  <div className="truncate pr-2">
-                    <span className="text-[10px] uppercase text-slate-500 block">
-                      Username
-                    </span>
-                    <span className="font-mono text-slate-200">
-                      {state.credentials.username || 'Not started'}
-                    </span>
-                  </div>
-                  {state.credentials.username && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        copyToClipboard('user', state.credentials.username)
-                      }
-                      className="text-slate-400 hover:text-white cursor-pointer"
-                    >
-                      {copiedField === 'user' ? (
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                      ) : (
-                        <Copy className="w-3.5 h-3.5" />
-                      )}
-                    </button>
-                  )}
-                </div>
-
-                <div className="bg-slate-950/90 border border-slate-800/90 rounded-lg p-2.5 flex items-center justify-between">
-                  <div className="truncate pr-2">
-                    <span className="text-[10px] uppercase text-slate-500 block">
-                      Password
-                    </span>
-                    <span className="font-mono text-slate-200">
-                      {state.credentials.password || 'Not started'}
-                    </span>
-                  </div>
-                  {state.credentials.password && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        copyToClipboard('pass', state.credentials.password)
-                      }
-                      className="text-slate-400 hover:text-white cursor-pointer"
-                    >
-                      {copiedField === 'pass' ? (
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                      ) : (
-                        <Copy className="w-3.5 h-3.5" />
-                      )}
-                    </button>
-                  )}
-                </div>
-
-                <div className="bg-slate-950/90 border border-slate-800/90 rounded-lg p-2.5 flex items-center justify-between">
-                  <div className="truncate pr-2">
-                    <span className="text-[10px] uppercase text-slate-500 block">
-                      GCP Project ID
-                    </span>
-                    <span className="font-mono text-emerald-300">
-                      {state.credentials.projectId || 'Pending'}
-                    </span>
-                  </div>
-                  {state.credentials.projectId && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        copyToClipboard('proj', state.credentials.projectId)
-                      }
-                      className="text-slate-400 hover:text-white cursor-pointer"
-                    >
-                      {copiedField === 'proj' ? (
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                      ) : (
-                        <Copy className="w-3.5 h-3.5" />
-                      )}
-                    </button>
-                  )}
-                </div>
-
-                <div className="bg-slate-950/90 border border-slate-800/90 rounded-lg p-2.5 flex items-center justify-between">
-                  <div className="truncate">
-                    <span className="text-[10px] uppercase text-slate-500 block">
-                      Region / Zone
-                    </span>
-                    <span className="font-mono text-blue-300">
-                      {state.credentials.region || 'auto'}{' '}
-                      {state.credentials.zone ? `/ ${state.credentials.zone}` : ''}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
+            </div>
           </section>
 
-          {/* Structured Lab Tasks & Steps List */}
+          {/* Structured Lab Tasks & Progress Checks */}
           <section className="rounded-xl bg-slate-900 border border-slate-800 flex-1 flex flex-col overflow-hidden">
             <div className="p-4 border-b border-slate-800 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 min-w-0">
                 <Layers className="w-4 h-4 text-blue-400 shrink-0" />
                 <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300 truncate">
-                  {state.labTitle || 'Parsed Lab Tasks & Steps'}
+                  {state.labTitle || 'Lab Tasks & Progress Checks'}
                 </h2>
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 {state.tasks.some((t) => t.hasCheckProgress) && (
                   <button
                     type="button"
-                    onClick={() => {
-                      const gradable =
-                        state.tasks.find((t) => t.hasCheckProgress && !t.progressVerified) ||
-                        state.tasks.find((t) => t.hasCheckProgress);
-                      if (gradable) {
-                        apiPost('/api/lab/check-progress', {
-                          taskNumber: gradable.number,
-                        });
-                      }
-                    }}
-                    className="px-2.5 py-1 rounded bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold cursor-pointer transition"
-                    title="Trigger Qwiklabs status check and sync all task scores"
+                    onClick={handleCheckAllProgress}
+                    disabled={checkingAllProgress}
+                    className="px-2.5 py-1 rounded bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold cursor-pointer transition disabled:opacity-60"
                   >
-                    ✓ Check Lab Status
+                    {checkingAllProgress ? 'Checking...' : '✓ Check All Progress'}
                   </button>
                 )}
                 <span className="text-xs text-slate-400">
@@ -1128,15 +1079,14 @@ export default function App() {
 
             <div className="p-4 overflow-y-auto max-h-[680px] space-y-3">
               {state.tasks.length === 0 ? (
-                <div className="text-center py-12 px-4 text-slate-500 text-xs space-y-2">
+                <div className="text-center py-12 px-4 text-slate-400 text-xs space-y-2">
                   <FileSearch className="w-8 h-8 mx-auto text-slate-600 stroke-1" />
-                  <p className="text-slate-300 font-medium">
-                    No lab tasks loaded yet.
+                  <p className="text-slate-200 font-semibold">
+                    Ready to load your lab
                   </p>
-                  <p>
-                    Enter a Google Cloud Skills Boost Lab URL above and click{' '}
-                    <strong>"1. Open Lab & Login"</strong>, then{' '}
-                    <strong>"2. Parse Instructions"</strong>.
+                  <p className="text-slate-400 max-w-sm mx-auto leading-relaxed">
+                    Select your open lab tab in <strong>Step 2</strong> above (or paste the lab URL) and click{' '}
+                    <strong className="text-emerald-300">Start & Run Lab</strong>.
                   </p>
                 </div>
               ) : (
@@ -1268,7 +1218,6 @@ export default function App() {
                                   {step.instruction}
                                 </p>
 
-                                {/* Active Links inside the step that open in Incognito */}
                                 {step.links.length > 0 && (
                                   <div className="flex flex-wrap gap-1.5 pt-1">
                                     {step.links.map((link, lIdx) => (
@@ -1289,7 +1238,6 @@ export default function App() {
                                   </div>
                                 )}
 
-                                {/* Copyable Command / Antigravity Prompt Blocks */}
                                 {step.commands.map((cmd, cIdx) => (
                                   <div
                                     key={cIdx}
@@ -1299,7 +1247,7 @@ export default function App() {
                                       <span className="text-[10px] text-slate-500">
                                         {step.targetSurface === 'antigravity'
                                           ? 'ANTIGRAVITY PROMPT'
-                                          : 'COMMAND BLOCK'}
+                                          : 'COMMAND'}
                                       </span>
                                       <div className="flex items-center gap-2">
                                         <button
@@ -1316,15 +1264,12 @@ export default function App() {
                                           }
                                           className="text-[10px] text-emerald-400 hover:text-emerald-300 font-sans font-semibold cursor-pointer"
                                         >
-                                          ▶ Execute Now
+                                          ▶ Run
                                         </button>
                                         <button
                                           type="button"
                                           onClick={() =>
-                                            copyToClipboard(
-                                              `${step.id}-${cIdx}`,
-                                              cmd
-                                            )
+                                            copyToClipboard(`${step.id}-${cIdx}`, cmd)
                                           }
                                           className="text-slate-400 hover:text-white cursor-pointer"
                                         >
@@ -1354,305 +1299,15 @@ export default function App() {
           </section>
         </div>
 
-        {/* Right Column (7 cols): Live Dual Viewports + Antigravity/Cloud Shell Dispatch + Logs */}
+        {/* Right Column (7 cols): Live Execution Stream + Connected Chrome Sessions + Collapsible Advanced Controls */}
         <div className="lg:col-span-7 flex flex-col gap-5">
-          {/* Live Browser Viewports Card */}
-          <section className="rounded-xl bg-slate-900 border border-slate-800 p-4 space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <Monitor className="w-4 h-4 text-emerald-400" />
-                <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300">
-                  Live Browser Telemetry (Desktop Chrome Windows)
-                </h2>
-              </div>
-
-              <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs">
-                <button
-                  type="button"
-                  onClick={() => setViewportTab('split')}
-                  className={`px-2.5 py-1 rounded ${
-                    viewportTab === 'split'
-                      ? 'bg-slate-800 text-white font-medium'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  Side-by-Side
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewportTab('console')}
-                  className={`px-2.5 py-1 rounded ${
-                    viewportTab === 'console'
-                      ? 'bg-slate-800 text-white font-medium'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  Incognito Console & Antigravity
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewportTab('lab')}
-                  className={`px-2.5 py-1 rounded ${
-                    viewportTab === 'lab'
-                      ? 'bg-slate-800 text-white font-medium'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  Main Lab Window
-                </button>
-              </div>
-            </div>
-
-            {/* Gemini Current Visual Reasoning Banner */}
-            {state.lastThought && (
-              <div className="rounded-lg bg-blue-950/40 border border-blue-500/30 px-3 py-2 text-xs text-blue-200 flex items-start gap-2">
-                <Bot className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
-                <div>
-                  <span className="font-semibold text-blue-300">
-                    {state.activeModel || 'gemini-3.8-flash'} Visual Reasoning:{' '}
-                  </span>
-                  {state.lastThought}
-                </div>
-              </div>
-            )}
-
-            <div
-              className={`grid gap-3 ${
-                viewportTab === 'split' ? 'grid-cols-1 md:grid-cols-2' : 'grid-cols-1'
-              }`}
-            >
-              {/* Main Lab Window Preview */}
-              {(viewportTab === 'split' || viewportTab === 'lab') && (
-                <div className="rounded-lg bg-slate-950 border border-slate-800 overflow-hidden flex flex-col">
-                  <div className="px-3 py-1.5 bg-slate-900 border-b border-slate-800 flex items-center justify-between text-[11px]">
-                    <span className="font-semibold text-slate-300">
-                      Window 1: Main Lab (@google.com Identity)
-                    </span>
-                    <span className="font-mono text-slate-500 truncate max-w-[220px]">
-                      {state.labCurrentUrl || 'Idle'}
-                    </span>
-                  </div>
-                  <div className="aspect-video bg-slate-950 flex items-center justify-center overflow-hidden">
-                    {state.labScreenshot ? (
-                      <img
-                        src={`data:image/jpeg;base64,${state.labScreenshot}`}
-                        alt="Main Lab Window"
-                        className="w-full h-full object-contain"
-                      />
-                    ) : selectedLabTab ? (
-                      <div className="p-4 w-full h-full flex flex-col justify-between text-xs bg-gradient-to-br from-slate-950 to-slate-900/90">
-                        <div className="space-y-1.5">
-                          <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 text-[10px] font-mono">
-                            <CheckCircle2 className="w-3 h-3" /> Attached to Native Chrome Window #
-                            {selectedLabTab.windowIndex} ({selectedLabTab.windowMode.toUpperCase()}) • Tab #
-                            {selectedLabTab.tabIndex}
-                          </div>
-                          <p className="font-semibold text-slate-100 line-clamp-2">
-                            {selectedLabTab.title}
-                          </p>
-                          <p className="font-mono text-[11px] text-slate-400 break-all line-clamp-2">
-                            {selectedLabTab.url}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-2 pt-2 border-t border-slate-800/80">
-                          <button
-                            type="button"
-                            onClick={() => handleFocusChromeTarget(selectedLabTab.key)}
-                            className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-[11px] font-medium cursor-pointer"
-                          >
-                            Focus Lab Window in Chrome
-                          </button>
-                          <button
-                            type="button"
-                            onClick={handleParseLab}
-                            className="px-2.5 py-1 rounded bg-cyan-600/20 hover:bg-cyan-600/30 text-cyan-200 border border-cyan-500/30 text-[11px] font-medium cursor-pointer"
-                          >
-                            Re-Sync Instructions
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="text-xs text-slate-600 text-center p-4">
-                        Select your authenticated Lab Instructions tab in the selector bar above.
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* Incognito Console & Antigravity Window Preview */}
-              {(viewportTab === 'split' || viewportTab === 'console') && (
-                <div className="rounded-lg bg-slate-950 border border-indigo-500/40 overflow-hidden flex flex-col">
-                  <div className="px-3 py-1.5 bg-indigo-950/40 border-b border-indigo-500/30 flex items-center justify-between text-[11px]">
-                    <span className="font-semibold text-indigo-300">
-                      Window 2: Incognito GCP Console & Antigravity
-                    </span>
-                    <span className="font-mono text-indigo-300/70 truncate max-w-[220px]">
-                      {state.consoleCurrentUrl || 'Waiting for Lab Start'}
-                    </span>
-                  </div>
-                  <div className="aspect-video bg-slate-950 flex items-center justify-center overflow-hidden">
-                    {state.consoleScreenshot ? (
-                      <img
-                        src={`data:image/jpeg;base64,${state.consoleScreenshot}`}
-                        alt="Incognito Console Window"
-                        className="w-full h-full object-contain"
-                      />
-                    ) : selectedConsoleTab || selectedShellTab ? (
-                      <div className="p-4 w-full h-full flex flex-col justify-between text-xs bg-gradient-to-br from-slate-950 to-indigo-950/25">
-                        <div className="space-y-2">
-                          {selectedConsoleTab && (
-                            <div className="space-y-0.5">
-                              <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-[10px] font-mono">
-                                <CheckCircle2 className="w-3 h-3" /> Console: Win #
-                                {selectedConsoleTab.windowIndex} (
-                                {selectedConsoleTab.windowMode.toUpperCase()}) • Tab #
-                                {selectedConsoleTab.tabIndex}
-                              </div>
-                              <p className="text-slate-200 font-medium truncate">
-                                {selectedConsoleTab.title}
-                              </p>
-                            </div>
-                          )}
-                          {selectedShellTab && (
-                            <div className="space-y-0.5">
-                              <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-mono">
-                                <Terminal className="w-3 h-3" /> Cloud Shell / agy: Win #
-                                {selectedShellTab.windowIndex} (
-                                {selectedShellTab.windowMode.toUpperCase()}) • Tab #
-                                {selectedShellTab.tabIndex}
-                              </div>
-                              <p className="text-slate-200 font-medium truncate">
-                                {selectedShellTab.title}
-                              </p>
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800/80">
-                          {selectedConsoleTab && (
-                            <button
-                              type="button"
-                              onClick={() => handleFocusChromeTarget(selectedConsoleTab.key)}
-                              className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700 text-[11px] font-medium cursor-pointer"
-                            >
-                              Focus Console Tab
-                            </button>
-                          )}
-                          {selectedShellTab && (
-                            <button
-                              type="button"
-                              onClick={() => handleFocusChromeTarget(selectedShellTab.key)}
-                              className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 text-[11px] font-medium cursor-pointer"
-                            >
-                              Focus Cloud Shell Tab
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="text-xs text-slate-600 text-center p-4">
-                        Select your Incognito Cloud Console & Cloud Shell tabs in the selector bar above.
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          </section>
-
-          {/* Direct Co-Pilot Dispatch: Override, Antigravity Prompt, and Cloud Shell */}
-          <section className="rounded-xl bg-slate-900 border border-slate-800 p-4 grid grid-cols-1 md:grid-cols-3 gap-3">
-            {/* Live Gemini Override */}
-            <form onSubmit={handleSendOverride} className="flex flex-col gap-1.5">
-              <label className="text-[11px] font-semibold text-blue-300 flex items-center gap-1">
-                <Sparkles className="w-3.5 h-3.5" /> Guide Gemini on Current Step
-              </label>
-              <div className="flex gap-1.5">
-                <input
-                  type="text"
-                  value={overrideInput}
-                  onChange={(e) => setOverrideInput(e.target.value)}
-                  placeholder="e.g. Click the Create button at top"
-                  className="flex-1 bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-100"
-                />
-                <button
-                  type="submit"
-                  className="px-2.5 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-xs cursor-pointer"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </form>
-
-            {/* Direct Antigravity Prompt Injector */}
-            <form
-              onSubmit={handleSendAntigravityPrompt}
-              className="flex flex-col gap-1.5"
-            >
-              <label className="text-[11px] font-semibold text-purple-300 flex items-center justify-between gap-1">
-                <span className="flex items-center gap-1">
-                  <Bot className="w-3.5 h-3.5" /> Zero-Touch Antigravity Prompt
-                </span>
-                <button
-                  type="button"
-                  onClick={() =>
-                    apiPost('/api/lab/cloud-shell-cmd', {
-                      command: 'agy',
-                    })
-                  }
-                  className="px-1.5 py-0.5 rounded bg-purple-500/20 hover:bg-purple-500/30 text-purple-200 border border-purple-500/30 text-[10px] font-mono cursor-pointer transition"
-                  title="Launches agy --dangerously-skip-permissions || agy in Cloud Shell"
-                >
-                  ⚡ Launch agy
-                </button>
-              </label>
-              <div className="flex gap-1.5">
-                <input
-                  type="text"
-                  value={antigravityInput}
-                  onChange={(e) => setAntigravityInput(e.target.value)}
-                  placeholder="Prompt Antigravity (auto-approves)..."
-                  className="flex-1 bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-100"
-                />
-                <button
-                  type="submit"
-                  className="px-2.5 py-1.5 rounded bg-purple-600 hover:bg-purple-500 text-white text-xs cursor-pointer"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </form>
-
-            {/* Direct Cloud Shell Command Injector */}
-            <form onSubmit={handleSendShellCommand} className="flex flex-col gap-1.5">
-              <label className="text-[11px] font-semibold text-emerald-300 flex items-center gap-1">
-                <Terminal className="w-3.5 h-3.5" /> Run Command in Cloud Shell
-              </label>
-              <div className="flex gap-1.5">
-                <input
-                  type="text"
-                  value={shellInput}
-                  onChange={(e) => setShellInput(e.target.value)}
-                  placeholder="agy . or gcloud config list..."
-                  className="flex-1 bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs font-mono text-slate-100"
-                />
-                <button
-                  type="submit"
-                  className="px-2.5 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-xs cursor-pointer"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </form>
-          </section>
-
-          {/* Real-Time Execution & AI Reasoning Stream */}
+          {/* Real-Time Execution & Progress Stream */}
           <section className="rounded-xl bg-slate-900 border border-slate-800 flex-1 flex flex-col overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <RefreshCw className="w-3.5 h-3.5 text-blue-400" />
+                <Terminal className="w-4 h-4 text-emerald-400" />
                 <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300">
-                  Real-Time Execution & Agent Log
+                  Live Lab Execution & Progress Check Log
                 </h2>
               </div>
               <span className="text-[11px] text-slate-500 font-mono">
@@ -1660,10 +1315,20 @@ export default function App() {
               </span>
             </div>
 
-            <div className="p-3 overflow-y-auto max-h-[300px] space-y-1.5 font-mono text-xs">
+            {state.lastThought && (
+              <div className="mx-3 mt-3 rounded-lg bg-blue-950/40 border border-blue-500/30 px-3 py-2 text-xs text-blue-200 flex items-start gap-2">
+                <Bot className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold text-blue-300">AI Reasoning: </span>
+                  {state.lastThought}
+                </div>
+              </div>
+            )}
+
+            <div className="p-3 overflow-y-auto max-h-[460px] space-y-1.5 font-mono text-xs">
               {state.logs.length === 0 ? (
-                <div className="text-slate-500 text-center py-8">
-                  Ready. Paste a Google Cloud Skills Boost lab URL above to begin.
+                <div className="text-slate-500 text-center py-12">
+                  Connect the Mac Bridge, select your open Lab tab, and click "Start & Run Lab".
                 </div>
               ) : (
                 state.logs.map((log) => (
@@ -1700,13 +1365,376 @@ export default function App() {
               )}
             </div>
           </section>
+
+          {/* Active Chrome Windows Summary Card */}
+          <section className="rounded-xl bg-slate-900 border border-slate-800 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Monitor className="w-4 h-4 text-cyan-400" />
+                <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                  Active Chrome Sessions on Your Mac
+                </h2>
+              </div>
+              <span className="text-[11px] text-slate-400">
+                Incognito pages are spawned automatically when the lab starts
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              {/* Self-Signed-In Lab Page */}
+              <div className="rounded-lg bg-slate-950 border border-slate-800 p-3 flex flex-col justify-between gap-2">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-cyan-300">
+                      1. Your Signed-In Lab Page
+                    </span>
+                    {selectedLabTab && (
+                      <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 text-[10px] font-mono">
+                        Win #{selectedLabTab.windowIndex} • Tab #{selectedLabTab.tabIndex}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-slate-200 font-medium truncate">
+                    {selectedLabTab?.title || state.labTitle || 'No Lab tab selected yet'}
+                  </p>
+                  <p className="text-[11px] font-mono text-slate-500 truncate">
+                    {selectedLabTab?.url || state.labCurrentUrl || 'Select in Step 2 above'}
+                  </p>
+                </div>
+                {selectedLabTab && (
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => handleFocusChromeTarget(selectedLabTab.key)}
+                      className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-[11px] font-medium cursor-pointer"
+                    >
+                      Focus Lab Window
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Auto-Spawned Student Incognito Window */}
+              <div className="rounded-lg bg-slate-950 border border-indigo-500/30 p-3 flex flex-col justify-between gap-2">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-indigo-300">
+                      2. Lab Student Incognito Session
+                    </span>
+                    {selectedConsoleTab && (
+                      <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 text-[10px] font-mono">
+                        Incognito Win #{selectedConsoleTab.windowIndex}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-slate-200 font-medium truncate">
+                    {selectedConsoleTab
+                      ? `Signed in: ${state.credentials.username || selectedConsoleTab.title}`
+                      : 'Spawns automatically when you click Start & Run Lab'}
+                  </p>
+                  <p className="text-[11px] font-mono text-slate-500 truncate">
+                    {selectedConsoleTab?.url ||
+                      state.consoleCurrentUrl ||
+                      'GCP Console + Cloud Shell'}
+                  </p>
+                </div>
+                {(selectedConsoleTab || selectedShellTab) && (
+                  <div className="flex items-center gap-2 pt-1">
+                    {selectedConsoleTab && (
+                      <button
+                        type="button"
+                        onClick={() => handleFocusChromeTarget(selectedConsoleTab.key)}
+                        className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700 text-[11px] font-medium cursor-pointer"
+                      >
+                        Focus Console
+                      </button>
+                    )}
+                    {selectedShellTab && (
+                      <button
+                        type="button"
+                        onClick={() => handleFocusChromeTarget(selectedShellTab.key)}
+                        className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 text-[11px] font-medium cursor-pointer"
+                      >
+                        Focus Cloud Shell
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
+
+          {/* Collapsible Advanced & Manual Controls */}
+          <section className="rounded-xl bg-slate-900 border border-slate-800 overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              className="w-full px-4 py-3 flex items-center justify-between text-xs font-semibold text-slate-300 hover:bg-slate-800/50 cursor-pointer transition"
+            >
+              <span className="flex items-center gap-2">
+                <SlidersHorizontal className="w-4 h-4 text-slate-400" />
+                Advanced & Manual Controls (Step-by-Step Mode, Custom Commands, Manual Overrides)
+              </span>
+              {showAdvanced ? (
+                <ChevronDown className="w-4 h-4 text-slate-400" />
+              ) : (
+                <ChevronRight className="w-4 h-4 text-slate-400" />
+              )}
+            </button>
+
+            {showAdvanced && (
+              <div className="p-4 border-t border-slate-800 space-y-4 text-xs">
+                {/* Step Controls & Mode Switch */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800">
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-400 font-medium">Execution Mode:</span>
+                    <div className="inline-flex rounded-lg bg-slate-950 p-0.5 border border-slate-800">
+                      <button
+                        type="button"
+                        onClick={() => handleModeChange('autonomous')}
+                        className={`px-2.5 py-1 rounded text-xs font-medium cursor-pointer ${
+                          state.executionMode === 'autonomous'
+                            ? 'bg-blue-600 text-white'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Autonomous
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleModeChange('step_by_step')}
+                        className={`px-2.5 py-1 rounded text-xs font-medium cursor-pointer ${
+                          state.executionMode === 'step_by_step'
+                            ? 'bg-blue-600 text-white'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Step-by-Step
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleRunSingleStep}
+                      className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Zap className="w-3.5 h-3.5" />
+                      Execute Next Step
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSkipStep}
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium flex items-center gap-1 cursor-pointer"
+                    >
+                      <SkipForward className="w-3.5 h-3.5" />
+                      Skip Step
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditingCreds(!editingCreds)}
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium cursor-pointer"
+                    >
+                      {editingCreds ? 'Close Credential Editor' : 'Edit Credentials'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Manual Credential Editor */}
+                {editingCreds && (
+                  <div className="grid grid-cols-2 gap-2.5 p-3 rounded-lg bg-slate-950 border border-slate-800">
+                    <div className="col-span-2">
+                      <label className="block text-slate-400 mb-1">Student Username</label>
+                      <input
+                        type="text"
+                        value={credDraft.username}
+                        onChange={(e) =>
+                          setCredDraft({ ...credDraft, username: e.target.value })
+                        }
+                        className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 font-mono text-slate-100"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-400 mb-1">Password</label>
+                      <input
+                        type="text"
+                        value={credDraft.password}
+                        onChange={(e) =>
+                          setCredDraft({ ...credDraft, password: e.target.value })
+                        }
+                        className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 font-mono text-slate-100"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-400 mb-1">GCP Project ID</label>
+                      <input
+                        type="text"
+                        value={credDraft.projectId}
+                        onChange={(e) =>
+                          setCredDraft({ ...credDraft, projectId: e.target.value })
+                        }
+                        className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 font-mono text-slate-100"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-400 mb-1">Default Region</label>
+                      <input
+                        type="text"
+                        value={credDraft.region}
+                        onChange={(e) =>
+                          setCredDraft({ ...credDraft, region: e.target.value })
+                        }
+                        className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 font-mono text-slate-100"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-400 mb-1">Default Zone</label>
+                      <input
+                        type="text"
+                        value={credDraft.zone}
+                        onChange={(e) =>
+                          setCredDraft({ ...credDraft, zone: e.target.value })
+                        }
+                        className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 font-mono text-slate-100"
+                      />
+                    </div>
+                    <div className="col-span-2 flex justify-end mt-1">
+                      <button
+                        type="button"
+                        onClick={handleSaveCredentials}
+                        className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white font-semibold cursor-pointer"
+                      >
+                        Save Credentials
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Manual Incognito Tab Binding Overrides */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-indigo-300 mb-1">
+                      Override Incognito Console Tab (Auto-Managed)
+                    </label>
+                    <select
+                      value={state.selectedConsoleTabKey || ''}
+                      onChange={(e) =>
+                        handleBindChromeTargets({
+                          consoleTabKey: e.target.value || null,
+                        })
+                      }
+                      className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-100 font-mono"
+                    >
+                      <option value="">-- Auto-Spawned by Skills Runner --</option>
+                      {chromeTabs.map((t) => (
+                        <option key={t.key} value={t.key}>
+                          {formatTabLabel(t)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-emerald-300 mb-1">
+                      Override Cloud Shell Tab (Auto-Managed)
+                    </label>
+                    <select
+                      value={state.selectedCloudShellTabKey || ''}
+                      onChange={(e) =>
+                        handleBindChromeTargets({
+                          cloudShellTabKey: e.target.value || null,
+                        })
+                      }
+                      className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-100 font-mono"
+                    >
+                      <option value="">-- Auto-Spawned by Skills Runner --</option>
+                      {chromeTabs.map((t) => (
+                        <option key={t.key} value={t.key}>
+                          {formatTabLabel(t)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Direct Command & Prompt Dispatch */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2 border-t border-slate-800">
+                  <form onSubmit={handleSendOverride} className="flex flex-col gap-1.5">
+                    <label className="text-[11px] font-semibold text-blue-300 flex items-center gap-1">
+                      <Sparkles className="w-3.5 h-3.5" /> Guide AI on Current Step
+                    </label>
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        value={overrideInput}
+                        onChange={(e) => setOverrideInput(e.target.value)}
+                        placeholder="e.g. Use us-east1..."
+                        className="flex-1 bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-100"
+                      />
+                      <button
+                        type="submit"
+                        className="px-2.5 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-xs cursor-pointer"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </form>
+
+                  <form
+                    onSubmit={handleSendAntigravityPrompt}
+                    className="flex flex-col gap-1.5"
+                  >
+                    <label className="text-[11px] font-semibold text-purple-300 flex items-center gap-1">
+                      <Bot className="w-3.5 h-3.5" /> Send Antigravity Prompt
+                    </label>
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        value={antigravityInput}
+                        onChange={(e) => setAntigravityInput(e.target.value)}
+                        placeholder="Prompt agy in Cloud Shell..."
+                        className="flex-1 bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-100"
+                      />
+                      <button
+                        type="submit"
+                        className="px-2.5 py-1.5 rounded bg-purple-600 hover:bg-purple-500 text-white text-xs cursor-pointer"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </form>
+
+                  <form onSubmit={handleSendShellCommand} className="flex flex-col gap-1.5">
+                    <label className="text-[11px] font-semibold text-emerald-300 flex items-center gap-1">
+                      <Terminal className="w-3.5 h-3.5" /> Run Cloud Shell Command
+                    </label>
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        value={shellInput}
+                        onChange={(e) => setShellInput(e.target.value)}
+                        placeholder="gcloud config list..."
+                        className="flex-1 bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs font-mono text-slate-100"
+                      />
+                      <button
+                        type="submit"
+                        className="px-2.5 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-xs cursor-pointer"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
+          </section>
         </div>
       </main>
 
-      {/* Mac Chrome Bridge Download & On-Demand Launch Modal */}
+      {/* Mac Chrome Bridge Setup Modal */}
       {showBridgeModal && (
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-2xl w-full shadow-2xl overflow-hidden">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-xl w-full shadow-2xl overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
               <div className="flex items-center gap-3">
                 <div className="w-9 h-9 rounded-xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center">
@@ -1714,12 +1742,12 @@ export default function App() {
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-white">
-                    Start On-Demand Mac Chrome Bridge (macBridgeAgent.ts)
+                    Step 1: Start the Mac Chrome Bridge
                   </h3>
                   <p className="text-xs text-slate-400">
                     {pendingActionLabel
-                      ? `Required to execute: "${pendingActionLabel}" — will auto-continue as soon as connected`
-                      : 'Connects Cloud Run to your desktop Google Chrome windows on demand'}
+                      ? `Will automatically continue "${pendingActionLabel}" as soon as connected`
+                      : 'Connects Skills Runner to your desktop Chrome and spawns student Incognito sessions'}
                   </p>
                 </div>
               </div>
@@ -1737,75 +1765,44 @@ export default function App() {
             </div>
 
             <div className="p-6 space-y-5 text-xs text-slate-300">
-              <div className="rounded-xl bg-emerald-950/25 border border-emerald-500/30 p-3.5 text-emerald-200 leading-relaxed">
-                <strong className="text-emerald-300">Passive On-Demand Mode (Zero Login Interference):</strong>{' '}
-                The updated <code className="font-mono text-emerald-300">macBridgeAgent.ts</code> has{' '}
-                <strong>zero background polling</strong> and never touches Chrome while you are logging in. It only runs when you click an action in this UI, and you can stop it with one click using the{' '}
-                <strong>Stop Bridge</strong> button in the header.
-              </div>
-
-              {/* Option 1: Run from Local ~/Downloads/skill-runner Directory */}
-              <div className="space-y-2">
-                <div className="font-semibold text-slate-100 flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 flex items-center justify-center text-[11px] font-bold">
-                    1
-                  </span>
-                  Run from Your Local <code className="font-mono text-cyan-300">~/Downloads/skill-runner</code> Folder
-                </div>
-                <div className="pl-7 flex items-center gap-2">
-                  <code className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-[11px] text-emerald-300 overflow-x-auto">
-                    node ~/Downloads/skill-runner/macBridgeAgent.ts
-                  </code>
+              {canStartLocally && (
+                <div className="rounded-xl bg-emerald-950/30 border border-emerald-500/30 p-3.5 flex items-center justify-between gap-3">
+                  <div>
+                    <div className="font-semibold text-emerald-300">
+                      Local macOS Server Detected
+                    </div>
+                    <p className="text-[11px] text-slate-300 mt-0.5">
+                      Start the Mac Chrome Bridge process directly with one click:
+                    </p>
+                  </div>
                   <button
                     type="button"
-                    onClick={() =>
-                      copyToClipboard(
-                        'bridge-local',
-                        'node ~/Downloads/skill-runner/macBridgeAgent.ts'
-                      )
-                    }
-                    className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium flex items-center gap-1.5 cursor-pointer shrink-0"
+                    onClick={handleStartMacBridge}
+                    disabled={startingBridge}
+                    className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center gap-1.5 cursor-pointer shrink-0 disabled:opacity-60"
                   >
-                    {copiedField === 'bridge-local' ? (
+                    {startingBridge ? (
                       <>
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                        Copied
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        Starting...
                       </>
                     ) : (
                       <>
-                        <Copy className="w-3.5 h-3.5 text-emerald-400" />
-                        Copy Local Command
+                        <Play className="w-3.5 h-3.5 fill-current" />
+                        Start Bridge Now
                       </>
                     )}
                   </button>
                 </div>
-                <div className="flex flex-wrap gap-2.5 pl-7 pt-1">
-                  <a
-                    href="/api/bridge/macBridgeAgent.ts?download=1"
-                    download="macBridgeAgent.ts"
-                    className="px-3.5 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold flex items-center gap-2 shadow-sm transition"
-                  >
-                    <Download className="w-4 h-4" />
-                    Download macBridgeAgent.ts
-                  </a>
-                  <a
-                    href="/api/bridge/Start-Mac-Chrome-Bridge.command?download=1"
-                    download="Start-Mac-Chrome-Bridge.command"
-                    className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 font-semibold flex items-center gap-2 transition"
-                  >
-                    <Download className="w-4 h-4 text-cyan-400" />
-                    Download macOS Launcher (.command)
-                  </a>
-                </div>
-              </div>
+              )}
 
-              {/* Option 2: Instant 1-Line Terminal Command */}
+              {/* Option 1: 1-Line Terminal Command */}
               <div className="space-y-2">
                 <div className="font-semibold text-slate-100 flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 flex items-center justify-center text-[11px] font-bold">
-                    2
+                  <span className="w-5 h-5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 flex items-center justify-center text-[11px] font-bold">
+                    A
                   </span>
-                  Or Update & Start in <code className="font-mono text-indigo-300">~/Downloads/skill-runner</code> Automatically
+                  Run This 1-Line Command in macOS Terminal (Recommended)
                 </div>
                 <div className="pl-7 flex items-center gap-2">
                   <code className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-[11px] text-cyan-300 overflow-x-auto">
@@ -1819,28 +1816,53 @@ export default function App() {
                         `curl -fsSL ${window.location.origin}/api/bridge/start.sh | sh`
                       )
                     }
-                    className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium flex items-center gap-1.5 cursor-pointer shrink-0"
+                    className="px-3 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold flex items-center gap-1.5 cursor-pointer shrink-0"
                   >
                     {copiedField === 'bridge-oneliner' ? (
                       <>
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        <Check className="w-3.5 h-3.5" />
                         Copied
                       </>
                     ) : (
                       <>
-                        <Copy className="w-3.5 h-3.5 text-cyan-400" />
+                        <Copy className="w-3.5 h-3.5" />
                         Copy Command
                       </>
                     )}
                   </button>
                 </div>
               </div>
+
+              {/* Option 2: Download Launcher */}
+              <div className="space-y-2">
+                <div className="font-semibold text-slate-100 flex items-center gap-2">
+                  <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 flex items-center justify-center text-[11px] font-bold">
+                    B
+                  </span>
+                  Or Download the macOS Launcher
+                </div>
+                <div className="flex flex-wrap gap-2.5 pl-7 pt-1">
+                  <a
+                    href="/api/bridge/Start-Mac-Chrome-Bridge.command?download=1"
+                    download="Start-Mac-Chrome-Bridge.command"
+                    className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 font-semibold flex items-center gap-2 transition"
+                  >
+                    <Download className="w-4 h-4 text-cyan-400" />
+                    Download Start-Mac-Chrome-Bridge.command
+                  </a>
+                </div>
+              </div>
+
+              <div className="rounded-xl bg-slate-950 border border-slate-800 p-3 text-[11px] text-slate-400 leading-relaxed">
+                <strong className="text-slate-200">Tip for fastest Chrome automation:</strong> In Google Chrome's top menu bar, enable{' '}
+                <code className="text-cyan-300">View → Developer → Allow JavaScript from Apple Events</code> so Skills Runner can sign into student Incognito windows silently.
+              </div>
             </div>
 
             <div className="px-6 py-3.5 border-t border-slate-800 bg-slate-950/70 flex items-center justify-between">
               <div className="flex items-center gap-2 text-xs text-amber-300 font-mono">
                 <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
-                Waiting for macBridgeAgent.ts connection (auto-detecting every 2s)...
+                Waiting for Mac Bridge connection...
               </div>
               <button
                 type="button"
@@ -1858,7 +1880,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Run a Different Skill Course Modal */}
+      {/* Switch Lab Modal */}
       {showSwitchCourseModal && (
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="max-w-xl w-full rounded-2xl bg-slate-900 border border-slate-700/80 shadow-2xl overflow-hidden">
@@ -1868,11 +1890,9 @@ export default function App() {
                   <Layers className="w-4 h-4 text-indigo-400" />
                 </div>
                 <div>
-                  <h3 className="text-sm font-bold text-white">
-                    Run a Different Skill Course
-                  </h3>
+                  <h3 className="text-sm font-bold text-white">Switch to Another Lab</h3>
                   <p className="text-[11px] text-slate-400">
-                    End or reset the current lab session and switch to another Google Cloud Skills Boost lab
+                    End the current lab and point at a new Google Cloud Skills Boost lab
                   </p>
                 </div>
               </div>
@@ -1886,11 +1906,10 @@ export default function App() {
             </div>
 
             <div className="p-6 space-y-4 text-xs text-slate-300">
-              {/* Option A: Select an Open Chrome Tab */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <label className="font-semibold text-slate-200">
-                    Option 1: Select an Open Chrome Lab Tab
+                    Select an Open Lab Tab in Chrome
                   </label>
                   <button
                     type="button"
@@ -1899,7 +1918,7 @@ export default function App() {
                     className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1 cursor-pointer"
                   >
                     <RefreshCw className={`w-3 h-3 ${scanningWindows ? 'animate-spin' : ''}`} />
-                    Refresh Open Tabs
+                    Refresh Tabs
                   </button>
                 </div>
                 <select
@@ -1911,7 +1930,7 @@ export default function App() {
                   className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
                 >
                   <option value="">-- Choose an Open Chrome Tab (or paste a URL below) --</option>
-                  {chromeTabs.map((t) => (
+                  {allLabSelectTabs.map((t) => (
                     <option key={t.key} value={t.key}>
                       {formatTabLabel(t)}
                     </option>
@@ -1919,10 +1938,9 @@ export default function App() {
                 </select>
               </div>
 
-              {/* Option B: Paste a New Skill Course / Lab URL */}
               <div className="space-y-1.5">
                 <label className="font-semibold text-slate-200 block">
-                  Option 2: Or Paste a New Skill Course / Lab URL
+                  Or Paste a Lab URL
                 </label>
                 <input
                   type="url"
@@ -1931,12 +1949,11 @@ export default function App() {
                     setNewCourseUrl(e.target.value);
                     if (e.target.value) setNewCourseTabKey('');
                   }}
-                  placeholder="https://partner.skills.google/paths/... or https://partner.skills.google/focuses/..."
+                  placeholder="https://www.cloudskillsboost.google/focuses/... or https://partner.skills.google/..."
                   className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3.5 py-2 text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none focus:border-indigo-500"
                 />
               </div>
 
-              {/* Checkbox to End Current Active Lab First */}
               <label className="flex items-center gap-2.5 p-3 rounded-xl bg-slate-950/90 border border-slate-800 cursor-pointer">
                 <input
                   type="checkbox"
@@ -1949,7 +1966,7 @@ export default function App() {
                     End current active lab in Google Chrome before switching
                   </span>
                   <span className="text-[11px] text-slate-400">
-                    Automatically clicks "End Lab" and confirms the dialog so Qwiklabs allows starting your next lab immediately.
+                    Clicks "End Lab" and confirms termination so your next lab can start immediately.
                   </span>
                 </div>
               </label>
@@ -1969,12 +1986,8 @@ export default function App() {
                 disabled={switchingCourse}
                 className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-500/30 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition disabled:opacity-60"
               >
-                {switchingCourse ? (
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <FileSearch className="w-3.5 h-3.5" />
-                )}
-                Switch & Load Course
+                <FileSearch className="w-3.5 h-3.5" />
+                Switch & Load Instructions
               </button>
               <button
                 type="button"
@@ -1982,12 +1995,8 @@ export default function App() {
                 disabled={switchingCourse}
                 className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shadow-sm disabled:opacity-60"
               >
-                {switchingCourse ? (
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Play className="w-3.5 h-3.5 fill-current" />
-                )}
-                Switch & Run Autonomous
+                <Play className="w-3.5 h-3.5 fill-current" />
+                Switch, Start & Run Lab
               </button>
             </div>
           </div>

@@ -39,12 +39,58 @@ const SNAPSHOT_HTML_PATH = path.join(SNAPSHOT_DIR, 'live_lab_snapshot.html');
 const SNAPSHOT_FILES_DIR = path.join(SNAPSHOT_DIR, 'live_lab_snapshot_files');
 const STATE_FILE_PATH = path.join(SNAPSHOT_DIR, 'runner_state.json');
 
+const EXTRA_MAC_PATHS = [
+  '/opt/homebrew/bin',
+  '/opt/homebrew/sbin',
+  '/opt/homebrew/share/google-cloud-sdk/bin',
+  '/usr/local/bin',
+  '/usr/local/sbin',
+  '/usr/local/share/google-cloud-sdk/bin',
+  '/usr/local/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/bin',
+  path.join(os.homedir(), 'google-cloud-sdk', 'bin'),
+  path.join(os.homedir(), 'Downloads', 'google-cloud-sdk', 'bin'),
+  '/Users/Shared/google-cloud-sdk/bin',
+];
+for (const p of EXTRA_MAC_PATHS) {
+  if (fs.existsSync(p) && !(process.env.PATH || '').split(':').includes(p)) {
+    process.env.PATH = `${p}:${process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'}`;
+  }
+}
+
 async function runAppleScript(script, timeoutMs = 35000) {
   const { stdout } = await execFileAsync('osascript', ['-e', script], {
     timeout: timeoutMs,
     maxBuffer: 10 * 1024 * 1024,
   });
   return stdout.trim();
+}
+
+async function executeJsInUserChromeTab(windowId, tabIndex, jsCode, timeoutMs = 15000) {
+  const escapedJs = jsCode.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const script = `
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${windowId}" then
+      if ${tabIndex} <= (count of tabs of w) then
+        set t to tab ${tabIndex} of w
+        try
+          set res to execute t javascript "${escapedJs}"
+          if res is missing value then return "OK:"
+          return "OK:" & (res as string)
+        on error errMsg
+          return "ERR:" & errMsg
+        end try
+      end if
+    end if
+  end repeat
+  return "ERR:tab_not_found"
+end tell
+`;
+  const out = await runAppleScript(script, timeoutMs).catch((e) => `ERR:${e?.message || e}`);
+  if (out.startsWith('OK:')) {
+    return { ok: true, value: out.slice(3) };
+  }
+  return { ok: false, error: out.slice(4) };
 }
 
 async function listUserChromeTabs() {
@@ -644,6 +690,74 @@ async function clickStartLabInUserChrome(preferredUrl, preferredTarget) {
   }
   if (target?.windowId && target?.tabIndex) {
     await focusUserChromeTab(Number(target.windowId), Number(target.tabIndex));
+    const startJs = `(function(){
+      function findDeep(root, pred) {
+        var out = [];
+        var walker = function(node) {
+          if (!node) return;
+          if (node.nodeType === 1) {
+            if (pred(node)) out.push(node);
+            if (node.shadowRoot) walker(node.shadowRoot);
+          }
+          var children = node.childNodes || [];
+          for (var i = 0; i < children.length; i++) walker(children[i]);
+        };
+        walker(root);
+        return out;
+      }
+      var btns = findDeep(document.documentElement, function(el) {
+        var tag = (el.tagName || '').toLowerCase();
+        if (tag !== 'button' && tag !== 'ql-button' && el.getAttribute('role') !== 'button') return false;
+        var txt = (el.innerText || el.textContent || el.getAttribute('label') || '').trim();
+        return /^start lab/i.test(txt) || txt.toLowerCase() === 'start';
+      });
+      if (btns.length > 0) {
+        btns[0].click();
+        return 'clicked';
+      }
+      return 'not_found';
+    })()`;
+    const jsRes = await executeJsInUserChromeTab(
+      Number(target.windowId),
+      Number(target.tabIndex),
+      startJs
+    );
+    if (jsRes.ok && jsRes.value === 'clicked') {
+      await new Promise((r) => setTimeout(r, 1200));
+      const confirmJs = `(function(){
+        function findDeep(root, pred) {
+          var out = [];
+          var walker = function(node) {
+            if (!node) return;
+            if (node.nodeType === 1) {
+              if (pred(node)) out.push(node);
+              if (node.shadowRoot) walker(node.shadowRoot);
+            }
+            var children = node.childNodes || [];
+            for (var i = 0; i < children.length; i++) walker(children[i]);
+          };
+          walker(root);
+          return out;
+        }
+        var btns = findDeep(document.documentElement, function(el) {
+          var tag = (el.tagName || '').toLowerCase();
+          if (tag !== 'button' && tag !== 'ql-button' && el.getAttribute('role') !== 'button') return false;
+          var txt = (el.innerText || el.textContent || el.getAttribute('label') || '').trim();
+          return /^launch with/i.test(txt) || /^confirm$/i.test(txt) || /^use 1 credit/i.test(txt);
+        });
+        if (btns.length > 0) {
+          btns[0].click();
+          return 'confirmed';
+        }
+        return 'done';
+      })()`;
+      await executeJsInUserChromeTab(
+        Number(target.windowId),
+        Number(target.tabIndex),
+        confirmJs
+      );
+      return true;
+    }
   }
 
   const axScript = `
@@ -658,10 +772,7 @@ tell application "System Events"
     if (count of windows) > 0 then
       set w to front window
       set allElems to entire contents of w
-      set idx to 0
       repeat with el in allElems
-        set idx to idx + 1
-        if idx > 350 then exit repeat
         try
           if (role of el) is "AXButton" then
             set nm to (name of el) as string
@@ -686,10 +797,7 @@ tell application "System Events"
     if (count of windows) > 0 then
       set w to front window
       set followElems to entire contents of w
-      set idx to 0
       repeat with fel in followElems
-        set idx to idx + 1
-        if idx > 350 then exit repeat
         try
           if (role of fel) is "AXButton" then
             set fnm to (name of fel) as string
@@ -722,6 +830,93 @@ async function clickEndLabInUserChrome(preferredUrl, preferredTarget) {
   }
   if (target?.windowId && target?.tabIndex) {
     await focusUserChromeTab(Number(target.windowId), Number(target.tabIndex));
+    const endJs = `(function(){
+      try {
+        if (window.ql && window.ql.labRun && typeof window.ql.labRun.stopLab === 'function') {
+          window.ql.labRun.stopLab();
+          return 'stopped_via_api';
+        }
+      } catch(e) {}
+      function findDeep(root, pred) {
+        var out = [];
+        var walker = function(node) {
+          if (!node) return;
+          if (node.nodeType === 1) {
+            if (pred(node)) out.push(node);
+            if (node.shadowRoot) walker(node.shadowRoot);
+          }
+          var children = node.childNodes || [];
+          for (var i = 0; i < children.length; i++) walker(children[i]);
+        };
+        walker(root);
+        return out;
+      }
+      var endBtns = findDeep(document.documentElement, function(el) {
+        var tag = (el.tagName || '').toLowerCase();
+        if (tag !== 'button' && tag !== 'ql-button' && el.getAttribute('role') !== 'button') return false;
+        var txt = (el.innerText || el.textContent || el.getAttribute('label') || '').trim();
+        return /^end lab/i.test(txt);
+      });
+      if (endBtns.length > 0) {
+        endBtns[0].click();
+        return 'clicked_primary';
+      }
+      var startBtns = findDeep(document.documentElement, function(el) {
+        var tag = (el.tagName || '').toLowerCase();
+        if (tag !== 'button' && tag !== 'ql-button' && el.getAttribute('role') !== 'button') return false;
+        var txt = (el.innerText || el.textContent || el.getAttribute('label') || '').trim();
+        return /^start lab/i.test(txt);
+      });
+      if (startBtns.length > 0) return 'already_ended';
+      return 'not_found';
+    })()`;
+    const jsRes = await executeJsInUserChromeTab(
+      Number(target.windowId),
+      Number(target.tabIndex),
+      endJs
+    );
+    if (jsRes.ok && jsRes.value === 'already_ended') {
+      return { ended: true, message: 'Lab is already ended in Google Chrome.' };
+    }
+    if (jsRes.ok && (jsRes.value === 'stopped_via_api' || jsRes.value === 'clicked_primary')) {
+      await new Promise((r) => setTimeout(r, 900));
+      const confirmJs = `(function(){
+        function findDeep(root, pred) {
+          var out = [];
+          var walker = function(node) {
+            if (!node) return;
+            if (node.nodeType === 1) {
+              if (pred(node)) out.push(node);
+              if (node.shadowRoot) walker(node.shadowRoot);
+            }
+            var children = node.childNodes || [];
+            for (var i = 0; i < children.length; i++) walker(children[i]);
+          };
+          walker(root);
+          return out;
+        }
+        var btns = findDeep(document.documentElement, function(el) {
+          var tag = (el.tagName || '').toLowerCase();
+          if (tag !== 'button' && tag !== 'ql-button' && el.getAttribute('role') !== 'button') return false;
+          var txt = (el.innerText || el.textContent || el.getAttribute('label') || '').trim();
+          return /^submit$/i.test(txt) || /^confirm$/i.test(txt) || /^end lab$/i.test(txt);
+        });
+        if (btns.length > 0) {
+          btns[btns.length - 1].click();
+          return 'confirmed';
+        }
+        return 'no_confirm';
+      })()`;
+      await executeJsInUserChromeTab(
+        Number(target.windowId),
+        Number(target.tabIndex),
+        confirmJs
+      );
+      return {
+        ended: true,
+        message: 'Clicked "End Lab" and confirmed termination in Google Chrome.',
+      };
+    }
   }
 
   const primaryScript = `
@@ -736,10 +931,7 @@ tell application "System Events"
     if (count of windows) > 0 then
       set w to front window
       set allElems to entire contents of w
-      set idx to 0
       repeat with el in allElems
-        set idx to idx + 1
-        if idx > 350 then exit repeat
         try
           if (role of el) is "AXButton" then
             set nm to (name of el) as string
@@ -829,6 +1021,343 @@ return "done"
   };
 }
 
+function buildGoogleSignInStepJs(username, password) {
+  const safeUser = JSON.stringify(String(username || '').trim());
+  const safePass = JSON.stringify(String(password || ''));
+  return `(function(user, pass) {
+    try {
+      function isVis(el) {
+        if (!el) return false;
+        var r = el.getBoundingClientRect();
+        var s = window.getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+      }
+      function setNativeValue(el, val) {
+        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value') &&
+                     Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        if (setter) setter.call(el, val);
+        else el.value = val;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      var href = window.location.href || '';
+      if (
+        (href.indexOf('console.cloud.google.com') !== -1 || href.indexOf('shell.cloud.google.com') !== -1) &&
+        href.indexOf('accounts.google.com') === -1
+      ) {
+        var dialogs = document.querySelectorAll('.mat-mdc-dialog-container, mat-dialog-container, [role="dialog"]');
+        for (var d = 0; d < dialogs.length; d++) {
+          var dlg = dialogs[d];
+          if (!isVis(dlg)) continue;
+          var cbs = dlg.querySelectorAll('input[type="checkbox"]:not(:checked)');
+          for (var c = 0; c < cbs.length; c++) {
+            cbs[c].click();
+          }
+          var btns = dlg.querySelectorAll('button, [role="button"]');
+          for (var b = 0; b < btns.length; b++) {
+            var txt = (btns[b].innerText || btns[b].textContent || '').trim().toLowerCase();
+            if (txt.indexOf('agree and continue') !== -1 || txt === 'agree' || txt === 'accept' || txt === 'continue') {
+              btns[b].click();
+              return 'console_tos_accepted';
+            }
+          }
+        }
+        return 'console_ready';
+      }
+      if (href.indexOf('http://localhost:') === 0 || href.indexOf('http://127.0.0.1:') === 0 || href.indexOf('sdk/auth_success') !== -1) {
+        return 'oauth_redirected:' + href;
+      }
+
+      var passInput = document.querySelector('input[type="password"][name="Passwd"], input[type="password"]');
+      if (passInput && isVis(passInput) && pass) {
+        if (passInput.dataset.srSubmitted === '1' && Date.now() - Number(passInput.dataset.srTime || 0) < 4000) {
+          return 'waiting_after_password';
+        }
+        passInput.focus();
+        setNativeValue(passInput, pass);
+        passInput.dataset.srSubmitted = '1';
+        passInput.dataset.srTime = String(Date.now());
+        var pNext = document.querySelector('#passwordNext button, #passwordNext, button[type="submit"], input[type="submit"]');
+        if (pNext && isVis(pNext)) pNext.click();
+        else passInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+        return 'submitted_password';
+      }
+
+      var emailInput = document.querySelector('input[type="email"], input#identifierId, input[name="identifier"]');
+      if (emailInput && isVis(emailInput) && user) {
+        if (emailInput.dataset.srSubmitted === '1' && Date.now() - Number(emailInput.dataset.srTime || 0) < 4000) {
+          return 'waiting_after_email';
+        }
+        emailInput.focus();
+        setNativeValue(emailInput, user);
+        emailInput.dataset.srSubmitted = '1';
+        emailInput.dataset.srTime = String(Date.now());
+        var eNext = document.querySelector('#identifierNext button, #identifierNext, button[type="submit"], input[type="submit"]');
+        if (eNext && isVis(eNext)) eNext.click();
+        else emailInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+        return 'submitted_email';
+      }
+
+      var acctItems = document.querySelectorAll('[data-identifier], [data-email]');
+      if (acctItems.length > 0 && user) {
+        for (var i = 0; i < acctItems.length; i++) {
+          var idVal = (acctItems[i].getAttribute('data-identifier') || acctItems[i].getAttribute('data-email') || '').toLowerCase();
+          if (idVal === user.toLowerCase() && isVis(acctItems[i])) {
+            acctItems[i].click();
+            return 'clicked_matching_account';
+          }
+        }
+        var allLis = document.querySelectorAll('li, [role="link"], [role="button"]');
+        for (var j = 0; j < allLis.length; j++) {
+          var lTxt = (allLis[j].innerText || allLis[j].textContent || '').trim().toLowerCase();
+          if (lTxt.indexOf('use another account') !== -1 && isVis(allLis[j])) {
+            allLis[j].click();
+            return 'clicked_use_another_account';
+          }
+        }
+      }
+
+      var confirmInput = document.querySelector('input#confirm, input[name="confirm"]');
+      if (confirmInput && isVis(confirmInput)) {
+        confirmInput.click();
+        return 'clicked_confirm_input';
+      }
+      var checkboxes = document.querySelectorAll('input[type="checkbox"]:not(:checked)');
+      for (var k = 0; k < checkboxes.length; k++) {
+        if (isVis(checkboxes[k])) checkboxes[k].click();
+      }
+      var buttons = document.querySelectorAll('button, input[type="button"], input[type="submit"], [role="button"]');
+      var matchedBtn = null;
+      var matchedLabel = '';
+      for (var m = 0; m < buttons.length; m++) {
+        var btn = buttons[m];
+        if (!isVis(btn)) continue;
+        var bTxt = (btn.innerText || btn.value || btn.textContent || '').trim().toLowerCase();
+        if (
+          bTxt === 'i understand' ||
+          bTxt === 'accept' ||
+          bTxt === 'agree' ||
+          bTxt === 'agree and continue' ||
+          bTxt === 'continue' ||
+          bTxt === 'allow' ||
+          bTxt === 'confirm' ||
+          bTxt === 'sign in'
+        ) {
+          matchedBtn = btn;
+          matchedLabel = bTxt;
+        }
+      }
+      if (matchedBtn) {
+        matchedBtn.click();
+        return 'clicked_consent_' + matchedLabel;
+      }
+      return 'waiting:' + href;
+    } catch (e) {
+      return 'err:' + (e && e.message ? e.message : String(e));
+    }
+  })(${safeUser}, ${safePass})`;
+}
+
+async function getChromeTabUrl(windowId, tabIndex) {
+  const script = `
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${windowId}" then
+      if ${tabIndex} <= (count of tabs of w) then
+        return URL of tab ${tabIndex} of w
+      end if
+    end if
+  end repeat
+  return ""
+end tell
+`;
+  return runAppleScript(script).catch(() => '');
+}
+
+/**
+ * Spawns or reuses an Incognito window in the user's Mac Chrome, signs in as the temporary
+ * lab student account, accepts Workspace & GCP Console ToS prompts, and opens both the
+ * GCP Console tab and Cloud Shell tab.
+ */
+async function spawnIncognitoSessionInUserChrome({
+  username,
+  password,
+  projectId,
+  consoleUrl,
+}) {
+  const cleanUser = String(username || '').trim();
+  const cleanPass = String(password || '').trim();
+  const cleanProject = String(projectId || '').trim();
+  const targetConsoleUrl = cleanProject
+    ? `https://console.cloud.google.com/?project=${encodeURIComponent(cleanProject)}`
+    : String(consoleUrl || 'https://console.cloud.google.com/');
+  const targetCloudShellUrl = cleanProject
+    ? `https://shell.cloud.google.com/?project=${encodeURIComponent(cleanProject)}&show=terminal`
+    : 'https://shell.cloud.google.com/?show=terminal';
+
+  // 1. Check if an existing Incognito window is already signed into this project
+  const existingTabs = await listUserChromeTabs();
+  const existingIncognitoTabs = existingTabs.filter((t) => t.windowMode === 'incognito');
+  if (cleanProject && existingIncognitoTabs.length > 0) {
+    const matchingConsole = existingIncognitoTabs.find(
+      (t) =>
+        t.url.includes('console.cloud.google.com') &&
+        !t.url.includes('accounts.google.com') &&
+        t.url.includes(cleanProject)
+    );
+    if (matchingConsole) {
+      const winId = matchingConsole.windowId;
+      let shellTab = existingIncognitoTabs.find(
+        (t) => t.windowId === winId && t.url.includes('shell.cloud.google.com')
+      );
+      if (!shellTab) {
+        await navigateOrOpenInUserChromeWindow(winId, null, targetCloudShellUrl, true);
+        await focusUserChromeTab(winId, matchingConsole.tabIndex);
+      }
+      const updatedTabs = await listUserChromeTabs();
+      const cTab =
+        updatedTabs.find(
+          (t) => t.windowId === winId && t.url.includes('console.cloud.google.com')
+        ) || matchingConsole;
+      const sTab = updatedTabs.find(
+        (t) => t.windowId === winId && t.url.includes('shell.cloud.google.com')
+      );
+      return {
+        ok: true,
+        reused: true,
+        windowId: winId,
+        consoleTabKey: cTab.key,
+        cloudShellTabKey: sTab ? sTab.key : cTab.key,
+        tabs: updatedTabs,
+      };
+    }
+  }
+
+  // 2. Close any stale Incognito windows from previous labs so the student cookie jar starts fresh
+  if (existingIncognitoTabs.length > 0) {
+    const closeStaleIncognitoScript = `
+tell application "Google Chrome"
+  repeat with i from (count of windows) to 1 by -1
+    set w to window i
+    if (mode of w) is "incognito" then
+      close w
+    end if
+  end repeat
+  return "closed"
+end tell
+`;
+    await runAppleScript(closeStaleIncognitoScript).catch(() => '');
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  // 3. Create a fresh Incognito window on the user's Mac
+  const initialLoginUrl = cleanUser
+    ? `https://accounts.google.com/AccountChooser?Email=${encodeURIComponent(
+        cleanUser
+      )}&continue=${encodeURIComponent(targetConsoleUrl)}`
+    : targetConsoleUrl;
+  const escapedLoginUrl = initialLoginUrl.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
+  const createIncognitoScript = `
+tell application "Google Chrome"
+  activate
+  set incWin to make new window with properties {mode:"incognito"}
+  set URL of active tab of incWin to "${escapedLoginUrl}"
+  return (id of incWin) as string
+end tell
+`;
+  const winIdStr = await runAppleScript(createIncognitoScript);
+  const windowId = parseInt(winIdStr, 10);
+  if (!Number.isFinite(windowId)) {
+    throw new Error('Failed to create Incognito window in Google Chrome on macOS.');
+  }
+
+  // 4. Automate student sign-in + Workspace consent + GCP Console ToS
+  if (cleanUser && cleanPass) {
+    const signInJs = buildGoogleSignInStepJs(cleanUser, cleanPass);
+    let pastedEmailViaAx = false;
+    let pastedPassViaAx = false;
+    let consoleReadyCount = 0;
+
+    for (let attempt = 0; attempt < 35; attempt++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const jsStep = await executeJsInUserChromeTab(windowId, 1, signInJs);
+      if (jsStep.ok) {
+        if (jsStep.value === 'console_ready' || jsStep.value === 'console_tos_accepted') {
+          consoleReadyCount++;
+          if (consoleReadyCount >= 3) break;
+        }
+        continue;
+      }
+
+      // Fallback when Chrome's "Allow JavaScript from Apple Events" is turned off:
+      const currentUrl = await getChromeTabUrl(windowId, 1);
+      if (
+        currentUrl.includes('console.cloud.google.com') &&
+        !currentUrl.includes('accounts.google.com')
+      ) {
+        break;
+      }
+      if (
+        (currentUrl.includes('/identifier') ||
+          currentUrl.includes('/ServiceLogin') ||
+          currentUrl.includes('/AccountChooser')) &&
+        !currentUrl.includes('/challenge/pwd') &&
+        !pastedEmailViaAx
+      ) {
+        await sendTextToUserChromeTab(windowId, 1, cleanUser, true);
+        pastedEmailViaAx = true;
+      } else if (currentUrl.includes('/challenge/pwd') && !pastedPassViaAx) {
+        await new Promise((r) => setTimeout(r, 600));
+        await sendTextToUserChromeTab(windowId, 1, cleanPass, true);
+        pastedPassViaAx = true;
+      } else if (currentUrl.includes('/speedbump/') || currentUrl.includes('/consent')) {
+        const axConsentScript = `
+tell application "Google Chrome" to activate
+tell application "System Events"
+  tell process "Google Chrome"
+    if (count of windows) > 0 then
+      set w to front window
+      set allElems to entire contents of w
+      repeat with el in allElems
+        try
+          if (role of el) is "AXButton" then
+            set nm to (name of el) as string
+            if nm is "I understand" or nm is "Accept" or nm is "Continue" or nm is "Allow" or nm is "Agree" then
+              click el
+              return "clicked"
+            end if
+          end if
+        end try
+      end repeat
+    end if
+  end tell
+end tell
+return "none"
+`;
+        await runAppleScript(axConsentScript).catch(() => '');
+      }
+    }
+  }
+
+  // 5. Open Cloud Shell in Tab 2 of the same Incognito window and keep Console in Tab 1
+  await navigateOrOpenInUserChromeWindow(windowId, null, targetCloudShellUrl, true);
+  await focusUserChromeTab(windowId, 1);
+
+  const tabs = await listUserChromeTabs();
+  const consoleTab = tabs.find((t) => t.windowId === windowId && t.tabIndex === 1);
+  const cloudShellTab = tabs.find((t) => t.windowId === windowId && t.tabIndex === 2);
+
+  return {
+    ok: true,
+    reused: false,
+    windowId,
+    consoleTabKey: consoleTab ? consoleTab.key : `${windowId}:1`,
+    cloudShellTabKey: cloudShellTab ? cloudShellTab.key : `${windowId}:2`,
+    tabs,
+  };
+}
+
 /**
  * Isolated student gcloud configuration & direct Cloud Shell SSH execution
  */
@@ -899,7 +1428,7 @@ async function checkStudentGcloudAuth(username, projectId) {
   return { authenticated: false, configDir };
 }
 
-async function startStudentGcloudAuth(username, projectId) {
+async function startStudentGcloudAuth(username, projectId, enableGdrive = true) {
   const existing = await checkStudentGcloudAuth(username, projectId);
   if (existing.authenticated) {
     return { alreadyAuthenticated: true, configDir: existing.configDir };
@@ -907,7 +1436,8 @@ async function startStudentGcloudAuth(username, projectId) {
 
   const configDir = existing.configDir;
   return new Promise((resolve, reject) => {
-    const args = ['auth', 'login', '--enable-gdrive-access', '--quiet'];
+    const args = ['auth', 'login', '--quiet'];
+    if (enableGdrive) args.push('--enable-gdrive-access');
     if (projectId) args.push(`--project=${projectId}`);
 
     const proc = spawn('gcloud', args, {
@@ -951,10 +1481,12 @@ async function startStudentGcloudAuth(username, projectId) {
 
 async function finishStudentGcloudAuth(username, callbackUrl) {
   const entry = activeGcloudLogins.get(username);
-  try {
-    await fetch(callbackUrl);
-  } catch {
-    // Ignore
+  if (callbackUrl) {
+    try {
+      await fetch(callbackUrl);
+    } catch {
+      // Ignore
+    }
   }
   if (entry?.proc) {
     await new Promise((r) => {
@@ -967,6 +1499,130 @@ async function finishStudentGcloudAuth(username, callbackUrl) {
     activeGcloudLogins.delete(username);
   }
   return checkStudentGcloudAuth(username);
+}
+
+/**
+ * Completes the student `gcloud auth login` OAuth flow directly on the user's Mac
+ * using the student's Incognito Chrome window (where localhost callback hits local gcloud directly).
+ */
+async function ensureStudentGcloudAuth(username, password, projectId, preferredWindowId) {
+  const initialCheck = await checkStudentGcloudAuth(username, projectId);
+  if (initialCheck.authenticated) return initialCheck;
+
+  let incWinId = Number(preferredWindowId) || 0;
+  if (!incWinId) {
+    const tabs = await listUserChromeTabs();
+    const incTab = tabs.find((t) => t.windowMode === 'incognito');
+    if (incTab) incWinId = incTab.windowId;
+  }
+  if (!incWinId) {
+    const spawned = await spawnIncognitoSessionInUserChrome({
+      username,
+      password,
+      projectId,
+    });
+    incWinId = spawned.windowId;
+  }
+
+  // Try standard gcloud auth first (fewer consent screens), or with gdrive access
+  for (const enableGdrive of [false, true]) {
+    try {
+      const started = await startStudentGcloudAuth(username, projectId, enableGdrive);
+      if (started.alreadyAuthenticated) {
+        return checkStudentGcloudAuth(username, projectId);
+      }
+      const oauthUrl = started.oauthUrl;
+      if (!oauthUrl) continue;
+
+      const escapedOauthUrl = oauthUrl.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      const openOauthTabScript = `
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${incWinId}" then
+      set newTab to make new tab at end of tabs of w with properties {URL:"${escapedOauthUrl}"}
+      set tIdx to count of tabs of w
+      set active tab index of w to tIdx
+      return tIdx as string
+    end if
+  end repeat
+  return "0"
+end tell
+`;
+      const tabIdxStr = await runAppleScript(openOauthTabScript).catch(() => '0');
+      const oauthTabIdx = parseInt(tabIdxStr, 10) || 0;
+      if (!oauthTabIdx) continue;
+
+      const stepJs = buildGoogleSignInStepJs(username, password);
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 900));
+        const status = await checkStudentGcloudAuth(username, projectId);
+        if (status.authenticated) {
+          break;
+        }
+        const jsOut = await executeJsInUserChromeTab(incWinId, oauthTabIdx, stepJs);
+        if (jsOut.ok && jsOut.value && jsOut.value.startsWith('oauth_redirected:')) {
+          const redirectedUrl = jsOut.value.slice('oauth_redirected:'.length);
+          if (redirectedUrl.startsWith('http://localhost:')) {
+            await fetch(redirectedUrl).catch(() => {});
+          }
+          await new Promise((r) => setTimeout(r, 1000));
+          break;
+        }
+        if (!jsOut.ok) {
+          // AX fallback for Continue / Allow / Sign in button on OAuth consent screen
+          const axOauthScript = `
+tell application "Google Chrome" to activate
+tell application "System Events"
+  tell process "Google Chrome"
+    if (count of windows) > 0 then
+      set w to front window
+      set allElems to entire contents of w
+      repeat with el in allElems
+        try
+          if (role of el) is "AXButton" then
+            set nm to (name of el) as string
+            if nm is "Continue" or nm is "Allow" or nm is "Sign in" or nm is "I understand" or nm is "Accept" then
+              click el
+              return "clicked"
+            end if
+          end if
+        end try
+      end repeat
+    end if
+  end tell
+end tell
+return "none"
+`;
+          await runAppleScript(axOauthScript).catch(() => '');
+        }
+      }
+
+      // Close the temporary OAuth tab in the Incognito window
+      const closeOauthTabScript = `
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${incWinId}" then
+      if ${oauthTabIdx} <= (count of tabs of w) then
+        close tab ${oauthTabIdx} of w
+      end if
+      set active tab index of w to 1
+      exit repeat
+    end if
+  end repeat
+end tell
+`;
+      await runAppleScript(closeOauthTabScript).catch(() => '');
+
+      const finalStatus = await checkStudentGcloudAuth(username, projectId);
+      if (finalStatus.authenticated) {
+        return finalStatus;
+      }
+    } catch {
+      // Try next mode
+    }
+  }
+
+  return checkStudentGcloudAuth(username, projectId);
 }
 
 async function execInStudentCloudShell(username, projectId, command, timeoutMs = 180000) {
@@ -1112,6 +1768,14 @@ async function connectBridge() {
           result = await focusUserChromeTab(Number(params.windowId), Number(params.tabIndex));
         } else if (method === 'open_or_focus_lab') {
           result = await openOrFocusLabInUserChrome(String(params.requestedUrl || ''));
+        } else if (method === 'spawn_incognito_session') {
+          result = await spawnIncognitoSessionInUserChrome({
+            username: params.username,
+            password: params.password,
+            projectId: params.projectId,
+            consoleUrl: params.consoleUrl,
+          });
+          await pushTabsOnce();
         } else if (method === 'snapshot_tab_by_target') {
           const snap = await snapshotUserChromeTabByTarget(
             Number(params.windowId),
@@ -1146,6 +1810,13 @@ async function connectBridge() {
           );
         } else if (method === 'check_gcloud_auth') {
           result = await checkStudentGcloudAuth(params.username, params.projectId);
+        } else if (method === 'ensure_gcloud_auth') {
+          result = await ensureStudentGcloudAuth(
+            params.username,
+            params.password,
+            params.projectId,
+            params.windowId
+          );
         } else if (method === 'start_gcloud_auth') {
           result = await startStudentGcloudAuth(params.username, params.projectId);
         } else if (method === 'finish_gcloud_auth') {

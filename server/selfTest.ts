@@ -378,6 +378,35 @@ async function runVerificationTests() {
   }
   console.log('✓ Task-level script synthesis & piped variable interpolation verified.');
 
+  // 9. Verify macBridgeAgent.ts is valid pure ESM JavaScript (node --check) and exposes standalone RPC methods
+  const fsMod = await import('node:fs');
+  const pathMod = await import('node:path');
+  const cpMod = await import('node:child_process');
+  const utilMod = await import('node:util');
+  const execFileAsync = utilMod.promisify(cpMod.execFile);
+  const agentPath = pathMod.resolve(process.cwd(), 'server', 'macBridgeAgent.ts');
+  const agentCode = fsMod.readFileSync(agentPath, 'utf8');
+  if (
+    !agentCode.includes("method === 'spawn_incognito_session'") ||
+    !agentCode.includes("method === 'ensure_gcloud_auth'")
+  ) {
+    throw new Error(
+      'macBridgeAgent.ts is missing spawn_incognito_session or ensure_gcloud_auth RPC handlers.'
+    );
+  }
+  const tmpMjs = pathMod.join('/tmp', `macBridgeAgent-check-${Date.now()}.mjs`);
+  fsMod.writeFileSync(tmpMjs, agentCode, 'utf8');
+  try {
+    await execFileAsync(process.execPath, ['--check', tmpMjs]);
+  } finally {
+    try {
+      fsMod.unlinkSync(tmpMjs);
+    } catch {}
+  }
+  console.log(
+    '✓ macBridgeAgent.ts pure-ESM syntax & standalone Incognito/OAuth RPC handlers verified.'
+  );
+
   await browser.close();
   console.log('✅ All verification tests passed!');
 }

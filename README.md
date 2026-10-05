@@ -82,20 +82,18 @@ skills-runner/
    - Automatically wraps `agy` / `antigravity` CLI invocations with `--dangerously-skip-permissions` and graceful fallback (`agy --dangerously-skip-permissions || agy`).
    - Appends non-interactive execution directives to Antigravity prompts and auto-approves IDE confirmation buttons (`Accept All`, `Allow`, `Run Command`, `Proceed`).
 
-### Operator Workflow: Running Any New Lab End-to-End
-1. **Ensure the Mac Chrome Bridge is Active**:
-   - Open the [Skills Runner Web UI](https://skills-runner-621653283297.us-central1.run.app).
-   - If the top-right status badge shows **Mac Bridge Offline**, click **Download & Run Bridge** (or double-click `~/Downloads/skill-runner/Start-Mac-Chrome-Bridge.command`). The launcher automatically pulls the latest `macBridgeAgent.ts` from Cloud Run into `~/Downloads/skill-runner/` and connects over WebSocket.
-2. **Start Your Lab & Bind Chrome Tabs**:
-   - Open your Google Cloud Skills Boost / Google Skills for Partners lab in Chrome and click **Start Lab** (or click **Start Lab & Sign In** directly in the Skills Runner UI).
-   - Click **Sync Chrome Tabs** in the Skills Runner UI, select your active Lab tab from the dropdown, and click **Bind Selected Windows & Sync Lab**.
-3. **Run Autonomous**:
-   - Click **Start Autonomous Run**. For each task in the lab, Skills Runner automatically:
-     1. Authenticates an isolated `gcloud` profile for the new `student-xx@qwiklabs.net` account and verifies `gcloud auth print-access-token --quiet`.
-     2. SSHes into the student's live Cloud Shell VM to inspect existing files, starter code, GCS bucket contents, CLI `--help` output, and live Qwiklabs grader audit checks.
-     3. Synthesizes and executes a single stateful bash script using the latest dynamically resolved Gemini model (`gemini-3.8-flash` / `gemini-3.5-flash`) covering both prose code edits and CLI commands.
-     4. Clicks **Check my progress** and, if any assessment check fails, feeds the grader's error message + grader audit log filter + `stdout`/`stderr` back into Gemini for up to **4 self-healing retries**.
-   - *Note on Edge Cases*: If Google's login screen presents a visual reCAPTCHA challenge for a newly provisioned `student-xx@qwiklabs.net` account, signing into the Incognito GCP Console window once in Chrome clears the challenge. If a lab requires interacting with an external non-GCP third-party SaaS site, use **Step-by-Step** mode or the **Live Operator Override** box.
+### Operator Workflow: Running Any Lab End-to-End in 3 Steps
+1. **Step 1 — Sign In & Connect Mac Bridge**:
+   - Sign into your Google Cloud Skills Boost / Partner Skills account in your normal desktop Google Chrome browser.
+   - In the Skills Runner UI, click **Start Mac Bridge** and either run the 1-line terminal command (`curl -fsSL .../api/bridge/start.sh | sh`) or double-click `Start-Mac-Chrome-Bridge.command`.
+2. **Step 2 — Point at Your Self-Signed-In Lab Page**:
+   - Select your open Lab Instructions tab from the **Step 2** dropdown (auto-detected from your normal Chrome window) or paste the Lab URL.
+3. **Step 3 — Click "Start & Run Lab"**:
+   - Click **Start & Run Lab**. Skills Runner autonomously executes the entire lifecycle without requiring any manual window management:
+     1. Clicks **Start Lab** in your signed-in Lab tab (if not already started) and waits for Qwiklabs to provision the temporary student credentials (`username`, `password`, `projectId`).
+     2. **Spawns a clean Incognito window in Chrome on your Mac**, signs in as the temporary lab student account (`student-...@qwiklabs.net`), accepts the Google Workspace new-account consent & GCP Console Terms of Service, and opens both the **GCP Console** tab and **Cloud Shell** tab.
+     3. Completes student `gcloud` OAuth authentication directly on your Mac inside the student Incognito session and inspects the student's Cloud Shell workspace (`~`), starter code, project GCS buckets, and Qwiklabs grader audit checks.
+     4. Synthesizes and executes stateful bash/Python solutions for each task and triggers **"Check my progress"** after every task (with up to 4 self-healing retries) until all progress checks are verified.
 
 ---
 
@@ -111,7 +109,8 @@ skills-runner/
 | `/api/chrome/focus` | `POST` | `{ "key": "win:tab" }` | Brings a specific Chrome window and tab to the foreground |
 | `/api/lab/open` | `POST` | `{ "url": "https://..." }` | Opens a Lab URL in Chrome and parses instructions |
 | `/api/lab/parse` | `POST` | `{}` | Syncs the bound Lab tab DOM, parses tasks/credentials, and polls live assessment scores |
-| `/api/lab/start-and-signin` | `POST` | `{}` | Clicks "Start Lab", extracts student credentials, opens an Incognito window, and signs into GCP Console |
+| `/api/lab/start-and-signin` | `POST` | `{}` | Clicks "Start Lab", extracts student credentials, spawns an Incognito window on the Mac, and signs into GCP Console |
+| `/api/lab/start-and-run` | `POST` | `{ "labTabKey": "win:tab", "url": "https://..." }` | Unified 1-click pipeline: binds/opens the lab tab, starts the lab, spawns the student Incognito session, runs all tasks, and verifies progress checks |
 | `/api/lab/run` | `POST` | `{ "singleStep": false }` | Starts or resumes the autonomous task execution & verification loop |
 | `/api/lab/pause` | `POST` | `{}` | Pauses the active execution loop |
 | `/api/lab/skip-step` | `POST` | `{}` | Skips the currently active step |
@@ -121,11 +120,13 @@ skills-runner/
 | `/api/lab/override` | `POST` | `{ "instruction": "..." }` | Queues a live operator override instruction for the next synthesis turn |
 | `/api/lab/credentials` | `POST` | `{ "projectId": "...", "region": "..." }` | Manually updates or overrides extracted lab credentials and re-interpolates commands |
 | `/api/lab/check-progress` | `POST` | `{ "taskNumber": 1 }` | Triggers "Check my progress" for a specific task and updates task/total scores |
+| `/api/lab/check-all-progress` | `POST` | `{}` | Triggers "Check my progress" across all graded tasks in the lab |
 | `/api/lab/cloud-shell-cmd` | `POST` | `{ "command": "..." }` | Executes a command directly in the student's Cloud Shell environment |
 | `/api/lab/antigravity-prompt` | `POST` | `{ "prompt": "..." }` | Injects a prompt into Antigravity in the Cloud Console |
-| `/api/bridge/status` | `GET` | — | Returns `{ connected, wsUrl, httpBase }` for the local Mac Chrome Bridge |
-| `/api/bridge/stop` | `POST` | `{}` | Cleanly terminates the connected local `macBridgeAgent.ts` process |
-| `/api/bridge/macBridgeAgent.ts` | `GET` | — | Serves the latest `macBridgeAgent.ts` pre-configured with the Cloud Run `wss://` endpoint |
+| `/api/bridge/status` | `GET` | — | Returns `{ connected, canStartLocally, wsUrl, httpBase }` for the local Mac Chrome Bridge |
+| `/api/bridge/start` | `POST` | `{}` | Launches `macBridgeAgent` directly when the server is running locally on macOS |
+| `/api/bridge/stop` | `POST` | `{}` | Cleanly terminates the connected local `macBridgeAgent` process |
+| `/api/bridge/macBridgeAgent.mjs` | `GET` | — | Serves the latest `macBridgeAgent` (`.mjs` / `.ts`) pre-configured with the server's `ws://` or `wss://` endpoint |
 | `/api/bridge/Start-Mac-Chrome-Bridge.command` | `GET` | — | Downloads the 1-click macOS launcher (`Start-Mac-Chrome-Bridge.command`) that syncs into `~/Downloads/skill-runner/` |
 
 ---
