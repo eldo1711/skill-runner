@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { Browser, BrowserContext, chromium, Page } from 'playwright';
 import {
   ChromeTabDescriptor,
@@ -52,6 +55,9 @@ import {
 } from './geminiClient.js';
 import { macBridgeHub } from './macBridgeHub.js';
 
+const LOCAL_STATE_DIR = path.join(os.homedir(), '.cloud-skills-lab-runner');
+const LOCAL_STATE_FILE = path.join(LOCAL_STATE_DIR, 'runner_state.json');
+
 export class LabBrowserOrchestrator {
   private labPreviewBrowser: Browser | null = null;
   private labContext: BrowserContext | null = null;
@@ -64,6 +70,7 @@ export class LabBrowserOrchestrator {
   private state: RunnerState;
   private listeners: Set<(state: RunnerState) => void> = new Set();
   private screenshotTimer: NodeJS.Timeout | null = null;
+  private persistTimer: NodeJS.Timeout | null = null;
   private isLoopRunning = false;
   private pauseRequested = false;
   private pendingOverrideInstruction: string = '';
@@ -106,6 +113,9 @@ export class LabBrowserOrchestrator {
       macBridgeConnected: process.platform === 'darwin' || macBridgeHub.isConnected(),
     };
 
+    // Restore persisted state from disk on startup if available
+    this.restoreSavedState().catch(() => {});
+
     macBridgeHub.onConnectionChange((connected) => {
       this.state.macBridgeConnected = process.platform === 'darwin' || connected;
       if (connected) {
@@ -114,7 +124,11 @@ export class LabBrowserOrchestrator {
           'system',
           'Live Mac Chrome Bridge connected (Passive Mode) — open Chrome tabs synced. Click "Bind Selected Windows & Sync Lab" when ready.'
         );
-        this.scanOpenChromeWindows(false).catch(() => {});
+        this.restoreSavedState()
+          .catch(() => {})
+          .finally(() => {
+            this.scanOpenChromeWindows(false).catch(() => {});
+          });
       } else {
         if (process.platform !== 'darwin') {
           this.state.availableChromeTabs = [];
@@ -140,6 +154,122 @@ export class LabBrowserOrchestrator {
       .catch(() => {});
   }
 
+  private getSerializableState(): Partial<RunnerState> {
+    return {
+      status: this.state.status === 'running_autonomous' ? 'paused' : this.state.status,
+      executionMode: this.state.executionMode,
+      labUrl: this.state.labUrl,
+      labTitle: this.state.labTitle,
+      labTimer: this.state.labTimer,
+      isLabStarted: this.state.isLabStarted,
+      isConsoleSignedIn: this.state.isConsoleSignedIn,
+      labInstanceId: this.state.labInstanceId,
+      totalScore: this.state.totalScore,
+      maxScore: this.state.maxScore,
+      credentials: this.state.credentials,
+      tasks: this.state.tasks,
+      activeTaskId: this.state.activeTaskId,
+      activeStepId: this.state.activeStepId,
+      labCurrentUrl: this.state.labCurrentUrl,
+      consoleCurrentUrl: this.state.consoleCurrentUrl,
+      logs: (this.state.logs || []).slice(0, 120),
+      lastThought: this.state.lastThought,
+      selectedLabTabKey: this.state.selectedLabTabKey,
+      selectedConsoleTabKey: this.state.selectedConsoleTabKey,
+      selectedCloudShellTabKey: this.state.selectedCloudShellTabKey,
+      activeModel: this.state.activeModel,
+    };
+  }
+
+  private scheduleStateSave() {
+    if (!this.state.labUrl && this.state.tasks.length === 0) return;
+    if (this.persistTimer) clearTimeout(this.persistTimer);
+    this.persistTimer = setTimeout(() => {
+      this.saveStateManual(true).catch(() => {});
+    }, 1200);
+  }
+
+  public async saveStateManual(silent = false): Promise<{
+    ok: boolean;
+    savedAt: string;
+    path: string;
+  }> {
+    const savedAt = new Date().toISOString();
+    const serializable = this.getSerializableState();
+    let targetPath = LOCAL_STATE_FILE;
+
+    try {
+      fs.mkdirSync(LOCAL_STATE_DIR, { recursive: true });
+      fs.writeFileSync(
+        LOCAL_STATE_FILE,
+        JSON.stringify({ savedAt, state: serializable }, null, 2),
+        'utf8'
+      );
+    } catch {
+      // Ignore local write error in read-only environments
+    }
+
+    if (process.platform !== 'darwin' && macBridgeHub.isConnected()) {
+      try {
+        const res = await macBridgeHub.invoke<any>(
+          'save_state',
+          { state: serializable },
+          10000
+        );
+        if (res?.path) targetPath = res.path;
+      } catch {
+        // Ignore bridge save timeout
+      }
+    }
+
+    if (!silent) {
+      this.addLog(
+        'success',
+        'system',
+        `Saved Skills Runner state (${this.state.labTitle || 'Active Session'} — ${this.state.totalScore ?? 0}/${this.state.maxScore ?? 100} pts) to ${targetPath}.`
+      );
+    }
+
+    return { ok: true, savedAt, path: targetPath };
+  }
+
+  private async restoreSavedState(): Promise<boolean> {
+    if (this.state.tasks.length > 0 && this.state.labTitle) {
+      return false;
+    }
+
+    let loadedPayload: any = null;
+    if (process.platform !== 'darwin' && macBridgeHub.isConnected()) {
+      try {
+        loadedPayload = await macBridgeHub.invoke<any>('load_state', {}, 8000);
+      } catch {
+        // Fall through to local file
+      }
+    }
+
+    if (!loadedPayload && fs.existsSync(LOCAL_STATE_FILE)) {
+      try {
+        loadedPayload = JSON.parse(fs.readFileSync(LOCAL_STATE_FILE, 'utf8'));
+      } catch {
+        // Ignore corrupt state file
+      }
+    }
+
+    const saved = loadedPayload?.state;
+    if (!saved || (!saved.labUrl && (!Array.isArray(saved.tasks) || saved.tasks.length === 0))) {
+      return false;
+    }
+
+    this.state = {
+      ...this.state,
+      ...saved,
+      activeModel: this.state.activeModel || saved.activeModel || getActiveGeminiModel(),
+      macBridgeConnected: process.platform === 'darwin' || macBridgeHub.isConnected(),
+    };
+    this.emitState();
+    return true;
+  }
+
   public subscribe(listener: (state: RunnerState) => void): () => void {
     this.listeners.add(listener);
     listener(this.state);
@@ -158,6 +288,7 @@ export class LabBrowserOrchestrator {
         // Ignore broken socket listener
       }
     }
+    this.scheduleStateSave();
   }
 
   public addLog(
@@ -1091,7 +1222,7 @@ export class LabBrowserOrchestrator {
             }
           }
 
-          const maxAttempts = task.hasCheckProgress ? 3 : 2;
+          const maxAttempts = task.hasCheckProgress ? 4 : 2;
           let previousErrorMessage: string | undefined;
           let previousScriptOutput: string | undefined;
 

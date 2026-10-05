@@ -37,6 +37,7 @@ const CLOUD_RUN_WS_URL =
 const SNAPSHOT_DIR = path.join(os.homedir(), '.cloud-skills-lab-runner');
 const SNAPSHOT_HTML_PATH = path.join(SNAPSHOT_DIR, 'live_lab_snapshot.html');
 const SNAPSHOT_FILES_DIR = path.join(SNAPSHOT_DIR, 'live_lab_snapshot_files');
+const STATE_FILE_PATH = path.join(SNAPSHOT_DIR, 'runner_state.json');
 
 async function runAppleScript(script, timeoutMs = 35000) {
   const { stdout } = await execFileAsync('osascript', ['-e', script], {
@@ -1182,6 +1183,21 @@ async function connectBridge() {
             params.preferredUrl,
             params.preferredTarget
           );
+        } else if (method === 'save_state') {
+          fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
+          const payload = {
+            savedAt: new Date().toISOString(),
+            state: params.state || {},
+          };
+          fs.writeFileSync(STATE_FILE_PATH, JSON.stringify(payload, null, 2), 'utf8');
+          result = { ok: true, savedAt: payload.savedAt, path: STATE_FILE_PATH };
+        } else if (method === 'load_state') {
+          if (fs.existsSync(STATE_FILE_PATH)) {
+            const raw = fs.readFileSync(STATE_FILE_PATH, 'utf8');
+            result = JSON.parse(raw);
+          } else {
+            result = null;
+          }
         } else if (method === 'shutdown') {
           shuttingDown = true;
           if (pingTimer) clearInterval(pingTimer);

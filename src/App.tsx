@@ -529,6 +529,30 @@ export default function App() {
               </div>
             )}
 
+            {/* Save State Button */}
+            <button
+              type="button"
+              onClick={async () => {
+                await apiPost('/api/state/save');
+                setCopiedField('save_state');
+                setTimeout(() => setCopiedField(null), 2000);
+              }}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition"
+              title="Save current lab state, tasks, scores, and Chrome bindings to disk"
+            >
+              {copiedField === 'save_state' ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="text-emerald-300">State Saved</span>
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Save State</span>
+                </>
+              )}
+            </button>
+
             {/* Execution Mode Switch */}
             <div className="inline-flex rounded-lg bg-slate-950 p-1 border border-slate-800">
               <button

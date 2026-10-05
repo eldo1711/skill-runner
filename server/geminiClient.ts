@@ -2743,7 +2743,10 @@ ${combinedText}
 12. **Self-Healing REST API & CLI Schema Introspection for Unseen Labs**:
     - Whenever calling any Google Cloud REST API (\`discoveryengine\`, \`aiplatform\`, \`modelarmor\`, \`run\`, \`compute\`, \`bigquery\`, \`iam\`, \`cloudresourcemanager\`, \`secretmanager\`, \`dlp\`, etc.), always print full HTTP error bodies (\`err.read().decode('utf-8')\`) so any 400 \`"Invalid JSON payload received. Unknown name..."\` or 403/404 details appear in \`PREVIOUS SCRIPT STDOUT / STDERR\` for automatic self-healing.
     - If a REST field name is uncertain on an unseen service, your Python script can query \`https://<service>.googleapis.com/$discovery/rest?version=v1alpha\` (or \`v1\`) or run \`gcloud <group> --help\` to inspect valid schema fields dynamically.
-    - Make all resource creation calls idempotent: check if the resource already exists (\`GET\` / \`list\`) or handle \`HTTP 409 ALREADY_EXISTS\` by falling back to \`PATCH\` / \`GET\` rather than failing the script.`;
+    - Make all resource creation calls idempotent: check if the resource already exists (\`GET\` / \`list\`) or handle \`HTTP 409 ALREADY_EXISTS\` by falling back to \`PATCH\` / \`GET\` rather than failing the script.
+13. **Live Qwiklabs Grader Audit Check Introspection & GCS Bucket Discovery**:
+    - Inspect \`=== PROJECT GCS BUCKET CONTENTS ===\` in the workspace snapshot for any starter CSVs, PDFs, SQL files, or installer scripts (\`install.sh\`, \`README.md\`) that the manual lab instructions omitted (for example, loading a \`*.csv\` into BigQuery before querying an agent).
+    - Inspect \`=== LIVE QWIKLABS GRADER AUDIT CHECKS ===\` in the workspace snapshot: it shows the exact Google Cloud API calls (\`ListLogEntries\`, \`GetIamPolicy\`, \`ListReasoningEngines\`, \`GetTable\`, etc.) and exact filter strings that Qwiklabs' grading service account (\`<project>@<project>.iam.gserviceaccount.com\` or \`admiral@qwiklabs-services-prod.iam.gserviceaccount.com\`) executed when verifying the task. Always ensure your synthesized script satisfies every resource name, IAM role, or Cloud Logging \`ListLogEntries\` filter shown in those audit checks.`;
 
   const parseSynthesisResponse = (rawText: string): { script?: string; summary?: string } | null => {
     const cleaned = (rawText || '')

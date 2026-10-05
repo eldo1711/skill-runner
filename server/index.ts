@@ -69,6 +69,16 @@ app.get('/api/state', (_req, res) => {
   res.json(orchestrator.getState());
 });
 
+// Save current runner state to disk / Mac Bridge
+app.post('/api/state/save', async (_req, res) => {
+  try {
+    const result = await orchestrator.saveStateManual(false);
+    res.json({ ...result, state: orchestrator.getState() });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || String(err) });
+  }
+});
+
 // 1. Open Lab URL in Main Lab Chrome Window
 app.post('/api/lab/open', async (req, res) => {
   try {
