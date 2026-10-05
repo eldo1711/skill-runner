@@ -1732,6 +1732,9 @@ async function execInStudentCloudShell(username, projectId, command, timeoutMs =
       ? `export GOOGLE_CLOUD_PROJECT="${projectId}"; export DEVSHELL_PROJECT_ID="${projectId}"; `
       : '';
     const envPrefix = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1; ${projExport}${driveExport}`;
+    const fullScript = `${envPrefix}\n${command}`;
+    const b64Script = Buffer.from(fullScript, 'utf8').toString('base64');
+    const remoteCmd = `echo ${b64Script} | base64 -d | bash`;
     const { stdout, stderr } = await execFileAsync(
       'gcloud',
       [
@@ -1742,7 +1745,7 @@ async function execInStudentCloudShell(username, projectId, command, timeoutMs =
         '--ssh-flag=-oProxyCommand=none',
         '--ssh-flag=-oStrictHostKeyChecking=no',
         '--ssh-flag=-oUserKnownHostsFile=/dev/null',
-        `--command=${envPrefix}${command}`,
+        `--command=${remoteCmd}`,
         '--quiet',
       ],
       {

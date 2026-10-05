@@ -414,7 +414,7 @@ async function runVerificationTests() {
   );
   if (
     primaryInterpolated !==
-    'PROJECT_ID=qwiklabs-gcp-02-44b374896675 MODEL=gemini-2.5-flash'
+    'PROJECT_ID=qwiklabs-gcp-02-44b374896675 MODEL=gemini-3.5-flash'
   ) {
     throw new Error(`primary_project interpolation failed: ${primaryInterpolated}`);
   }
@@ -445,6 +445,23 @@ async function runVerificationTests() {
     );
   }
   console.log('✓ Challenge lab overview filtering & primary_project.* interpolation verified.');
+
+  // 11. Verify WB_HELPER_PY_B64 in nativeChromeBridge.ts compiles cleanly in Python and auto-repairs notebook TODO cells
+  const { WB_HELPER_PY_B64 } = await import('./nativeChromeBridge.js');
+  const decodedWbPy = Buffer.from(WB_HELPER_PY_B64, 'base64').toString('utf8');
+  const tmpWbPy = pathMod.join('/tmp', `wb_helper_test_${Date.now()}.py`);
+  fsMod.writeFileSync(tmpWbPy, decodedWbPy, 'utf8');
+  try {
+    await execFileAsync('python3', [
+      '-c',
+      `import ast, sys; sys.path.insert(0, '/tmp'); mod_name = '${pathMod.basename(tmpWbPy, '.py')}'; wb = __import__(mod_name); cells = [{'cell_type': 'code', 'source': 'rouge_eval_task = EvalTask(\\n    #[ TODO - Insert your code ]\\n    dataset=\\n    metrics=\\n)\\nrouge_result = rouge_eval_task.evaluate(\\n    #[ TODO - Insert your code ]\\n    model=\\n    prompt_template="# System_prompt\\\\n{system_prompt} # Question\\\\n{question}",\\n)'}, {'cell_type': 'code', 'source': 'pointwise_result = EvalTask(\\n    #[ TODO - Insert your code ]\\n    dataset=\\n    metrics=\\n).evaluate(\\n    model=\\n    prompt_template="# System_prompt\\\\n{system_prompt} # Question\\\\n{question}",\\n)'}, {'cell_type': 'code', 'source': 'summarization_helpfulness_metric = PointwiseMetric(\\n    metric="summarization_helpfulness",\\n    metric_prompt_template=PointwiseMetricPromptTemplate(\\n        criteria={\\n            #[ TODO - Insert your code - Add the Conciseness. ]\\n            "Key Information": "info"\\n        },\\n        rating_rubric={\\n            #[ TODO - Insert your code ]\\n            "4": "Good"\\n        },\\n        input_variables=["prompt", "reference"],\\n    ),\\n)'}, {'cell_type': 'code', 'source': 'pointwise_result = EvalTask(\\n    #[ TODO - Insert your code ]\\n    dataset=\\n    metrics=\\n).evaluate(\\n    model=\\n    prompt_template="# System_prompt\\\\n{system_prompt} # Question\\\\n{question}",\\n)'}];\nfor idx, c in enumerate(cells):\n    fixed = wb._auto_repair_cell_source(idx, c['source'], cells)\n    assert 'TODO' not in fixed, f'Residual TODO in cell {idx}: {fixed}'\n    ast.parse(fixed)\nassert 'summarization_helpfulness_metric' in wb._auto_repair_cell_source(3, cells[3]['source'], cells)\n`,
+    ]);
+  } finally {
+    try {
+      fsMod.unlinkSync(tmpWbPy);
+    } catch {}
+  }
+  console.log('✓ wb_helper.py Python syntax and notebook TODO auto-repair verified.');
 
   await browser.close();
   console.log('✅ All verification tests passed!');

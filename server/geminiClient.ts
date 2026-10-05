@@ -142,13 +142,13 @@ export function interpolateLabVariables(
     /\{\{\{\s*(?:project_0|primary_project)\.startup_script\.gemini_flash_model_id[^}]*\}\}\}/gi,
     creds.extraVars?.['primary_project.startup_script.gemini_flash_model_id'] ||
       creds.extraVars?.['project_0.startup_script.gemini_flash_model_id'] ||
-      'gemini-2.5-flash'
+      'gemini-3.5-flash'
   );
   result = result.replace(
     /\{\{\{\s*(?:project_0|primary_project)\.startup_script\.gemini_flash_lite_model_id[^}]*\}\}\}/gi,
     creds.extraVars?.['primary_project.startup_script.gemini_flash_lite_model_id'] ||
       creds.extraVars?.['project_0.startup_script.gemini_flash_lite_model_id'] ||
-      'gemini-2.5-flash-lite'
+      'gemini-3.5-flash-lite'
   );
 
   // Resolve any {{{ variable | default_value }}} templates using the pipe default if not in extraVars
@@ -2689,7 +2689,7 @@ Synthesize a single, idempotent, stateful, non-interactive bash script (to be ex
 - Student Username: ${credentials.username}
 - Extra Variables: ${JSON.stringify(credentials.extraVars || {})}
 ${allTasksSummary ? `\n### ALL LAB TASKS OVERVIEW (FOR CONTEXT ON DIRECTORY & ENVIRONMENT SETUP)\n${allTasksSummary}\n` : ''}
-${workspaceSnapshot ? `\n### LIVE STUDENT CLOUD SHELL WORKSPACE SNAPSHOT (CURRENT FILES, STARTER CODE & CLI HELP)\n${workspaceSnapshot.slice(0, 48000)}\n` : ''}
+${workspaceSnapshot ? `\n### LIVE STUDENT CLOUD SHELL WORKSPACE SNAPSHOT (CURRENT FILES, STARTER CODE & CLI HELP)\n${workspaceSnapshot.slice(0, 80000)}\n` : ''}
 ${previousErrorMessage ? `\n### PREVIOUS "CHECK MY PROGRESS" GRADER FEEDBACK TO FIX (HIGHEST PRIORITY)\n"${previousErrorMessage}"\n` : ''}
 ${previousScriptOutput ? `\n### PREVIOUS SCRIPT STDOUT / STDERR\n${previousScriptOutput.slice(-6000)}\n` : ''}
 ${matchedFastPath ? `\n### PREVIOUS ATTEMPT SCRIPT (ADAPT AND FIX THIS SCRIPT TO RESOLVE THE GRADER FEEDBACK ABOVE)\n\`\`\`bash\n${matchedFastPath.script}\n\`\`\`\n` : ''}
@@ -2751,7 +2751,7 @@ ${combinedText}
 14. **Vertex AI Workbench / JupyterLab Notebook (\`.ipynb\`) Challenge Labs (e.g., \`evaluation.ipynb\`)**:
     - When \`=== VERTEX AI WORKBENCH NOTEBOOK: <filename> ===\` appears in \`LIVE STUDENT CLOUD SHELL WORKSPACE SNAPSHOT\`, the notebook lives on a Vertex AI Workbench instance (\`/home/jupyter/<filename>\`).
     - A pre-authenticated helper module \`/tmp/wb_helper.py\` is already installed in your execution environment and connects directly to the Workbench instance's live Jupyter Server & IPython kernel over HTTPS port 443 (\`https://<proxyUri>\`).
-    - Use \`/tmp/wb_helper.py\` in Python to patch any \`# TODO\` code cells by their 0-based cell index (shown as \`[Cell N | code]\` in the snapshot), execute all code cells up through the current task in the Workbench VM's live IPython kernel, populate each cell's \`outputs\` and \`execution_count\`, and save \`/home/jupyter/<filename>\` on the Workbench VM:
+    - Use \`/tmp/wb_helper.py\` in Python to patch any \`# TODO\` code cells by their 0-based cell index (shown as \`[Cell N | code | exec=... | outputs=...]\` in the snapshot), execute all code cells up through the current task in the Workbench VM's live IPython kernel, populate each cell's \`outputs\` and \`execution_count\`, and save \`/home/jupyter/<filename>\` on the Workbench VM:
       \`\`\`python
       import sys
       sys.path.insert(0, "/tmp")
@@ -2760,21 +2760,27 @@ ${combinedText}
       res = wb_helper.update_and_run_notebook(
           path="evaluation.ipynb",
           cell_patches={
-              # Map 0-based cell index -> complete replacement Python source for that cell:
-              5: """# Complete Python code replacing TODO in Cell 5""",
+              # Map 0-based cell index -> complete replacement Python source for that cell (REMOVE any #[ TODO ... ] lines):
+              16: """rouge_eval_task = EvalTask(
+          dataset=dataset,
+          metrics=["rouge_l_sum"],
+      )
+      rouge_result = rouge_eval_task.evaluate(
+          model=model,
+          prompt_template="# System_prompt\\n{system_prompt} # Question\\n{question}",
+      )""",
           },
-          run_through_cell=12,  # 0-based index of the last cell for the current task
+          run_through_cell=18,  # 0-based index of the last cell for the current task
       )
       print(res.get("stdout", ""))
       if not res.get("ok", False):
           raise SystemExit(res.get("stderr", "Workbench notebook execution failed"))
       \`\`\`
-    - You can also run arbitrary Python code or shell commands directly inside the Workbench VM's persistent IPython kernel using \`wb_helper.exec_on_workbench(python_code_str)\`.
     - CRITICAL for Workbench Notebook Labs:
-      1. Inspect the exact \`[Cell <N> | code]\` indices and surrounding markdown instructions in \`=== VERTEX AI WORKBENCH NOTEBOOK ===\`.
-      2. Replace every \`# TODO\` / placeholder in the cells required for the current task (and any earlier setup cells if not yet executed) with complete, working Python code that uses the exact variable names, prompt templates, model IDs (e.g., \`gemini-3.5-flash\`, \`gemini-3.5-flash-lite\` from Extra Variables), metric objects (\`MetricPromptTemplateExamples.Pointwise.SUMMARIZATION_QUALITY\`, \`QUESTION_ANSWERING_QUALITY\`, \`GROUNDEDNESS\`, \`rouge\`, \`bleu\`, \`exact_match\`, etc.), and \`experiment\` names specified in the notebook and task instructions.
-      3. Set \`run_through_cell\` to the last cell index belonging to the current task so unpatched \`# TODO\` cells from future tasks are not executed prematurely.
-      4. Always ensure \`wb_helper.update_and_run_notebook(...)\` saves the notebook with populated cell \`outputs\` and \`execution_count\` before the task script exits, because Qwiklabs requires the notebook to be saved before clicking "Check my progress".`;
+      1. Inspect the exact \`[Cell <N> | code | exec=...]\` indices and surrounding markdown instructions in \`=== VERTEX AI WORKBENCH NOTEBOOK ===\`.
+      2. Remove all \`#[ TODO ... ]\` comments from patched cells, and use the exact variable names and metric names expected by downstream cells in the notebook (for example: in Task 3 Cell 22 use \`metrics=[POINTWISE_METRIC]\` so Cell 26 \`display_explanations(pointwise_result, num=1, metrics=[POINTWISE_METRIC])\` succeeds; in Task 5 Cell 34/36 set \`PAIRWISE_METRIC_NAME = "pairwise_summarization_quality"\` and \`metric_prompt_template=MetricPromptTemplateExamples.get_prompt_template(PAIRWISE_METRIC_NAME)\`; in Task 6 Cell 40 add \`"context": context,\` to \`eval_dataset\`, in Cell 42 add \`"rouge_l_sum", "bleu", "coherence",\` to \`metrics\`, in Cell 44 set \`prompt_template=prompt_template,\`, and set \`run_through_cell=54\` so all evaluation and visualization cells 40..54 execute and save).
+      3. Never write raw unquoted English prose into Python code (if copying multi-line rubric strings, ensure all strings are properly quoted).
+      4. \`wb_helper.update_and_run_notebook(...)\` automatically handles \`Cell 5\` kernel restarts, reuses the active kernel across tasks, skips already-executed cells from previous tasks, and saves the notebook after each cell.`;
 
   const parseSynthesisResponse = (rawText: string): { script?: string; summary?: string } | null => {
     const cleaned = (rawText || '')

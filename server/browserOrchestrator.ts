@@ -1412,9 +1412,9 @@ export class LabBrowserOrchestrator {
                   `Task #${task.number} Cloud Shell stdout: ${sshRes.stdout.slice(-400)}`
                 );
               }
-              if (!sshRes.ok && sshRes.stderr) {
+              if (sshRes.stderr) {
                 this.addLog(
-                  'warn',
+                  sshRes.ok ? 'info' : 'warn',
                   'cloud_shell',
                   `Task #${task.number} Cloud Shell stderr: ${sshRes.stderr.slice(-400)}`
                 );
@@ -1481,11 +1481,18 @@ export class LabBrowserOrchestrator {
           }
 
           if (task.status !== 'completed') {
-            for (const s of task.steps) {
-              if (s.status === 'running') s.status = 'completed';
-            }
-            if (!task.hasCheckProgress) {
-              task.status = 'completed';
+            if (task.hasCheckProgress && !task.progressVerified) {
+              task.status = 'failed';
+              for (const s of task.steps) {
+                if (s.status === 'running') s.status = 'failed';
+              }
+            } else {
+              for (const s of task.steps) {
+                if (s.status === 'running') s.status = 'completed';
+              }
+              if (!task.hasCheckProgress) {
+                task.status = 'completed';
+              }
             }
           }
           this.emitState();
@@ -1561,8 +1568,20 @@ export class LabBrowserOrchestrator {
         this.emitState();
       }
 
-      this.setStatus('completed');
-      this.addLog('success', 'system', 'All lab tasks and steps have been completed!');
+      const unverifiedGradable = this.state.tasks.filter(
+        (t) => t.hasCheckProgress && !t.progressVerified
+      );
+      if (unverifiedGradable.length > 0) {
+        this.setStatus('paused');
+        this.addLog(
+          'warn',
+          'system',
+          `Execution pass finished with ${unverifiedGradable.length} unverified progress check(s) (Score: ${this.state.totalScore ?? 0}/${this.state.maxScore ?? 100}). Click "Start & Run Lab" to retry remaining tasks.`
+        );
+      } else {
+        this.setStatus('completed');
+        this.addLog('success', 'system', 'All lab tasks and steps have been completed!');
+      }
     } catch (err: any) {
       this.setStatus('error');
       this.addLog('error', 'system', `Execution loop error: ${err?.message || String(err)}`);

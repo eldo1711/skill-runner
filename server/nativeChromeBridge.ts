@@ -1654,9 +1654,16 @@ export async function execInStudentCloudShellBridge(
   };
 
   try {
-    const envPrefix = hostAccessToken
+    const projExport = projectId
+      ? `export GOOGLE_CLOUD_PROJECT="${projectId}"; export DEVSHELL_PROJECT_ID="${projectId}"; `
+      : '';
+    const driveExport = hostAccessToken
       ? `export DRIVE_ACCESS_TOKEN="${hostAccessToken}"; `
       : '';
+    const envPrefix = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1; ${projExport}${driveExport}`;
+    const fullScript = `${envPrefix}\n${command}`;
+    const b64Script = Buffer.from(fullScript, 'utf8').toString('base64');
+    const remoteCmd = `echo ${b64Script} | base64 -d | bash`;
     const { stdout, stderr } = await execFileAsync(
       'gcloud',
       [
@@ -1667,7 +1674,7 @@ export async function execInStudentCloudShellBridge(
         '--ssh-flag=-oProxyCommand=none',
         '--ssh-flag=-oStrictHostKeyChecking=no',
         '--ssh-flag=-oUserKnownHostsFile=/dev/null',
-        `--command=${envPrefix}${command}`,
+        `--command=${remoteCmd}`,
         '--quiet',
       ],
       {
@@ -1723,8 +1730,10 @@ export async function execInStudentCloudShellBridge(
   }
 }
 
-const WB_HELPER_PY_B64 = Buffer.from(
-  `import os, sys, json, time, uuid, struct, socket, ssl, base64, subprocess, urllib.request
+export const WB_HELPER_PY_B64 = Buffer.from(
+  `import os, sys, re, json, time, uuid, struct, socket, ssl, base64, subprocess, urllib.request
+
+_SSL_CTX = ssl._create_unverified_context()
 
 def _get_token():
     tok = subprocess.getoutput("gcloud auth print-access-token 2>/dev/null").strip()
@@ -1748,7 +1757,7 @@ def get_proxy_uri(project_id=None):
         url = f"https://notebooks.googleapis.com/{api_ver}/projects/{proj}/locations/-/instances"
         try:
             req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
-            with urllib.request.urlopen(req, timeout=12) as r:
+            with urllib.request.urlopen(req, context=_SSL_CTX, timeout=15) as r:
                 data = json.loads(r.read().decode("utf-8", errors="replace"))
             for inst in data.get("instances", []):
                 uri = inst.get("proxyUri")
@@ -1758,7 +1767,7 @@ def get_proxy_uri(project_id=None):
             pass
     return None
 
-def _jupyter_req(host, path, method="GET", body=None, timeout=20):
+def _jupyter_req(host, path, method="GET", body=None, timeout=30):
     tok = _get_token()
     url = f"https://{host}/{path.lstrip('/')}"
     headers = {"Authorization": f"Bearer {tok}"}
@@ -1767,7 +1776,7 @@ def _jupyter_req(host, path, method="GET", body=None, timeout=20):
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.urlopen(req, context=_SSL_CTX, timeout=timeout) as r:
         raw = r.read().decode("utf-8", errors="replace")
         return json.loads(raw) if raw.strip() else {}
 
@@ -1786,7 +1795,8 @@ def list_notebooks(host=None):
                 for sub_item in sub.get("content", []):
                     if sub_item.get("name", "").endswith(".ipynb"):
                         out.append(f"{item['name']}/{sub_item['name']}")
-        return out
+        non_tmpl = [n for n in out if "template" not in n.lower()]
+        return non_tmpl if non_tmpl else out
     except Exception:
         return []
 
@@ -1794,18 +1804,22 @@ def read_notebook(notebook_path, host=None):
     host = host or get_proxy_uri()
     if not host:
         raise RuntimeError("No Vertex AI Workbench instance proxyUri found")
-    return _jupyter_req(host, f"/api/contents/{notebook_path.lstrip('/')}")
+    clean_path = str(notebook_path).replace("/home/jupyter/", "").lstrip("/")
+    return _jupyter_req(host, f"/api/contents/{clean_path}")
 
 def save_notebook(notebook_path, nb_content, host=None):
     host = host or get_proxy_uri()
     if not host:
         raise RuntimeError("No Vertex AI Workbench instance proxyUri found")
+    clean_path = str(notebook_path).replace("/home/jupyter/", "").lstrip("/")
+    if isinstance(nb_content, dict) and "content" in nb_content and "cells" not in nb_content:
+        nb_content = nb_content["content"]
     return _jupyter_req(
         host,
-        f"/api/contents/{notebook_path.lstrip('/')}",
+        f"/api/contents/{clean_path}",
         method="PUT",
         body={"type": "notebook", "format": "json", "content": nb_content},
-        timeout=30,
+        timeout=35,
     )
 
 def _recv_exact(sock, n):
@@ -1852,8 +1866,7 @@ def _ws_send_text(sock, text):
 def _open_kernel_ws(host, kernel_id, session_id, timeout=120):
     tok = _get_token()
     raw_sock = socket.create_connection((host, 443), timeout=timeout)
-    ctx = ssl.create_default_context()
-    sock = ctx.wrap_socket(raw_sock, server_hostname=host)
+    sock = _SSL_CTX.wrap_socket(raw_sock, server_hostname=host)
     ws_key = base64.b64encode(os.urandom(16)).decode("ascii")
     req = (
         f"GET /api/kernels/{kernel_id}/channels?session_id={session_id} HTTP/1.1\\r\\n"
@@ -1877,7 +1890,7 @@ def _open_kernel_ws(host, kernel_id, session_id, timeout=120):
         raise RuntimeError(f"WebSocket handshake failed: {resp[:200]!r}")
     return sock
 
-def _run_code_on_ws(sock, session_id, code_str, cell_timeout=180):
+def _run_code_on_ws(sock, session_id, code_str, cell_timeout=240):
     msg_id = uuid.uuid4().hex
     msg = {
         "header": {
@@ -1911,7 +1924,6 @@ def _run_code_on_ws(sock, session_id, code_str, cell_timeout=180):
         if opcode == 0x8:
             break
         if opcode == 0x9:
-            # Respond with pong
             pong = bytearray([0x8A, 0x80]) + os.urandom(4)
             sock.sendall(bytes(pong))
             continue
@@ -1958,12 +1970,21 @@ def _run_code_on_ws(sock, session_id, code_str, cell_timeout=180):
             got_idle = True
     return exec_count, outputs
 
-def exec_on_workbench(bash_cmd, timeout=180):
+def _get_or_create_kernel(host):
+    try:
+        kernels = _jupyter_req(host, "/api/kernels", method="GET")
+        if isinstance(kernels, list) and kernels:
+            return kernels[0]["id"]
+    except Exception:
+        pass
+    k = _jupyter_req(host, "/api/kernels", method="POST", body={"name": "python3"})
+    return k["id"]
+
+def exec_on_workbench(bash_cmd, timeout=240):
     host = get_proxy_uri()
     if not host:
         raise RuntimeError("No Vertex AI Workbench instance proxyUri found")
-    kernels = _jupyter_req(host, "/api/kernels", method="GET")
-    kernel_id = kernels[0]["id"] if isinstance(kernels, list) and kernels else _jupyter_req(host, "/api/kernels", method="POST", body={"name": "python3"})["id"]
+    kernel_id = _get_or_create_kernel(host)
     session_id = uuid.uuid4().hex
     sock = _open_kernel_ws(host, kernel_id, session_id, timeout=timeout)
     try:
@@ -1981,53 +2002,258 @@ def exec_on_workbench(bash_cmd, timeout=180):
     finally:
         sock.close()
 
-def update_and_run_notebook(notebook_path, cell_updates=None, cell_timeout=180):
-    host = get_proxy_uri()
-    if not host:
-        raise RuntimeError("No Vertex AI Workbench instance proxyUri found")
-    model = read_notebook(notebook_path, host=host)
-    nb = model["content"]
-    cells = nb.get("cells", [])
-    if cell_updates:
-        for idx_key, new_src in cell_updates.items():
-            idx = int(idx_key)
-            if 0 <= idx < len(cells):
-                cells[idx]["source"] = new_src
-    # Save updated source immediately before running
-    save_notebook(notebook_path, nb, host=host)
-    # Start a fresh kernel so all cells execute cleanly in sequence
-    k = _jupyter_req(host, "/api/kernels", method="POST", body={"name": "python3"})
-    kernel_id = k["id"]
-    session_id = uuid.uuid4().hex
-    sock = _open_kernel_ws(host, kernel_id, session_id, timeout=cell_timeout)
+def _auto_repair_cell_source(idx, src, cells):
+    if "PAIRWISE_METRIC_NAME = dropdown.value" in src and 'PAIRWISE_METRIC_NAME = "pairwise_summarization_quality"' not in src:
+        src = (
+            src.rstrip()
+            + '\\nif "pairwise_summarization_quality" in pairwise_single_turn_metrics:\\n'
+            + '    dropdown.value = "pairwise_summarization_quality"\\n'
+            + '    PAIRWISE_METRIC_NAME = "pairwise_summarization_quality"\\n'
+        )
+    has_todo = "TODO" in src
+    has_incomplete_kw = bool(re.search(r"(dataset|metrics|model|metric|metric_prompt_template|prompt_template)\\s*=\\s*(\\n|$)", src))
+    if not has_todo and not has_incomplete_kw:
+        return src
+    if "rouge_eval_task = EvalTask" in src and has_incomplete_kw:
+        return (
+            "# Define an EvalTask with ROUGE-L-SUM metric\\n"
+            "rouge_eval_task = EvalTask(\\n"
+            "    dataset=dataset,\\n"
+            '    metrics=["rouge_l_sum"],\\n'
+            ")\\n"
+            "rouge_result = rouge_eval_task.evaluate(\\n"
+            "    model=model,\\n"
+            '    prompt_template="# System_prompt\\\\n{system_prompt} # Question\\\\n{question}",\\n'
+            ")\\n"
+        )
+    if "summarization_helpfulness_metric = PointwiseMetric" in src and ("Conciseness" not in src or '"5"' not in src or '"1"' not in src):
+        return (
+            "# This new custom metric evaluates the actual quality and usefulness of the summary.\\n"
+            "summarization_helpfulness_metric = PointwiseMetric(\\n"
+            '    metric="summarization_helpfulness",\\n'
+            "    metric_prompt_template=PointwiseMetricPromptTemplate(\\n"
+            "        criteria={\\n"
+            '            "Key Information": "Does the summary capture the most critical pieces of information from the original text? It should not miss the main topic or key takeaways.",\\n'
+            '            "Conciseness": "Is the summary brief and to the point, avoiding unnecessary repetition or overly verbose language?",\\n'
+            '            "No Distortion": "Does the summary introduce information or opinions that were NOT present in the original text? It must accurately reflect the source material without adding hallucinations.",\\n'
+            "        },\\n"
+            "        rating_rubric={\\n"
+            '            "5": "Excellent: Captures all key information concisely with zero distortion.",\\n'
+            '            "4": "Good: Captures most key information with minor omissions, is concise, and has no distortion.",\\n'
+            '            "3": "Satisfactory: Captures the main idea but misses some key details OR is not very concise.",\\n'
+            '            "2": "Unsatisfactory: Misses the main idea of the original text OR contains minor distortions/hallucinations.",\\n'
+            '            "1": "Poor: Fails to capture key information, is overly verbose, or contains significant hallucinations or irrelevance.",\\n'
+            "        },\\n"
+            '        input_variables=["prompt", "reference"],\\n'
+            "    ),\\n"
+            ")\\n"
+        )
+    if "pointwise_result = EvalTask" in src and has_incomplete_kw:
+        recent_src = ""
+        for prev_i in range(max(0, idx - 4), idx):
+            ps = cells[prev_i].get("source", "")
+            if isinstance(ps, list):
+                ps = "".join(ps)
+            recent_src += "\\n" + ps
+        metric_expr = "[summarization_helpfulness_metric]" if "summarization_helpfulness_metric" in recent_src else "[POINTWISE_METRIC]"
+        return (
+            "pointwise_result = EvalTask(\\n"
+            "    dataset=dataset,\\n"
+            f"    metrics={metric_expr},\\n"
+            ").evaluate(\\n"
+            "    model=model,\\n"
+            '    prompt_template="# System_prompt\\\\n{system_prompt} # Question\\\\n{question}",\\n'
+            ")\\n"
+        )
+    if "pairwise_result = EvalTask" in src and has_incomplete_kw:
+        m_base = re.search(r'GenerativeModel\\(["\\x27]([^"\\x27]+)["\\x27]\\)', src)
+        base_model_id = m_base.group(1) if m_base else "gemini-3.5-flash-lite"
+        return (
+            'PAIRWISE_METRIC_NAME = "pairwise_summarization_quality"\\n'
+            "pairwise_result = EvalTask(\\n"
+            "    dataset=dataset,\\n"
+            "    metrics=[\\n"
+            "        PairwiseMetric(\\n"
+            "            metric=PAIRWISE_METRIC_NAME,\\n"
+            "            metric_prompt_template=MetricPromptTemplateExamples.get_prompt_template(\\n"
+            "                PAIRWISE_METRIC_NAME\\n"
+            "            ),\\n"
+            f'            baseline_model=GenerativeModel("{base_model_id}"),\\n'
+            "        )\\n"
+            "    ],\\n"
+            ").evaluate(\\n"
+            "    model=model,\\n"
+            '    prompt_template="# System_prompt\\\\n{system_prompt} # Question\\\\n{question}",\\n'
+            ")\\n"
+        )
+    if "eval_dataset = pd.DataFrame" in src and ("Add context" in src or '"context"' not in src):
+        src = re.sub(r"#\\s*\\[\\s*TODO[^\\n]*\\]", '"context": context,', src)
+        if '"context"' not in src:
+            src = src.replace('"instruction": instruction,', '"context": context,\\n        "instruction": instruction,')
+    if "summarization_eval_task = EvalTask" in src and ("TODO" in src or "rouge_l_sum" not in src):
+        src = re.sub(
+            r"#\\s*\\[\\s*TODO[^\\n]*\\]",
+            '"rouge_l_sum",\\n        "bleu",\\n        "coherence",',
+            src,
+        )
+    if "summarization_eval_task.evaluate" in src and ("TODO" in src or re.search(r"prompt_template\\s*=\\s*\\n", src)):
+        src = re.sub(r"#\\s*\\[\\s*TODO[^\\n]*\\]\\s*\\n?", "", src)
+        src = re.sub(r"prompt_template\\s*=\\s*\\n", "prompt_template=prompt_template,\\n", src)
+    src = re.sub(r"^\\s*#\\s*\\[\\s*TODO[^\\n]*\\]\\s*\\n?", "", src, flags=re.M)
+    return src
+
+def update_and_run_notebook(
+    path=None,
+    cell_patches=None,
+    run_through_cell=None,
+    notebook_path=None,
+    cell_updates=None,
+    cell_timeout=240,
+    **kwargs,
+):
+    stdout_lines = []
+    def _log(msg):
+        print(msg)
+        stdout_lines.append(str(msg))
+
     try:
-        for i, cell in enumerate(cells):
-            if cell.get("cell_type") != "code":
+        host = get_proxy_uri()
+        if not host:
+            return {"ok": False, "stdout": "", "stderr": "No Vertex AI Workbench instance proxyUri found"}
+        nb_path = path or notebook_path or kwargs.get("file") or "evaluation.ipynb"
+        patches = (
+            cell_patches
+            if cell_patches is not None
+            else (cell_updates if cell_updates is not None else kwargs.get("patches", {}))
+        )
+        max_cell = (
+            run_through_cell
+            if run_through_cell is not None
+            else kwargs.get("end_cell", kwargs.get("max_cell", None))
+        )
+
+        model = read_notebook(nb_path, host=host)
+        nb = model["content"]
+        cells = nb.get("cells", [])
+        int_patches = {}
+        if patches:
+            for idx_key, new_src in patches.items():
+                idx = int(idx_key)
+                if 0 <= idx < len(cells):
+                    if isinstance(new_src, list):
+                        new_src = "".join(new_src)
+                    new_src = re.sub(r"^\\s*#\\s*\\[\\s*TODO[^\\n]*\\]\\s*\\n?", "", str(new_src), flags=re.M)
+                    cells[idx]["source"] = new_src
+                    cells[idx]["execution_count"] = None
+                    cells[idx]["outputs"] = []
+                    int_patches[idx] = new_src
+
+        limit_idx = len(cells) - 1 if max_cell is None else min(int(max_cell), len(cells) - 1)
+        for i in range(limit_idx + 1):
+            if cells[i].get("cell_type") != "code":
                 continue
-            src = cell.get("source", "")
-            if isinstance(src, list):
-                src = "".join(src)
-            if not src.strip():
-                continue
-            print(f"[wb_helper] Running Cell {i}...")
-            ec, outs = _run_code_on_ws(sock, session_id, src, cell_timeout=cell_timeout)
-            cell["execution_count"] = ec or (i + 1)
-            cell["outputs"] = outs
-            for o in outs:
-                if o.get("output_type") == "stream":
-                    print(o.get("text", "").rstrip())
-                elif o.get("output_type") == "error":
-                    print(f"[wb_helper] ERROR in Cell {i}: {o.get('ename')}: {o.get('evalue')}")
-                    for tb_ln in o.get("traceback", [])[-6:]:
-                        print(tb_ln)
-                    save_notebook(notebook_path, nb, host=host)
-                    raise RuntimeError(f"Notebook {notebook_path} failed at Cell {i}: {o.get('ename')}: {o.get('evalue')}")
-            # Persist incremental progress after every cell
-            save_notebook(notebook_path, nb, host=host)
-        print(f"[wb_helper] Successfully updated, executed, and saved {notebook_path}")
-        return True
-    finally:
-        sock.close()
+            raw_s = cells[i].get("source", "")
+            if isinstance(raw_s, list):
+                raw_s = "".join(raw_s)
+            repaired_s = _auto_repair_cell_source(i, raw_s, cells)
+            if repaired_s != raw_s:
+                cells[i]["source"] = repaired_s
+                cells[i]["execution_count"] = None
+                cells[i]["outputs"] = []
+                int_patches[i] = repaired_s
+
+        save_notebook(nb_path, nb, host=host)
+
+        kernel_id = _get_or_create_kernel(host)
+        session_id = uuid.uuid4().hex
+        sock = _open_kernel_ws(host, kernel_id, session_id, timeout=cell_timeout)
+        try:
+            _, probe_outs = _run_code_on_ws(
+                sock,
+                session_id,
+                "print('WB_KERNEL_WARM' if 'dataset' in globals() else 'WB_KERNEL_COLD')",
+                cell_timeout=20,
+            )
+            kernel_warm = any("WB_KERNEL_WARM" in o.get("text", "") for o in probe_outs)
+
+            for i in range(limit_idx + 1):
+                cell = cells[i]
+                if cell.get("cell_type") != "code":
+                    continue
+                src = cell.get("source", "")
+                if isinstance(src, list):
+                    src = "".join(src)
+                if not src.strip():
+                    continue
+
+                prev_outs = cell.get("outputs", [])
+                already_ok = (
+                    bool(cell.get("execution_count"))
+                    and not any(o.get("output_type") == "error" for o in prev_outs)
+                    and (i not in int_patches)
+                )
+
+                if "do_shutdown" in src:
+                    if already_ok:
+                        continue
+                    _log(f"[wb_helper] Restarting kernel at Cell {i}...")
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+                    try:
+                        _jupyter_req(host, f"/api/kernels/{kernel_id}/restart", method="POST", timeout=25)
+                    except Exception:
+                        kernel_id = _get_or_create_kernel(host)
+                    time.sleep(3)
+                    session_id = uuid.uuid4().hex
+                    sock = _open_kernel_ws(host, kernel_id, session_id, timeout=cell_timeout)
+                    kernel_warm = False
+                    cell["execution_count"] = i + 1
+                    cell["outputs"] = []
+                    save_notebook(nb_path, nb, host=host)
+                    continue
+
+                if already_ok:
+                    if kernel_warm:
+                        continue
+                    if "%pip install" in src or ".evaluate(" in src or "display_" in src:
+                        continue
+
+                _log(f"[wb_helper] Running Cell {i}...")
+                ec, outs = _run_code_on_ws(sock, session_id, src, cell_timeout=cell_timeout)
+                cell["execution_count"] = ec or (i + 1)
+                cell["outputs"] = outs
+                for o in outs:
+                    if o.get("output_type") == "stream":
+                        txt = o.get("text", "").rstrip()
+                        if txt:
+                            _log(txt)
+                    elif o.get("output_type") == "error":
+                        err_header = f"[wb_helper] ERROR in Cell {i}: {o.get('ename')}: {o.get('evalue')}"
+                        _log(err_header)
+                        tb_tail = "\\n".join(o.get("traceback", [])[-6:])
+                        if tb_tail:
+                            _log(tb_tail)
+                        save_notebook(nb_path, nb, host=host)
+                        return {
+                            "ok": False,
+                            "stdout": "\\n".join(stdout_lines),
+                            "stderr": f"{err_header}\\n{tb_tail}",
+                        }
+                save_notebook(nb_path, nb, host=host)
+
+            _log(f"[wb_helper] Successfully updated, executed (through Cell {limit_idx}), and saved {nb_path}")
+            return {"ok": True, "stdout": "\\n".join(stdout_lines), "stderr": ""}
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        err_str = f"{type(exc).__name__}: {exc}"
+        _log(f"[wb_helper] Exception: {err_str}")
+        return {"ok": False, "stdout": "\\n".join(stdout_lines), "stderr": err_str}
 `,
   'utf-8'
 ).toString('base64');
@@ -2117,16 +2343,18 @@ try:
     if proxy_uri:
         nbs = wb_helper.list_notebooks(proxy_uri)
         print(f"\\n=== VERTEX AI WORKBENCH INSTANCE ({proxy_uri}) NOTEBOOKS: {nbs} ===")
-        for nb_name in nbs[:4]:
+        for nb_name in nbs[:2]:
             model = wb_helper.read_notebook(nb_name, host=proxy_uri)
             cells = model.get("content", {}).get("cells", [])
             print(f"\\n=== VERTEX AI WORKBENCH NOTEBOOK: {nb_name} ({len(cells)} cells, helper=/tmp/wb_helper.py) ===")
             for idx, c in enumerate(cells):
                 ctype = c.get("cell_type", "unknown")
+                ec = c.get("execution_count")
+                outs = c.get("outputs", [])
                 src = c.get("source", "")
                 if isinstance(src, list):
                     src = "".join(src)
-                print(f"\\n[Cell {idx} | {ctype}]")
+                print(f"\\n[Cell {idx} | {ctype} | exec={ec} | outputs={len(outs)}]")
                 print(src)
 except Exception as wb_err:
     pass
