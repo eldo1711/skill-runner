@@ -1345,7 +1345,7 @@ export class LabBrowserOrchestrator {
           let previousScriptOutput: string | undefined;
 
           for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            if (this.pauseRequested) {
+            if (this.pauseRequested || !this.state.isLabStarted) {
               this.setStatus('paused');
               this.addLog('warn', 'system', 'Execution paused by operator.');
               this.isLoopRunning = false;
@@ -1363,6 +1363,13 @@ export class LabBrowserOrchestrator {
               projectId: this.state.credentials.projectId,
             });
 
+            if (this.pauseRequested || !this.state.isLabStarted) {
+              this.setStatus('paused');
+              this.addLog('warn', 'system', 'Execution paused by operator.');
+              this.isLoopRunning = false;
+              return;
+            }
+
             const synth = await synthesizeTaskShellScript({
               labTitle: this.state.labTitle,
               task,
@@ -1372,6 +1379,13 @@ export class LabBrowserOrchestrator {
               previousErrorMessage,
               previousScriptOutput,
             });
+
+            if (this.pauseRequested || !this.state.isLabStarted) {
+              this.setStatus('paused');
+              this.addLog('warn', 'system', 'Execution paused by operator.');
+              this.isLoopRunning = false;
+              return;
+            }
 
             let lastSshOk = true;
             if (synth && synth.script.trim()) {
@@ -1404,6 +1418,13 @@ export class LabBrowserOrchestrator {
                   `Task #${task.number} Cloud Shell stderr: ${sshRes.stderr.slice(-400)}`
                 );
               }
+            }
+
+            if (this.pauseRequested || !this.state.isLabStarted) {
+              this.setStatus('paused');
+              this.addLog('warn', 'system', 'Execution paused by operator.');
+              this.isLoopRunning = false;
+              return;
             }
 
             if (task.hasCheckProgress) {

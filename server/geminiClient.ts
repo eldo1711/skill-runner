@@ -85,7 +85,7 @@ async function getHostVertexAccessToken(): Promise<string> {
 
 export async function callAnthropicVertexRawPredict(
   promptText: string,
-  maxTokens = 8192
+  maxTokens = 16384
 ): Promise<string> {
   const project =
     process.env.GOOGLE_CLOUD_PROJECT ||
@@ -251,7 +251,7 @@ async function generateContentWithModelFallback(
           : '';
       const text = await callAnthropicVertexRawPredict(
         req.contents + jsonInstruction,
-        req.config?.maxOutputTokens || 8192
+        req.config?.maxOutputTokens || 16384
       );
       if (text) {
         return { text } as any;
@@ -3024,7 +3024,7 @@ ${combinedText}
       1. Inspect the exact \`[Cell <N> | code | exec=...]\` indices and surrounding markdown instructions in \`=== VERTEX AI WORKBENCH NOTEBOOK ===\`.
       2. Remove all \`#[ TODO ... ]\` comments from patched cells, and use the exact variable names and metric names expected by downstream cells in the notebook (for example: in Task 3 Cell 22 use \`metrics=[POINTWISE_METRIC]\` so Cell 26 \`display_explanations(pointwise_result, num=1, metrics=[POINTWISE_METRIC])\` succeeds; in Task 5 Cell 34/36 set \`PAIRWISE_METRIC_NAME = "pairwise_summarization_quality"\` and \`metric_prompt_template=MetricPromptTemplateExamples.get_prompt_template(PAIRWISE_METRIC_NAME)\`; in Task 6 Cell 40 add \`"context": context,\` to \`eval_dataset\`, in Cell 42 add \`"rouge_l_sum", "bleu", "coherence",\` to \`metrics\`, in Cell 44 set \`prompt_template=prompt_template,\`, and set \`run_through_cell=54\` so all evaluation and visualization cells 40..54 execute and save).
       3. Never write raw unquoted English prose into Python code (if copying multi-line rubric strings, ensure all strings are properly quoted).
-      4. \`wb_helper.update_and_run_notebook(...)\` automatically handles \`Cell 5\` kernel restarts, reuses the active kernel across tasks, skips already-executed cells from previous tasks, and saves the notebook after each cell.`;
+      4. \`wb_helper.update_and_run_notebook(...)\` automatically handles \`Cell 5\` kernel restarts, automatically delegates execution to the Workbench VM over \`gcloud compute ssh\` (using \`/opt/micromamba/bin/python3\` as user \`jupyter\`) if the external proxy returns 403, automatically pins \`"numpy<2"\` and shims \`numpy.core.numeric.ComplexWarning\` for \`vertexai.evaluation\`, reuses the active kernel across tasks, skips already-executed cells from previous tasks, and saves \`/home/jupyter/<filename>\` after each cell. Always call \`wb_helper.update_and_run_notebook(...)\` rather than writing custom raw SSH scripts.`;
 
   const parseSynthesisResponse = (rawText: string): { script?: string; summary?: string } | null => {
     const cleaned = (rawText || '')
@@ -3066,7 +3066,7 @@ ${combinedText}
       try {
         const opusText = await callAnthropicVertexRawPredict(
           `${prompt}\n\nReturn ONLY a valid JSON object with keys "script" (complete non-interactive bash script) and "summary" (one-sentence summary). Do not wrap in markdown fences.`,
-          8192
+          16384
         );
         const parsedOpus = parseSynthesisResponse(opusText);
         if (parsedOpus?.script && typeof parsedOpus.script === 'string' && parsedOpus.script.trim()) {

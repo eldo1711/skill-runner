@@ -344,8 +344,25 @@ async function snapshotUserChromeTabByTarget(windowId, tabIndex) {
 tell application "Google Chrome"
   repeat with w in windows
     if ((id of w) as string) is "${windowId}" then
+      set t to missing value
       if ${tabIndex} <= (count of tabs of w) then
-        set t to tab ${tabIndex} of w
+        set candT to tab ${tabIndex} of w
+        set candU to URL of candT
+        if (candU contains "skills.google" or candU contains "cloudskillsboost.google" or candU contains "qwiklabs.com") and not (candU contains "accounts.google.com" or candU contains "login.corp.google.com" or candU contains "google_sso") then
+          set t to candT
+        end if
+      end if
+      if t is missing value then
+        repeat with cIdx from 1 to count of tabs of w
+          set candT to tab cIdx of w
+          set candU to URL of candT
+          if (candU contains "skills.google" or candU contains "cloudskillsboost.google" or candU contains "qwiklabs.com") and not (candU contains "accounts.google.com" or candU contains "login.corp.google.com" or candU contains "google_sso") then
+            set t to candT
+            exit repeat
+          end if
+        end repeat
+      end if
+      if t is not missing value then
         if (loading of t) is true then
           return ""
         end if
@@ -400,13 +417,30 @@ end tell
   return { htmlPath: SNAPSHOT_HTML_PATH, url: url || '', title: title || '' };
 }
 
+function isLabPageUrl(url) {
+  const u = String(url || '').toLowerCase();
+  if (!u) return false;
+  if (
+    u.includes('accounts.google.com') ||
+    u.includes('login.corp.google.com') ||
+    u.includes('google_sso')
+  ) {
+    return false;
+  }
+  return (
+    u.includes('skills.google') ||
+    u.includes('cloudskillsboost.google') ||
+    u.includes('qwiklabs.com')
+  );
+}
+
 async function snapshotUserChromeLabTab(preferredUrl, preferredTarget) {
   if (preferredTarget?.windowId && preferredTarget?.tabIndex) {
     const byTarget = await snapshotUserChromeTabByTarget(
       Number(preferredTarget.windowId),
       Number(preferredTarget.tabIndex)
     );
-    if (byTarget) return byTarget;
+    if (byTarget && isLabPageUrl(byTarget.url)) return byTarget;
   }
 
   const tabs = await listUserChromeTabs();

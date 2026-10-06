@@ -334,6 +334,23 @@ end tell
   };
 }
 
+function isLabTabUrl(url?: string): boolean {
+  const u = String(url || '').toLowerCase();
+  if (!u) return false;
+  if (
+    u.includes('accounts.google.com') ||
+    u.includes('login.corp.google.com') ||
+    u.includes('google_sso')
+  ) {
+    return false;
+  }
+  return (
+    u.includes('skills.google') ||
+    u.includes('cloudskillsboost.google') ||
+    u.includes('qwiklabs.com')
+  );
+}
+
 /**
  * Exports a complete DOM + Declarative Shadow DOM (`<template shadowrootmode="open">`) snapshot
  * of the active lab tab from the user's logged-in Google Chrome window.
@@ -347,7 +364,7 @@ export async function snapshotUserChromeLabTab(
       preferredTarget.windowId,
       preferredTarget.tabIndex
     );
-    if (byTarget) return byTarget;
+    if (byTarget && isLabTabUrl(byTarget.url)) return byTarget;
   }
 
   fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
@@ -1735,11 +1752,22 @@ export const WB_HELPER_PY_B64 = Buffer.from(
 
 _SSL_CTX = ssl._create_unverified_context()
 
+def _is_on_workbench_vm():
+    return os.environ.get("WB_ON_VM") == "1" or os.path.isdir("/home/jupyter")
+
+def _get_tokens():
+    tokens = []
+    env_tok = (os.environ.get("DRIVE_ACCESS_TOKEN") or "").strip()
+    if env_tok:
+        tokens.append(env_tok)
+    gcloud_tok = subprocess.getoutput("gcloud auth print-access-token 2>/dev/null").strip()
+    if gcloud_tok and gcloud_tok not in tokens:
+        tokens.append(gcloud_tok)
+    return tokens
+
 def _get_token():
-    tok = subprocess.getoutput("gcloud auth print-access-token 2>/dev/null").strip()
-    if not tok and os.environ.get("DRIVE_ACCESS_TOKEN"):
-        tok = os.environ["DRIVE_ACCESS_TOKEN"].strip()
-    return tok
+    toks = _get_tokens()
+    return toks[0] if toks else ""
 
 def _get_project():
     return (
@@ -1748,79 +1776,260 @@ def _get_project():
         or subprocess.getoutput("gcloud config get-value project 2>/dev/null").strip()
     )
 
-def get_proxy_uri(project_id=None):
+def get_workbench_vm_info(project_id=None):
     proj = project_id or _get_project()
-    tok = _get_token()
-    if not proj or not tok:
-        return None
-    for api_ver in ("v2", "v1"):
-        url = f"https://notebooks.googleapis.com/{api_ver}/projects/{proj}/locations/-/instances"
-        try:
-            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
-            with urllib.request.urlopen(req, context=_SSL_CTX, timeout=15) as r:
-                data = json.loads(r.read().decode("utf-8", errors="replace"))
-            for inst in data.get("instances", []):
-                uri = inst.get("proxyUri")
-                if uri:
-                    return uri.replace("https://", "").strip("/")
-        except Exception:
-            pass
-    return None
+    if not proj:
+        return ("evaluation-workbench", "us-central1-c", None)
+    for tok in _get_tokens():
+        for api_ver in ("v2", "v1"):
+            url = f"https://notebooks.googleapis.com/{api_ver}/projects/{proj}/locations/-/instances"
+            try:
+                req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
+                with urllib.request.urlopen(req, context=_SSL_CTX, timeout=15) as r:
+                    data = json.loads(r.read().decode("utf-8", errors="replace"))
+                for inst in data.get("instances", []):
+                    full_name = inst.get("name", "")
+                    uri = inst.get("proxyUri", "")
+                    clean_uri = uri.replace("https://", "").strip("/") if uri else None
+                    parts = full_name.split("/")
+                    if len(parts) >= 6 and parts[2] == "locations" and parts[4] == "instances":
+                        return (parts[5], parts[3], clean_uri)
+                    if clean_uri:
+                        return ("evaluation-workbench", "us-central1-c", clean_uri)
+            except Exception:
+                pass
+    try:
+        out = subprocess.check_output(
+            [
+                "gcloud",
+                "compute",
+                "instances",
+                "list",
+                f"--project={proj}",
+                "--format=value(name,zone.basename())",
+                "--quiet",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+        rows = [ln.split() for ln in out.splitlines() if len(ln.split()) >= 2]
+        for nm, zn in rows:
+            if "workbench" in nm.lower() or "notebook" in nm.lower():
+                return (nm, zn, None)
+        for nm, zn in rows:
+            if "lab-setup" not in nm.lower():
+                return (nm, zn, None)
+    except Exception:
+        pass
+    return ("evaluation-workbench", "us-central1-c", None)
+
+def get_proxy_uri(project_id=None):
+    if _is_on_workbench_vm():
+        return "127.0.0.1:8080"
+    _, _, uri = get_workbench_vm_info(project_id)
+    return uri
+
+def _is_local_host(host):
+    h = str(host or "")
+    return h.startswith("127.0.0.1") or h.startswith("localhost") or h == "local"
 
 def _jupyter_req(host, path, method="GET", body=None, timeout=30):
-    tok = _get_token()
-    url = f"https://{host}/{path.lstrip('/')}"
-    headers = {"Authorization": f"Bearer {tok}"}
+    is_local = _is_local_host(host)
+    scheme = "http" if is_local else "https"
+    target_host = "127.0.0.1:8080" if host == "local" else host
+    url = f"{scheme}://{target_host}/{path.lstrip('/')}"
     data = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, context=_SSL_CTX, timeout=timeout) as r:
-        raw = r.read().decode("utf-8", errors="replace")
-        return json.loads(raw) if raw.strip() else {}
+    toks = [""] if is_local else (_get_tokens() or [""])
+    last_err = None
+    for tok in toks:
+        headers = {}
+        if tok:
+            headers["Authorization"] = f"Bearer {tok}"
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            ctx = None if is_local else _SSL_CTX
+            with urllib.request.urlopen(req, context=ctx, timeout=timeout) as r:
+                raw = r.read().decode("utf-8", errors="replace")
+                return json.loads(raw) if raw.strip() else {}
+        except Exception as e:
+            last_err = e
+    raise last_err
+
+def _delegate_to_vm(func_name, payload, timeout=300):
+    proj = _get_project()
+    inst, zone, _ = get_workbench_vm_info(proj)
+    self_path = os.path.abspath(__file__) if "__file__" in globals() and os.path.exists(__file__) else "/tmp/wb_helper.py"
+    wb_bytes = open(self_path, "rb").read()
+    wb_b64 = base64.b64encode(wb_bytes).decode("ascii")
+    req_obj = {"func": func_name, "payload": payload, "project": proj}
+    req_b64 = base64.b64encode(json.dumps(req_obj).encode("utf-8")).decode("ascii")
+    remote_sh = (
+        f"echo {wb_b64} | base64 -d > /tmp/wb_helper.py && "
+        f"echo {req_b64} | base64 -d > /tmp/wb_req.json && "
+        "chmod 644 /tmp/wb_helper.py /tmp/wb_req.json && "
+        'PY=""; '
+        "for p in /opt/micromamba/bin/python3 /opt/conda/bin/python3 $(ls /opt/micromamba/envs/*/bin/python3 /opt/conda/envs/*/bin/python3 2>/dev/null) /usr/local/bin/python3 /usr/bin/python3; do "
+        'if [ -x "$p" ]; then PY="$p"; break; fi; '
+        "done; "
+        f'if id jupyter >/dev/null 2>&1; then sudo -u jupyter -H env WB_ON_VM=1 GOOGLE_CLOUD_PROJECT="{proj}" "$PY" /tmp/wb_helper.py --cli-req /tmp/wb_req.json; '
+        f'else env WB_ON_VM=1 GOOGLE_CLOUD_PROJECT="{proj}" "$PY" /tmp/wb_helper.py --cli-req /tmp/wb_req.json; fi'
+    )
+    base_cmd = [
+        "gcloud",
+        "compute",
+        "ssh",
+        inst,
+        f"--zone={zone}",
+        f"--project={proj}",
+        "--quiet",
+        "--strict-host-key-checking=no",
+        "--ssh-flag=-o ServerAliveInterval=30",
+        "--ssh-flag=-o ServerAliveCountMax=60",
+    ]
+    last_proc = None
+    for use_iap in (False, True):
+        if use_iap:
+            subprocess.run(
+                [
+                    "gcloud",
+                    "compute",
+                    "firewall-rules",
+                    "create",
+                    "allow-iap-ssh-wb",
+                    f"--project={proj}",
+                    "--network=default",
+                    "--direction=INGRESS",
+                    "--allow=tcp:22",
+                    "--source-ranges=35.235.240.0/20",
+                    "--quiet",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=20,
+            )
+        cmd = list(base_cmd) + (["--tunnel-through-iap"] if use_iap else []) + [f"--command={remote_sh}"]
+        try:
+            proc = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
+            last_proc = proc
+            combined = (proc.stdout or "") + "\\n" + (proc.stderr or "")
+            m = re.search(r"===WB_JSON_RESULT_START===\\s*([\\s\\S]*?)\\s*===WB_JSON_RESULT_END===", combined)
+            if m:
+                return json.loads(m.group(1))
+        except Exception as e:
+            last_proc = e
+    err_detail = ""
+    if hasattr(last_proc, "stderr") or hasattr(last_proc, "stdout"):
+        err_detail = ((last_proc.stdout or "") + "\\n" + (last_proc.stderr or "")).strip()[-600:]
+    else:
+        err_detail = str(last_proc)
+    raise RuntimeError(f"Workbench VM SSH delegation ({inst} in {zone}) failed: {err_detail}")
 
 def list_notebooks(host=None):
-    host = host or get_proxy_uri()
-    if not host:
-        return []
-    try:
-        listing = _jupyter_req(host, "/api/contents")
+    if _is_on_workbench_vm() or _is_local_host(host):
         out = []
-        for item in listing.get("content", []):
-            if item.get("name", "").endswith(".ipynb"):
-                out.append(item["name"])
-            elif item.get("type") == "directory" and not item.get("name", "").startswith("."):
-                sub = _jupyter_req(host, f"/api/contents/{item['name']}")
-                for sub_item in sub.get("content", []):
-                    if sub_item.get("name", "").endswith(".ipynb"):
-                        out.append(f"{item['name']}/{sub_item['name']}")
-        non_tmpl = [n for n in out if "template" not in n.lower()]
-        return non_tmpl if non_tmpl else out
-    except Exception:
-        return []
+        base = "/home/jupyter"
+        if os.path.isdir(base):
+            for root, dirs, files in os.walk(base):
+                dirs[:] = [d for d in sorted(dirs) if not d.startswith(".")]
+                rel_r = os.path.relpath(root, base)
+                depth = 0 if rel_r == "." else rel_r.count(os.sep) + 1
+                if depth > 2:
+                    dirs[:] = []
+                    continue
+                for f in sorted(files):
+                    if f.endswith(".ipynb"):
+                        rel_f = f if rel_r == "." else f"{rel_r}/{f}"
+                        out.append(rel_f)
+            non_tmpl = [n for n in out if "template" not in n.lower()]
+            return non_tmpl if non_tmpl else out
+    host = host or get_proxy_uri()
+    if host:
+        try:
+            listing = _jupyter_req(host, "/api/contents")
+            out = []
+            for item in listing.get("content", []):
+                if item.get("name", "").endswith(".ipynb"):
+                    out.append(item["name"])
+                elif item.get("type") == "directory" and not item.get("name", "").startswith("."):
+                    sub = _jupyter_req(host, f"/api/contents/{item['name']}")
+                    for sub_item in sub.get("content", []):
+                        if sub_item.get("name", "").endswith(".ipynb"):
+                            out.append(f"{item['name']}/{sub_item['name']}")
+            non_tmpl = [n for n in out if "template" not in n.lower()]
+            return non_tmpl if non_tmpl else out
+        except Exception:
+            pass
+    if not _is_on_workbench_vm():
+        try:
+            return _delegate_to_vm("list_notebooks", {}, timeout=60)
+        except Exception:
+            pass
+    return []
 
 def read_notebook(notebook_path, host=None):
-    host = host or get_proxy_uri()
-    if not host:
-        raise RuntimeError("No Vertex AI Workbench instance proxyUri found")
     clean_path = str(notebook_path).replace("/home/jupyter/", "").lstrip("/")
-    return _jupyter_req(host, f"/api/contents/{clean_path}")
+    local_file = os.path.join("/home/jupyter", clean_path)
+    if _is_on_workbench_vm() and os.path.isfile(local_file):
+        with open(local_file, "r", encoding="utf-8", errors="replace") as fh:
+            nb_data = json.load(fh)
+        return {"type": "notebook", "format": "json", "content": nb_data}
+    host = host or get_proxy_uri()
+    if host:
+        try:
+            return _jupyter_req(host, f"/api/contents/{clean_path}")
+        except Exception:
+            if _is_on_workbench_vm():
+                raise
+    if not _is_on_workbench_vm():
+        return _delegate_to_vm("read_notebook", {"notebook_path": clean_path}, timeout=60)
+    raise RuntimeError("No Vertex AI Workbench instance found")
 
 def save_notebook(notebook_path, nb_content, host=None):
-    host = host or get_proxy_uri()
-    if not host:
-        raise RuntimeError("No Vertex AI Workbench instance proxyUri found")
     clean_path = str(notebook_path).replace("/home/jupyter/", "").lstrip("/")
     if isinstance(nb_content, dict) and "content" in nb_content and "cells" not in nb_content:
         nb_content = nb_content["content"]
-    return _jupyter_req(
-        host,
-        f"/api/contents/{clean_path}",
-        method="PUT",
-        body={"type": "notebook", "format": "json", "content": nb_content},
-        timeout=35,
-    )
+    local_file = os.path.join("/home/jupyter", clean_path)
+    if _is_on_workbench_vm() and os.path.isdir("/home/jupyter"):
+        tmp_file = f"{local_file}.tmp.{os.getpid()}"
+        with open(tmp_file, "w", encoding="utf-8") as fh:
+            json.dump(nb_content, fh, indent=1)
+        os.replace(tmp_file, local_file)
+        try:
+            _jupyter_req(
+                "127.0.0.1:8080",
+                f"/api/contents/{clean_path}",
+                method="PUT",
+                body={"type": "notebook", "format": "json", "content": nb_content},
+                timeout=10,
+            )
+        except Exception:
+            pass
+        return {"ok": True, "path": clean_path}
+    host = host or get_proxy_uri()
+    if host:
+        try:
+            return _jupyter_req(
+                host,
+                f"/api/contents/{clean_path}",
+                method="PUT",
+                body={"type": "notebook", "format": "json", "content": nb_content},
+                timeout=35,
+            )
+        except Exception:
+            if _is_on_workbench_vm():
+                raise
+    if not _is_on_workbench_vm():
+        return _delegate_to_vm(
+            "save_notebook",
+            {"notebook_path": clean_path, "nb_content": nb_content},
+            timeout=90,
+        )
+    raise RuntimeError("No Vertex AI Workbench instance found")
 
 def _recv_exact(sock, n):
     buf = b""
@@ -1864,6 +2073,33 @@ def _ws_send_text(sock, text):
     sock.sendall(bytes(header) + masked)
 
 def _open_kernel_ws(host, kernel_id, session_id, timeout=120):
+    is_local = _is_local_host(host)
+    if is_local:
+        target = "127.0.0.1:8080" if host == "local" else host
+        h_part, p_part = (target.split(":") + ["8080"])[:2]
+        sock = socket.create_connection((h_part, int(p_part)), timeout=timeout)
+        ws_key = base64.b64encode(os.urandom(16)).decode("ascii")
+        req = (
+            f"GET /api/kernels/{kernel_id}/channels?session_id={session_id} HTTP/1.1\\r\\n"
+            f"Host: {target}\\r\\n"
+            f"Upgrade: websocket\\r\\n"
+            f"Connection: Upgrade\\r\\n"
+            f"Sec-WebSocket-Key: {ws_key}\\r\\n"
+            f"Sec-WebSocket-Version: 13\\r\\n"
+            f"Origin: http://{target}\\r\\n\\r\\n"
+        )
+        sock.sendall(req.encode("utf-8"))
+        resp = b""
+        while b"\\r\\n\\r\\n" not in resp:
+            chunk = sock.recv(1024)
+            if not chunk:
+                break
+            resp += chunk
+        if b"101" not in resp.splitlines()[0]:
+            sock.close()
+            raise RuntimeError(f"Local WebSocket handshake failed: {resp[:200]!r}")
+        return sock
+
     tok = _get_token()
     raw_sock = socket.create_connection((host, 443), timeout=timeout)
     sock = _SSL_CTX.wrap_socket(raw_sock, server_hostname=host)
@@ -1981,31 +2217,53 @@ def _get_or_create_kernel(host):
     return k["id"]
 
 def exec_on_workbench(bash_cmd, timeout=240):
-    host = get_proxy_uri()
-    if not host:
-        raise RuntimeError("No Vertex AI Workbench instance proxyUri found")
-    kernel_id = _get_or_create_kernel(host)
-    session_id = uuid.uuid4().hex
-    sock = _open_kernel_ws(host, kernel_id, session_id, timeout=timeout)
-    try:
-        py_code = f"import subprocess\\n_r = subprocess.run({bash_cmd!r}, shell=True, text=True, capture_output=True)\\nprint(_r.stdout)\\nif _r.stderr:\\n    print(_r.stderr)\\nif _r.returncode != 0:\\n    raise RuntimeError(f'Command exited with {_r.returncode}')"
-        _, outs = _run_code_on_ws(sock, session_id, py_code, cell_timeout=timeout)
-        text_parts = []
-        for o in outs:
-            if o.get("output_type") == "stream":
-                text_parts.append(o.get("text", ""))
-            elif o.get("output_type") == "error":
-                text_parts.append("\\n".join(o.get("traceback", [])))
-        res = "".join(text_parts)
+    if _is_on_workbench_vm():
+        r = subprocess.run(bash_cmd, shell=True, text=True, capture_output=True, timeout=timeout)
+        res = (r.stdout or "") + ("\\n" + r.stderr if r.stderr else "")
         print(res)
         return res
-    finally:
-        sock.close()
+    host = get_proxy_uri()
+    if host:
+        try:
+            kernel_id = _get_or_create_kernel(host)
+            session_id = uuid.uuid4().hex
+            sock = _open_kernel_ws(host, kernel_id, session_id, timeout=timeout)
+            try:
+                py_code = f"import subprocess\\n_r = subprocess.run({bash_cmd!r}, shell=True, text=True, capture_output=True)\\nprint(_r.stdout)\\nif _r.stderr:\\n    print(_r.stderr)\\nif _r.returncode != 0:\\n    raise RuntimeError(f'Command exited with {_r.returncode}')"
+                _, outs = _run_code_on_ws(sock, session_id, py_code, cell_timeout=timeout)
+                text_parts = []
+                for o in outs:
+                    if o.get("output_type") == "stream":
+                        text_parts.append(o.get("text", ""))
+                    elif o.get("output_type") == "error":
+                        text_parts.append("\\n".join(o.get("traceback", [])))
+                res = "".join(text_parts)
+                print(res)
+                return res
+            finally:
+                sock.close()
+        except Exception:
+            pass
+    res = _delegate_to_vm("exec_on_workbench", {"bash_cmd": bash_cmd, "timeout": timeout}, timeout=timeout + 60)
+    print(res)
+    return res
 
 def _auto_repair_cell_source(idx, src, cells):
     proj = _get_project()
     if proj and "[your-project-id]" in src:
         src = src.replace("[your-project-id]", proj)
+    if "%pip install" in src and "google-cloud-aiplatform" in src and "numpy<2" not in src:
+        src = src.rstrip() + ' "numpy<2"\\n'
+    if "from vertexai.evaluation import" in src and "ComplexWarning" not in src:
+        shim = (
+            "import numpy as _np, numpy.core.numeric as _np_num\\n"
+            'for _w in ("ComplexWarning", "VisibleDeprecationWarning", "RankWarning"):\\n'
+            "    if not hasattr(_np, _w):\\n"
+            '        setattr(_np, _w, getattr(getattr(_np, "exceptions", None), _w, UserWarning))\\n'
+            "    if not hasattr(_np_num, _w):\\n"
+            "        setattr(_np_num, _w, getattr(_np, _w, UserWarning))\\n"
+        )
+        src = shim + src
     if "pointwise_single_turn_metrics =" in src and 'POINTWISE_METRIC = "coherence"' not in src:
         src = (
             src.rstrip()
@@ -2015,6 +2273,8 @@ def _auto_repair_cell_source(idx, src, cells):
             + 'else:\\n'
             + '    POINTWISE_METRIC = dropdown.value\\n'
         )
+    if "POINTWISE_METRIC = dropdown.value" in src and 'POINTWISE_METRIC = "coherence"' not in src:
+        src = src.rstrip() + '\\nPOINTWISE_METRIC = "coherence"\\n'
     if "PAIRWISE_METRIC_NAME = dropdown.value" in src and 'PAIRWISE_METRIC_NAME = "pairwise_summarization_quality"' not in src:
         src = (
             src.rstrip()
@@ -2067,15 +2327,18 @@ def _auto_repair_cell_source(idx, src, cells):
             if isinstance(ps, list):
                 ps = "".join(ps)
             recent_src += "\\n" + ps
-        metric_expr = "[summarization_helpfulness_metric]" if "summarization_helpfulness_metric" in recent_src else "[POINTWISE_METRIC]"
+        is_custom = "summarization_helpfulness_metric" in recent_src
+        metric_expr = "[summarization_helpfulness_metric]" if is_custom else "[POINTWISE_METRIC]"
+        prefix = "" if is_custom else 'POINTWISE_METRIC = "coherence"\\n'
         return (
-            "pointwise_result = EvalTask(\\n"
-            "    dataset=dataset,\\n"
-            f"    metrics={metric_expr},\\n"
-            ").evaluate(\\n"
-            "    model=model,\\n"
-            '    prompt_template="# System_prompt\\\\n{system_prompt} # Question\\\\n{question}",\\n'
-            ")\\n"
+            prefix
+            + "pointwise_result = EvalTask(\\n"
+            + "    dataset=dataset,\\n"
+            + f"    metrics={metric_expr},\\n"
+            + ").evaluate(\\n"
+            + "    model=model,\\n"
+            + '    prompt_template="# System_prompt\\\\n{system_prompt} # Question\\\\n{question}",\\n'
+            + ")\\n"
         )
     if "pairwise_result = EvalTask" in src:
         m_base = re.search(r'GenerativeModel\\(["\\x27]([^"\\x27]+)["\\x27]\\)', src)
@@ -2114,6 +2377,130 @@ def _auto_repair_cell_source(idx, src, cells):
     src = re.sub(r"^\\s*#\\s*\\[\\s*TODO[^\\n]*\\]\\s*\\n?", "", src, flags=re.M)
     return src
 
+def _run_code_on_kc(kc, code_str, cell_timeout=240):
+    msg_id = kc.execute(code_str, silent=False, store_history=True, allow_stdin=False, stop_on_error=True)
+    outputs = []
+    exec_count = None
+    deadline = time.time() + cell_timeout
+    while time.time() < deadline:
+        try:
+            pkt = kc.get_iopub_msg(timeout=max(1.0, min(5.0, deadline - time.time())))
+        except Exception:
+            continue
+        if pkt.get("parent_header", {}).get("msg_id") != msg_id:
+            continue
+        mtype = pkt.get("msg_type") or pkt.get("header", {}).get("msg_type")
+        content = pkt.get("content", {})
+        if mtype == "stream":
+            outputs.append({
+                "output_type": "stream",
+                "name": content.get("name", "stdout"),
+                "text": content.get("text", ""),
+            })
+        elif mtype == "execute_result":
+            exec_count = content.get("execution_count", exec_count)
+            outputs.append({
+                "output_type": "execute_result",
+                "data": content.get("data", {}),
+                "metadata": content.get("metadata", {}),
+                "execution_count": exec_count,
+            })
+        elif mtype == "display_data":
+            outputs.append({
+                "output_type": "display_data",
+                "data": content.get("data", {}),
+                "metadata": content.get("metadata", {}),
+            })
+        elif mtype == "error":
+            outputs.append({
+                "output_type": "error",
+                "ename": content.get("ename", "Error"),
+                "evalue": content.get("evalue", ""),
+                "traceback": content.get("traceback", []),
+            })
+        elif mtype == "execute_input":
+            exec_count = content.get("execution_count", exec_count)
+        elif mtype == "status" and content.get("execution_state") == "idle":
+            break
+    return exec_count, outputs
+
+def _run_cells_via_kernel_manager(nb_path, nb, cells, limit_idx, int_patches, cell_timeout, _log, stdout_lines, host):
+    import jupyter_client
+    km = jupyter_client.KernelManager(kernel_name="python3")
+    cwd = "/home/jupyter" if os.path.isdir("/home/jupyter") else None
+    km.start_kernel(cwd=cwd)
+    kc = km.client()
+    kc.start_channels()
+    try:
+        kc.wait_for_ready(timeout=60)
+        for i in range(limit_idx + 1):
+            cell = cells[i]
+            if cell.get("cell_type") != "code":
+                continue
+            src = cell.get("source", "")
+            if isinstance(src, list):
+                src = "".join(src)
+            if not src.strip():
+                continue
+
+            prev_outs = cell.get("outputs", [])
+            already_ok = (
+                bool(cell.get("execution_count"))
+                and not any(o.get("output_type") == "error" for o in prev_outs)
+                and (i not in int_patches)
+            )
+
+            if "do_shutdown" in src:
+                if already_ok:
+                    continue
+                _log(f"[wb_helper] Restarting local kernel at Cell {i}...")
+                km.restart_kernel(now=True)
+                time.sleep(3)
+                kc.wait_for_ready(timeout=60)
+                cell["execution_count"] = i + 1
+                cell["outputs"] = []
+                save_notebook(nb_path, nb, host=host)
+                continue
+
+            if already_ok:
+                if "%pip install" in src or ".evaluate(" in src or "display_" in src:
+                    continue
+
+            _log(f"[wb_helper] Running Cell {i} (local kernel)...")
+            ec, outs = _run_code_on_kc(kc, src, cell_timeout=cell_timeout)
+            cell["execution_count"] = ec or (i + 1)
+            cell["outputs"] = outs
+            for o in outs:
+                if o.get("output_type") == "stream":
+                    txt = o.get("text", "").rstrip()
+                    if txt:
+                        _log(txt)
+                elif o.get("output_type") == "error":
+                    err_header = f"[wb_helper] ERROR in Cell {i}: {o.get('ename')}: {o.get('evalue')}"
+                    _log(err_header)
+                    tb_tail = "\\n".join(o.get("traceback", [])[-6:])
+                    if tb_tail:
+                        _log(tb_tail)
+                    save_notebook(nb_path, nb, host=host)
+                    return {
+                        "ok": False,
+                        "stdout": "\\n".join(stdout_lines),
+                        "stderr": f"{err_header}\\n{tb_tail}",
+                    }
+            save_notebook(nb_path, nb, host=host)
+
+        _log(f"[wb_helper] Successfully updated, executed (through Cell {limit_idx}), and saved {nb_path}")
+        return {"ok": True, "stdout": "\\n".join(stdout_lines), "stderr": ""}
+    finally:
+        try:
+            kc.stop_channels()
+        except Exception:
+            pass
+        try:
+            km.shutdown_kernel(now=True)
+        except Exception:
+            pass
+
 def update_and_run_notebook(
     path=None,
     cell_patches=None,
@@ -2128,21 +2515,33 @@ def update_and_run_notebook(
         print(msg)
         stdout_lines.append(str(msg))
 
+    nb_path = path or notebook_path or kwargs.get("file") or "evaluation.ipynb"
+    patches = (
+        cell_patches
+        if cell_patches is not None
+        else (cell_updates if cell_updates is not None else kwargs.get("patches", {}))
+    )
+    max_cell = (
+        run_through_cell
+        if run_through_cell is not None
+        else kwargs.get("end_cell", kwargs.get("max_cell", None))
+    )
+
     try:
-        host = get_proxy_uri()
+        host = "127.0.0.1:8080" if _is_on_workbench_vm() else get_proxy_uri()
         if not host:
+            if not _is_on_workbench_vm():
+                return _delegate_to_vm(
+                    "update_and_run_notebook",
+                    {
+                        "path": nb_path,
+                        "cell_patches": patches,
+                        "run_through_cell": max_cell,
+                        "cell_timeout": cell_timeout,
+                    },
+                    timeout=max(360, int(cell_timeout) * 3),
+                )
             return {"ok": False, "stdout": "", "stderr": "No Vertex AI Workbench instance proxyUri found"}
-        nb_path = path or notebook_path or kwargs.get("file") or "evaluation.ipynb"
-        patches = (
-            cell_patches
-            if cell_patches is not None
-            else (cell_updates if cell_updates is not None else kwargs.get("patches", {}))
-        )
-        max_cell = (
-            run_through_cell
-            if run_through_cell is not None
-            else kwargs.get("end_cell", kwargs.get("max_cell", None))
-        )
 
         model = read_notebook(nb_path, host=host)
         nb = model["content"]
@@ -2176,9 +2575,31 @@ def update_and_run_notebook(
 
         save_notebook(nb_path, nb, host=host)
 
-        kernel_id = _get_or_create_kernel(host)
-        session_id = uuid.uuid4().hex
-        sock = _open_kernel_ws(host, kernel_id, session_id, timeout=cell_timeout)
+        if _is_on_workbench_vm():
+            try:
+                import numpy as _test_np
+                if int(_test_np.__version__.split(".")[0]) >= 2:
+                    subprocess.run(
+                        [sys.executable, "-m", "pip", "install", "--user", "--quiet", "numpy<2"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=60,
+                    )
+            except Exception:
+                pass
+
+        try:
+            kernel_id = _get_or_create_kernel(host)
+            session_id = uuid.uuid4().hex
+            sock = _open_kernel_ws(host, kernel_id, session_id, timeout=cell_timeout)
+        except Exception as ws_exc:
+            if _is_on_workbench_vm():
+                _log(f"[wb_helper] Local port 8080 kernel unavailable ({ws_exc}); using jupyter_client.KernelManager...")
+                return _run_cells_via_kernel_manager(
+                    nb_path, nb, cells, limit_idx, int_patches, cell_timeout, _log, stdout_lines, host
+                )
+            raise
+
         try:
             _, probe_outs = _run_code_on_ws(
                 sock,
@@ -2263,9 +2684,50 @@ def update_and_run_notebook(
             except Exception:
                 pass
     except Exception as exc:
+        if not _is_on_workbench_vm():
+            _log(f"[wb_helper] Proxy access returned ({type(exc).__name__}: {exc}); delegating execution to Workbench VM over SSH...")
+            try:
+                vm_res = _delegate_to_vm(
+                    "update_and_run_notebook",
+                    {
+                        "path": nb_path,
+                        "cell_patches": patches,
+                        "run_through_cell": max_cell,
+                        "cell_timeout": cell_timeout,
+                    },
+                    timeout=max(420, int(cell_timeout) * 3),
+                )
+                if isinstance(vm_res, dict):
+                    if vm_res.get("stdout"):
+                        print(vm_res["stdout"])
+                    return vm_res
+            except Exception as ssh_exc:
+                err_str = f"{type(ssh_exc).__name__}: {ssh_exc}"
+                _log(f"[wb_helper] SSH Delegation Exception: {err_str}")
+                return {"ok": False, "stdout": "\\n".join(stdout_lines), "stderr": err_str}
         err_str = f"{type(exc).__name__}: {exc}"
         _log(f"[wb_helper] Exception: {err_str}")
         return {"ok": False, "stdout": "\\n".join(stdout_lines), "stderr": err_str}
+
+if __name__ == "__main__" and len(sys.argv) >= 3 and sys.argv[1] == "--cli-req":
+    req_data = json.load(open(sys.argv[2], "r", encoding="utf-8"))
+    if req_data.get("project"):
+        os.environ["GOOGLE_CLOUD_PROJECT"] = req_data["project"]
+    fn = req_data.get("func")
+    pl = req_data.get("payload") or {}
+    if fn == "list_notebooks":
+        res_obj = list_notebooks()
+    elif fn == "read_notebook":
+        res_obj = read_notebook(pl.get("notebook_path", "evaluation.ipynb"))
+    elif fn == "save_notebook":
+        res_obj = save_notebook(pl.get("notebook_path", "evaluation.ipynb"), pl.get("nb_content", {}))
+    elif fn == "exec_on_workbench":
+        res_obj = exec_on_workbench(pl.get("bash_cmd", ""), timeout=pl.get("timeout", 240))
+    else:
+        res_obj = update_and_run_notebook(**pl)
+    print("===WB_JSON_RESULT_START===")
+    print(json.dumps(res_obj))
+    print("===WB_JSON_RESULT_END===")
 `,
   'utf-8'
 ).toString('base64');
