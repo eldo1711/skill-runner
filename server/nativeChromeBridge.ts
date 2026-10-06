@@ -1677,10 +1677,10 @@ export async function execInStudentCloudShellBridge(
     const driveExport = hostAccessToken
       ? `export DRIVE_ACCESS_TOKEN="${hostAccessToken}"; `
       : '';
-    const envPrefix = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1; ${projExport}${driveExport}`;
+    const envPrefix = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1; export PYTHONUNBUFFERED=1; ${projExport}${driveExport}`;
     const fullScript = `${envPrefix}\n${command}`;
     const b64Script = Buffer.from(fullScript, 'utf8').toString('base64');
-    const remoteCmd = `echo ${b64Script} | base64 -d | bash`;
+    const remoteCmd = `echo ${b64Script} | base64 -d > /tmp/ql_cmd_$$.sh && bash /tmp/ql_cmd_$$.sh < /dev/null; _ec=$?; rm -f /tmp/ql_cmd_$$.sh; exit $_ec`;
     const { stdout, stderr } = await execFileAsync(
       'gcloud',
       [
@@ -1888,6 +1888,7 @@ def _delegate_to_vm(func_name, payload, timeout=300):
         f"--project={proj}",
         "--quiet",
         "--strict-host-key-checking=no",
+        "--ssh-flag=-n",
         "--ssh-flag=-o ServerAliveInterval=30",
         "--ssh-flag=-o ServerAliveCountMax=60",
     ]
@@ -1908,13 +1909,14 @@ def _delegate_to_vm(func_name, payload, timeout=300):
                     "--source-ranges=35.235.240.0/20",
                     "--quiet",
                 ],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=20,
             )
         cmd = list(base_cmd) + (["--tunnel-through-iap"] if use_iap else []) + [f"--command={remote_sh}"]
         try:
-            proc = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
+            proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, text=True, capture_output=True, timeout=timeout)
             last_proc = proc
             combined = (proc.stdout or "") + "\\n" + (proc.stderr or "")
             m = re.search(r"===WB_JSON_RESULT_START===\\s*([\\s\\S]*?)\\s*===WB_JSON_RESULT_END===", combined)
@@ -2252,11 +2254,15 @@ def _auto_repair_cell_source(idx, src, cells):
     proj = _get_project()
     if proj and "[your-project-id]" in src:
         src = src.replace("[your-project-id]", proj)
-    if "%pip install" in src and "google-cloud-aiplatform" in src and "numpy<2" not in src:
-        src = src.rstrip() + ' "numpy<2"\\n'
-    if "from vertexai.evaluation import" in src and "ComplexWarning" not in src:
+    if "%pip install" in src and "google-cloud-aiplatform" in src:
+        src = src.replace(' "numpy<2"', "")
+        if "scikit-learn" not in src:
+            src = src.rstrip() + ' "scikit-learn>=1.5"\\n'
+    if "from vertexai.evaluation import" in src and 'hasattr(_np, "long")' not in src:
         shim = (
             "import numpy as _np, numpy.core.numeric as _np_num\\n"
+            'if not hasattr(_np, "long"):\\n'
+            "    _np.long = _np.int_\\n"
             'for _w in ("ComplexWarning", "VisibleDeprecationWarning", "RankWarning"):\\n'
             "    if not hasattr(_np, _w):\\n"
             '        setattr(_np, _w, getattr(getattr(_np, "exceptions", None), _w, UserWarning))\\n'
@@ -2577,16 +2583,34 @@ def update_and_run_notebook(
 
         if _is_on_workbench_vm():
             try:
-                import numpy as _test_np
-                if int(_test_np.__version__.split(".")[0]) >= 2:
-                    subprocess.run(
-                        [sys.executable, "-m", "pip", "install", "--user", "--quiet", "numpy<2"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=60,
-                    )
+                import site
+                u_site = site.getusersitepackages()
+                os.makedirs(u_site, exist_ok=True)
+                shim_code = (
+                    "try:\\n"
+                    "    import numpy as _np, numpy.core.numeric as _np_num\\n"
+                    '    if not hasattr(_np, "long"): _np.long = _np.int_\\n'
+                    '    for _w in ("ComplexWarning", "VisibleDeprecationWarning", "RankWarning"):\\n'
+                    '        if not hasattr(_np, _w): setattr(_np, _w, getattr(getattr(_np, "exceptions", None), _w, UserWarning))\\n'
+                    "        if not hasattr(_np_num, _w): setattr(_np_num, _w, getattr(_np, _w, UserWarning))\\n"
+                    "except Exception:\\n"
+                    "    pass\\n"
+                )
+                with open(os.path.join(u_site, "usercustomize.py"), "w", encoding="utf-8") as _uf:
+                    _uf.write(shim_code)
+                exec(shim_code, {})
             except Exception:
                 pass
+            try:
+                import sklearn as _test_sk
+            except Exception:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "--user", "--quiet", "--upgrade", "scikit-learn"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=90,
+                )
 
         try:
             kernel_id = _get_or_create_kernel(host)

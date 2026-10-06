@@ -1400,7 +1400,7 @@ export class LabBrowserOrchestrator {
                 password: this.state.credentials.password,
                 projectId: this.state.credentials.projectId,
                 onProgress: (m) => this.addLog('info', 'cloud_shell', m),
-                timeoutMs: 420000,
+                timeoutMs: 600000,
               });
               lastSshOk = sshRes.ok;
               previousScriptOutput = `${sshRes.stdout}\n${sshRes.stderr}`.trim();

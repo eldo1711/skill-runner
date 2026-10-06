@@ -2879,6 +2879,13 @@ python3 -u /tmp/task4_query_invoice_agent.py`;
     credentials.extraVars?.['primary_project.startup_script.notebook_file_name'] === 'evaluation.ipynb' ||
     (workspaceSnapshot || '').includes('VERTEX AI WORKBENCH NOTEBOOK: evaluation.ipynb');
 
+  const isRagAdkLab =
+    /Build and Deploy a RAG Application using ADK/i.test(labTitle) ||
+    Boolean(
+      credentials.extraVars?.['primary_project.startup_script.datastore_id'] &&
+        credentials.extraVars?.['primary_project.startup_script.agent_name']
+    );
+
   if (isEvalSingleLlmNotebookLab) {
     let runThroughCell = 54;
     if (task.number === 1 || /Set up the Agent Platform Workbench environment/i.test(task.title)) {
@@ -2914,10 +2921,368 @@ EOF`;
     };
   }
 
+  if (isRagAdkLab) {
+    const dsName =
+      credentials.extraVars?.['primary_project.startup_script.datastore_name'] || 'cepf_lab_datastore';
+    const dsId =
+      credentials.extraVars?.['primary_project.startup_script.datastore_id'] || 'cepf_lab_datastore_id';
+    const gcsBucket =
+      credentials.extraVars?.['primary_project.startup_script.gcs_bucket_name'] || `${proj}-bucket`;
+    const agentName =
+      credentials.extraVars?.['primary_project.startup_script.agent_name'] || 'cepf_lab_agent';
+    const ragRegion =
+      credentials.extraVars?.['primary_project.default_region'] || region || 'us-central1';
+
+    if (task.number === 1 || /Create an Agent Search data store/i.test(task.title)) {
+      const script = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+export PYTHONUNBUFFERED=1
+gcloud config set project "${proj}" --quiet >/dev/null 2>&1 || true
+gcloud services enable discoveryengine.googleapis.com storage.googleapis.com --project="${proj}" --quiet || true
+
+PROJECT_NUMBER=$(gcloud projects describe "${proj}" --format='value(projectNumber)')
+gcloud beta services identity create --service=discoveryengine.googleapis.com --project="${proj}" --quiet >/dev/null 2>&1 || true
+SA="service-\${PROJECT_NUMBER}@gcp-sa-discoveryengine.iam.gserviceaccount.com"
+gcloud storage buckets add-iam-policy-binding "gs://${gcsBucket}" --member="serviceAccount:\${SA}" --role="roles/storage.objectViewer" --quiet >/dev/null 2>&1 || true
+
+gcloud storage ls "gs://${gcsBucket}/" | tee /tmp/bucket_files.txt
+export EXPECTED=$(grep -c '^gs://.*[^/]$' /tmp/bucket_files.txt || echo 1)
+
+python3 -u - <<'PYEOF'
+import json, os, subprocess, sys, time, urllib.request, urllib.error
+
+P = "${proj}"
+BUCKET = "${gcsBucket}"
+DS_ID = "${dsId}"
+DS_NAME = "${dsName}"
+EXPECTED = int(os.environ.get("EXPECTED", "1") or 1)
+BASE = "https://discoveryengine.googleapis.com/v1alpha"
+PARENT = f"projects/{P}/locations/global/collections/default_collection"
+DS = f"{PARENT}/dataStores/{DS_ID}"
+
+def token():
+    return subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+
+def call(method, path, body=None):
+    url = path if path.startswith("http") else f"{BASE}/{path}"
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {token()}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-Goog-User-Project", P)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            txt = r.read().decode()
+            return r.status, (json.loads(txt) if txt else {})
+    except urllib.error.HTTPError as e:
+        txt = e.read().decode("utf-8", errors="replace")
+        print(f"HTTP {e.code} {method} {url}: {txt}")
+        try:
+            return e.code, json.loads(txt)
+        except Exception:
+            return e.code, {"raw": txt}
+
+def wait_op(op, timeout=900, label="op"):
+    name = op.get("name")
+    if not name:
+        return op
+    start = time.time()
+    while not op.get("done"):
+        if time.time() - start > timeout:
+            break
+        time.sleep(15)
+        _, op = call("GET", name)
+        md = op.get("metadata", {})
+        print(f"[{label}] done={op.get('done', False)} success={md.get('successCount')} total={md.get('totalCount')}")
+    return op
+
+st, ds = call("GET", DS)
+if st != 200:
+    body = {
+        "displayName": DS_NAME,
+        "industryVertical": "GENERIC",
+        "solutionTypes": ["SOLUTION_TYPE_SEARCH"],
+        "contentConfig": "CONTENT_REQUIRED",
+    }
+    st, op = call("POST", f"{PARENT}/dataStores?dataStoreId={DS_ID}", body)
+    if st in (200, 201):
+        wait_op(op, 600, "create")
+
+BR = f"{DS}/branches/default_branch"
+def list_docs():
+    st, r = call("GET", f"{BR}/documents?pageSize=100")
+    return r.get("documents", []) if st == 200 else []
+
+docs = list_docs()
+if len(docs) < max(EXPECTED, 1):
+    st, ops = call("GET", f"{BR}/operations")
+    running = [o for o in ops.get("operations", []) if not o.get("done") and "import" in o.get("name", "").lower()]
+    if running:
+        for o in running:
+            wait_op(o, 900, "existing-import")
+    else:
+        imp = {
+            "gcsSource": {"inputUris": [f"gs://{BUCKET}/*"], "dataSchema": "content"},
+            "reconciliationMode": "INCREMENTAL",
+        }
+        st, op = call("POST", f"{BR}/documents:import", imp)
+        if st in (200, 201):
+            wait_op(op, 900, "import")
+
+for _ in range(30):
+    docs = list_docs()
+    print(f"Documents imported: {len(docs)} / expected {EXPECTED}")
+    if len(docs) >= max(EXPECTED, 1):
+        break
+    time.sleep(15)
+PYEOF`;
+      return {
+        script,
+        summary: `Create global unstructured Agent Search data store ${dsName} (${dsId}) and import documents from gs://${gcsBucket}/*.`,
+      };
+    }
+
+    if (task.number === 2 || /Create an ADK agent and update the agent/i.test(task.title)) {
+      const script = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+export PYTHONUNBUFFERED=1
+WORKDIR="$HOME/cepf_lab"
+mkdir -p "$WORKDIR/${agentName}"
+cd "$WORKDIR"
+
+cat > "${agentName}/__init__.py" <<'EOF'
+from . import agent
+EOF
+
+cat > "${agentName}/.env" <<EOF
+GOOGLE_GENAI_USE_VERTEXAI=TRUE
+GOOGLE_CLOUD_PROJECT=${proj}
+GOOGLE_CLOUD_LOCATION=${ragRegion}
+DATASTORE_ID=projects/${proj}/locations/global/collections/default_collection/dataStores/${dsId}
+MODEL=gemini-2.5-flash
+EOF
+
+cat > "${agentName}/agent.py" <<'EOF'
+import os
+from google.adk.agents import Agent
+from google.adk.tools import VertexAiSearchTool
+
+VertexAISearchTool = VertexAiSearchTool
+PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT", "${proj}")
+DATASTORE_ID = os.getenv(
+    "DATASTORE_ID",
+    f"projects/{PROJECT_ID}/locations/global/collections/default_collection/dataStores/${dsId}",
+)
+MODEL = os.getenv("MODEL", "gemini-2.5-flash")
+
+search_tool = VertexAISearchTool(data_store_id=DATASTORE_ID)
+
+root_agent = Agent(
+    name="${agentName}",
+    model=MODEL,
+    description="RAG agent that answers questions using the ${dsName} Agent Search data store.",
+    instruction=(
+        "You are a helpful assistant. Always use the Vertex AI Search tool to retrieve "
+        "information from the ${dsName} data store before answering. Filter and synthesize "
+        "the retrieved documents to provide accurate, grounded answers."
+    ),
+    tools=[search_tool],
+)
+EOF
+
+cat > "${agentName}/requirements.txt" <<'EOF'
+google-adk>=1.30.0
+google-cloud-aiplatform[adk,agent_engines]>=1.165.1
+EOF
+ls -la "$WORKDIR/${agentName}"`;
+      return {
+        script,
+        summary: `Create ADK agent ${agentName} configured with VertexAiSearchTool pointing to ${dsId}.`,
+      };
+    }
+
+    if (
+      task.number === 3 ||
+      task.number === 4 ||
+      /Deploy the agent to Agent Runtime|Verify the agent is working in Agent Runtime/i.test(task.title)
+    ) {
+      const script = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+export PYTHONUNBUFFERED=1
+PROJECT_ID="${proj}"
+REGION="${ragRegion}"
+AGENT_NAME="${agentName}"
+DS_ID="${dsId}"
+STAGING_BUCKET="gs://${proj}-agent-staging"
+WORK="$HOME/cepf_lab"
+DEPLOY_DIR="$WORK/deploy_pkg"
+mkdir -p "$WORK" "$DEPLOY_DIR/\${AGENT_NAME}"
+
+gcloud config set project "$PROJECT_ID" --quiet >/dev/null 2>&1 || true
+gcloud services enable aiplatform.googleapis.com discoveryengine.googleapis.com storage.googleapis.com cloudbuild.googleapis.com --project="$PROJECT_ID" --quiet || true
+gcloud storage buckets describe "$STAGING_BUCKET" >/dev/null 2>&1 || gcloud storage buckets create "$STAGING_BUCKET" --location="$REGION" --project="$PROJECT_ID" --quiet || true
+
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+gcloud beta services identity create --service=aiplatform.googleapis.com --project="$PROJECT_ID" --quiet >/dev/null 2>&1 || true
+gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:service-\${PROJECT_NUMBER}@gcp-sa-aiplatform-re.iam.gserviceaccount.com" --role="roles/discoveryengine.user" --condition=None --quiet >/dev/null 2>&1 || true
+gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:service-\${PROJECT_NUMBER}@gcp-sa-aiplatform-re.iam.gserviceaccount.com" --role="roles/aiplatform.user" --condition=None --quiet >/dev/null 2>&1 || true
+
+cat > "$DEPLOY_DIR/\${AGENT_NAME}/__init__.py" <<'EOF'
+from . import agent
+EOF
+
+cat > "$DEPLOY_DIR/\${AGENT_NAME}/agent.py" <<'EOF'
+from google.adk.agents import Agent
+from google.adk.tools import VertexAiSearchTool
+
+PROJECT_ID = "${proj}"
+DATASTORE_ID = f"projects/{PROJECT_ID}/locations/global/collections/default_collection/dataStores/${dsId}"
+
+root_agent = Agent(
+    name="${agentName}",
+    model="gemini-2.5-flash",
+    description="RAG agent that answers questions using the ${dsName} Agent Search data store.",
+    instruction=(
+        "You are a helpful assistant. Always use the Vertex AI Search tool to retrieve "
+        "information from the ${dsName} before answering. Filter and synthesize the "
+        "retrieved unstructured documents to give factual, concise answers."
+    ),
+    tools=[VertexAiSearchTool(data_store_id=DATASTORE_ID)],
+)
+EOF
+
+VENV="$HOME/.cepf_venv"
+if [ ! -f "$VENV/bin/python" ]; then
+  python3 -m venv "$VENV" || python3 -m virtualenv "$VENV" || true
+fi
+PY_BIN="$VENV/bin/python"
+if [ ! -x "$PY_BIN" ]; then
+  PY_BIN="python3"
+  python3 -m pip install --user --break-system-packages -q --upgrade "google-cloud-aiplatform[agent_engines,adk]" "google-adk>=1.30.0" cloudpickle pydantic
+else
+  "$PY_BIN" -m pip install -q --upgrade pip
+  "$PY_BIN" -m pip install -q --upgrade "google-cloud-aiplatform[agent_engines,adk]" "google-adk>=1.30.0" cloudpickle pydantic
+fi
+
+cd "$DEPLOY_DIR"
+"$PY_BIN" -u - <<'PYEOF'
+import json, os, subprocess, sys, time, urllib.request, urllib.error, asyncio
+
+P = "${proj}"
+L = "${ragRegion}"
+DN = "${agentName}"
+host = f"https://{L}-aiplatform.googleapis.com/v1beta1"
+base = f"{host}/projects/{P}/locations/{L}"
+
+def tok():
+    return subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+
+def req(method, url, body=None):
+    r = urllib.request.Request(
+        url,
+        method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": "Bearer " + tok(), "Content-Type": "application/json", "X-Goog-User-Project": P},
+    )
+    try:
+        with urllib.request.urlopen(r, timeout=60) as resp:
+            t = resp.read().decode()
+            return 200, (json.loads(t) if t else {})
+    except urllib.error.HTTPError as e:
+        return e.code, {}
+
+def check_engines():
+    _, d = req("GET", f"{base}/reasoningEngines?pageSize=100")
+    ready, pending = [], []
+    for e in d.get("reasoningEngines", []):
+        if e.get("displayName") != DN:
+            continue
+        name = e["name"]
+        _, od = req("GET", f"{host}/{name}/operations")
+        ops = od.get("operations", [])
+        status = "READY"
+        for op in ops:
+            if not op.get("done"):
+                status = "PENDING"
+                break
+            if op.get("error"):
+                status = "FAILED"
+        if status == "FAILED":
+            req("DELETE", f"{host}/{name}?force=true")
+        elif status == "PENDING":
+            pending.append(name)
+        else:
+            ready.append(name)
+    return ready, pending
+
+ready, pending = check_engines()
+while pending and not ready:
+    print("Waiting for pending ReasoningEngine deployment:", pending[0])
+    time.sleep(20)
+    ready, pending = check_engines()
+
+import vertexai
+from vertexai import agent_engines
+try:
+    from vertexai.agent_engines import AdkApp
+except Exception:
+    from vertexai.preview.reasoning_engines import AdkApp
+from importlib.metadata import version
+
+vertexai.init(project=P, location=L, staging_bucket=f"gs://{P}-agent-staging")
+
+if not ready:
+    sys.path.insert(0, os.getcwd())
+    from ${agentName}.agent import root_agent
+    reqs = [
+        f"google-cloud-aiplatform[agent_engines,adk]=={version('google-cloud-aiplatform')}",
+        f"google-adk=={version('google-adk')}",
+        f"cloudpickle=={version('cloudpickle')}",
+        f"pydantic=={version('pydantic')}",
+    ]
+    print("Deploying with requirements:", reqs)
+    app = AdkApp(agent=root_agent, enable_tracing=False)
+    remote = agent_engines.create(
+        agent_engine=app,
+        display_name=DN,
+        description=f"{DN} ADK RAG agent using Agent Search data store ${dsName}",
+        requirements=reqs,
+        extra_packages=["${agentName}"],
+    )
+    re_name = remote.resource_name
+    print("Deployed ReasoningEngine:", re_name)
+else:
+    re_name = ready[0]
+    print("Using existing READY ReasoningEngine:", re_name)
+
+try:
+    eng = agent_engines.get(re_name)
+    for q in [
+        "What logistics risks should we monitor during the Lumiki Holiday Campaign?",
+        "What is the internal logistics control signal used during the Lumiki Holiday Campaign?",
+    ]:
+        print("Querying deployed Agent Runtime:", q)
+        for ev in eng.stream_query(user_id="student", message=q):
+            print("Event:", str(ev)[:300])
+except Exception as qe:
+    print("Query note:", qe)
+PYEOF`;
+      return {
+        script,
+        summary: `Deploy ${agentName} to Vertex AI Agent Runtime in ${ragRegion}, grant Discovery Engine User role to the Reasoning Engine service agent, and verify query responses.`,
+      };
+    }
+  }
+
   return null;
   })();
 
-  if (matchedFastPath && !previousErrorMessage) {
+  const isDeterministicLab =
+    /Evaluate Single LLM Outputs|Build and Deploy a RAG Application using ADK/i.test(labTitle) ||
+    credentials.extraVars?.['primary_project.startup_script.notebook_file_name'] === 'evaluation.ipynb' ||
+    Boolean(
+      credentials.extraVars?.['primary_project.startup_script.datastore_id'] &&
+        credentials.extraVars?.['primary_project.startup_script.agent_name']
+    );
+
+  if (matchedFastPath && (!previousErrorMessage || isDeterministicLab)) {
     return matchedFastPath;
   }
 
@@ -2981,6 +3346,7 @@ ${combinedText}
     - Use regional endpoint \`https://modelarmor.<loc>.rep.googleapis.com/v1/projects/<project>/locations/<loc>/templates?templateId=<id>\` (e.g. \`us\`).
     - Attach templates to Gemini Enterprise Assistant via \`PATCH .../engines/<app_id>/assistants/default_assistant?updateMask=customerPolicy\` with \`customerPolicy.modelArmorConfig\` (\`userPromptTemplate\`, \`responseTemplate\`, \`failureMode: "FAIL_OPEN"\`).
 11. **Vertex AI Agent Runtime & Agent Identity (\`vertexai.Client\` / \`agent_engines\`)**:
+    - **CRITICAL Dependency Version Compatibility for \`AdkApp\` on Agent Runtime**: Google Cloud Shell pre-installs \`google-cloud-aiplatform==1.165.1\` alongside an older \`google-adk==1.14.1\`. Because \`google-cloud-aiplatform>=1.165.1\` passes \`auto_create_session=True\` to \`google.adk.runners.Runner()\`, deploying with \`google-adk<1.30.0\` causes the ReasoningEngine container to crash at startup with \`TypeError: Runner.__init__() got an unexpected keyword argument 'auto_create_session'\`. Always upgrade BOTH packages (\`pip install --upgrade "google-cloud-aiplatform[agent_engines,adk]" "google-adk>=1.30.0" cloudpickle pydantic\`) before calling \`agent_engines.create(...)\` and pin the exact upgraded versions in \`requirements=[...]\`.
     - In \`config\` passed to \`client.agent_engines.create(agent=..., config=config)\`, \`"identity_type"\` MUST be the enum \`types.IdentityType.AGENT_IDENTITY\` (NEVER a list \`[types.IdentityType.AGENT_IDENTITY]\`). Many starter \`deploy.py\` files use bracketed placeholders like \`"identity_type": [IDENTITY_TYPE]\` — always replace the entire \`[IDENTITY_TYPE]\` including its brackets with \`types.IdentityType.AGENT_IDENTITY\`.
     - \`ae.api_resource\` returned by \`client.agent_engines.list()\` is a Pydantic v2 \`BaseModel\` (\`ae.api_resource.model_dump()\`), NOT a protobuf message (never call \`google.protobuf.json_format.MessageToDict(ae.api_resource)\`).
     - To find an Agent Identity SPIFFE principal (\`principal://...system.id.goog/...\`) and grant IAM roles, query \`https://<region>-aiplatform.googleapis.com/v1beta1/projects/<project>/locations/<region>/reasoningEngines\`, extract \`spec.effectiveIdentity\`, ensure it is prefixed with \`principal://\` (\`if not principal.startswith("principal://"): principal = f"principal://{principal}"\`), and grant \`roles/logging.logWriter\` in addition to any task-required roles via \`gcloud projects add-iam-policy-binding <project> --member="<principal>" --role="<role>" --condition=None --quiet\`.
@@ -3024,7 +3390,41 @@ ${combinedText}
       1. Inspect the exact \`[Cell <N> | code | exec=...]\` indices and surrounding markdown instructions in \`=== VERTEX AI WORKBENCH NOTEBOOK ===\`.
       2. Remove all \`#[ TODO ... ]\` comments from patched cells, and use the exact variable names and metric names expected by downstream cells in the notebook (for example: in Task 3 Cell 22 use \`metrics=[POINTWISE_METRIC]\` so Cell 26 \`display_explanations(pointwise_result, num=1, metrics=[POINTWISE_METRIC])\` succeeds; in Task 5 Cell 34/36 set \`PAIRWISE_METRIC_NAME = "pairwise_summarization_quality"\` and \`metric_prompt_template=MetricPromptTemplateExamples.get_prompt_template(PAIRWISE_METRIC_NAME)\`; in Task 6 Cell 40 add \`"context": context,\` to \`eval_dataset\`, in Cell 42 add \`"rouge_l_sum", "bleu", "coherence",\` to \`metrics\`, in Cell 44 set \`prompt_template=prompt_template,\`, and set \`run_through_cell=54\` so all evaluation and visualization cells 40..54 execute and save).
       3. Never write raw unquoted English prose into Python code (if copying multi-line rubric strings, ensure all strings are properly quoted).
-      4. \`wb_helper.update_and_run_notebook(...)\` automatically handles \`Cell 5\` kernel restarts, automatically delegates execution to the Workbench VM over \`gcloud compute ssh\` (using \`/opt/micromamba/bin/python3\` as user \`jupyter\`) if the external proxy returns 403, automatically pins \`"numpy<2"\` and shims \`numpy.core.numeric.ComplexWarning\` for \`vertexai.evaluation\`, reuses the active kernel across tasks, skips already-executed cells from previous tasks, and saves \`/home/jupyter/<filename>\` after each cell. Always call \`wb_helper.update_and_run_notebook(...)\` rather than writing custom raw SSH scripts.`;
+      4. \`wb_helper.update_and_run_notebook(...)\` automatically handles \`Cell 5\` kernel restarts, automatically delegates execution to the Workbench VM over \`gcloud compute ssh\` (using \`/opt/micromamba/bin/python3\` as user \`jupyter\`) if the external proxy returns 403, automatically installs a universal NumPy 1.x/2.x + \`scikit-learn\` compatibility shim (\`np.long\` and \`numpy.core.numeric.ComplexWarning\`), reuses the active kernel across tasks, skips already-executed cells from previous tasks, and saves \`/home/jupyter/<filename>\` after each cell. Always call \`wb_helper.update_and_run_notebook(...)\` rather than writing custom raw SSH scripts.`;
+
+  const extractJsonStringField = (text: string, fieldName: string): string | undefined => {
+    const keyIdx = text.indexOf(`"${fieldName}"`);
+    if (keyIdx === -1) return undefined;
+    const colonIdx = text.indexOf(':', keyIdx + fieldName.length + 2);
+    if (colonIdx === -1) return undefined;
+    const quoteIdx = text.indexOf('"', colonIdx + 1);
+    if (quoteIdx === -1) return undefined;
+    let rawChars = '';
+    let i = quoteIdx + 1;
+    while (i < text.length) {
+      const ch = text[i];
+      if (ch === '\\') {
+        rawChars += text.slice(i, i + 2);
+        i += 2;
+      } else if (ch === '"') {
+        break;
+      } else {
+        rawChars += ch;
+        i += 1;
+      }
+    }
+    if (!rawChars) return undefined;
+    try {
+      return JSON.parse(`"${rawChars}"`);
+    } catch {
+      return rawChars
+        .replace(/\\n/g, '\n')
+        .replace(/\\r/g, '\r')
+        .replace(/\\t/g, '\t')
+        .replace(/\\"/g, '"')
+        .replace(/\\\\/g, '\\');
+    }
+  };
 
   const parseSynthesisResponse = (rawText: string): { script?: string; summary?: string } | null => {
     const cleaned = (rawText || '')
@@ -3035,24 +3435,10 @@ ${combinedText}
     try {
       return JSON.parse(cleaned);
     } catch {
-      // Repair truncated JSON responses by extracting the "script" string value directly
-      const scriptMatch = cleaned.match(/"script"\s*:\s*"((?:\\.|[^"\\])*)/);
-      const summaryMatch = cleaned.match(/"summary"\s*:\s*"((?:\\.|[^"\\])*)/);
-      if (scriptMatch && scriptMatch[1]) {
-        try {
-          const repairedScript = JSON.parse(`"${scriptMatch[1]}"`);
-          const repairedSummary =
-            summaryMatch && summaryMatch[1] ? JSON.parse(`"${summaryMatch[1]}"`) : undefined;
-          return { script: repairedScript, summary: repairedSummary };
-        } catch {
-          const fallbackUnescaped = scriptMatch[1]
-            .replace(/\\n/g, '\n')
-            .replace(/\\r/g, '\r')
-            .replace(/\\t/g, '\t')
-            .replace(/\\"/g, '"')
-            .replace(/\\\\/g, '\\');
-          return { script: fallbackUnescaped };
-        }
+      const repairedScript = extractJsonStringField(cleaned, 'script');
+      const repairedSummary = extractJsonStringField(cleaned, 'summary');
+      if (repairedScript) {
+        return { script: repairedScript, summary: repairedSummary };
       }
       return null;
     }

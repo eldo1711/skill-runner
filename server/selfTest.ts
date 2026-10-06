@@ -479,14 +479,14 @@ async function runVerificationTests() {
   try {
     await execFileAsync('python3', [
       '-c',
-      `import ast, sys; sys.path.insert(0, '/tmp'); mod_name = '${pathMod.basename(tmpWbPy, '.py')}'; wb = __import__(mod_name); assert hasattr(wb, '_delegate_to_vm') and hasattr(wb, '_run_cells_via_kernel_manager'); pip_fixed = wb._auto_repair_cell_source(3, '%pip install --upgrade --user --quiet google-cloud-aiplatform[evaluation]\\n', []); assert 'numpy<2' in pip_fixed, pip_fixed; imp_fixed = wb._auto_repair_cell_source(7, 'from vertexai.evaluation import EvalTask\\n', []); assert 'ComplexWarning' in imp_fixed, imp_fixed; ast.parse(imp_fixed); cells = [{'cell_type': 'code', 'source': 'rouge_eval_task = EvalTask(\\n    #[ TODO - Insert your code ]\\n    dataset=\\n    metrics=\\n)\\nrouge_result = rouge_eval_task.evaluate(\\n    #[ TODO - Insert your code ]\\n    model=\\n    prompt_template="# System_prompt\\\\n{system_prompt} # Question\\\\n{question}",\\n)'}, {'cell_type': 'code', 'source': 'pointwise_result = EvalTask(\\n    #[ TODO - Insert your code ]\\n    dataset=\\n    metrics=\\n).evaluate(\\n    model=\\n    prompt_template="# System_prompt\\\\n{system_prompt} # Question\\\\n{question}",\\n)'}, {'cell_type': 'code', 'source': 'summarization_helpfulness_metric = PointwiseMetric(\\n    metric="summarization_helpfulness",\\n    metric_prompt_template=PointwiseMetricPromptTemplate(\\n        criteria={\\n            #[ TODO - Insert your code - Add the Conciseness. ]\\n            "Key Information": "info"\\n        },\\n        rating_rubric={\\n            #[ TODO - Insert your code ]\\n            "4": "Good"\\n        },\\n        input_variables=["prompt", "reference"],\\n    ),\\n)'}, {'cell_type': 'code', 'source': 'pointwise_result = EvalTask(\\n    #[ TODO - Insert your code ]\\n    dataset=\\n    metrics=\\n).evaluate(\\n    model=\\n    prompt_template="# System_prompt\\\\n{system_prompt} # Question\\\\n{question}",\\n)'}];\nfor idx, c in enumerate(cells):\n    fixed = wb._auto_repair_cell_source(idx, c['source'], cells)\n    assert 'TODO' not in fixed, f'Residual TODO in cell {idx}: {fixed}'\n    ast.parse(fixed)\nassert 'summarization_helpfulness_metric' in wb._auto_repair_cell_source(3, cells[3]['source'], cells)\n`,
+      `import ast, sys; sys.path.insert(0, '/tmp'); mod_name = '${pathMod.basename(tmpWbPy, '.py')}'; wb = __import__(mod_name); assert hasattr(wb, '_delegate_to_vm') and hasattr(wb, '_run_cells_via_kernel_manager'); pip_fixed = wb._auto_repair_cell_source(3, '%pip install --upgrade --user --quiet google-cloud-aiplatform[evaluation]\\n', []); assert 'scikit-learn>=1.5' in pip_fixed and 'numpy<2' not in pip_fixed, pip_fixed; imp_fixed = wb._auto_repair_cell_source(7, 'from vertexai.evaluation import EvalTask\\n', []); assert 'ComplexWarning' in imp_fixed and 'np.int_' in imp_fixed, imp_fixed; ast.parse(imp_fixed); cells = [{'cell_type': 'code', 'source': 'rouge_eval_task = EvalTask(\\n    #[ TODO - Insert your code ]\\n    dataset=\\n    metrics=\\n)\\nrouge_result = rouge_eval_task.evaluate(\\n    #[ TODO - Insert your code ]\\n    model=\\n    prompt_template="# System_prompt\\\\n{system_prompt} # Question\\\\n{question}",\\n)'}, {'cell_type': 'code', 'source': 'pointwise_result = EvalTask(\\n    #[ TODO - Insert your code ]\\n    dataset=\\n    metrics=\\n).evaluate(\\n    model=\\n    prompt_template="# System_prompt\\\\n{system_prompt} # Question\\\\n{question}",\\n)'}, {'cell_type': 'code', 'source': 'summarization_helpfulness_metric = PointwiseMetric(\\n    metric="summarization_helpfulness",\\n    metric_prompt_template=PointwiseMetricPromptTemplate(\\n        criteria={\\n            #[ TODO - Insert your code - Add the Conciseness. ]\\n            "Key Information": "info"\\n        },\\n        rating_rubric={\\n            #[ TODO - Insert your code ]\\n            "4": "Good"\\n        },\\n        input_variables=["prompt", "reference"],\\n    ),\\n)'}, {'cell_type': 'code', 'source': 'pointwise_result = EvalTask(\\n    #[ TODO - Insert your code ]\\n    dataset=\\n    metrics=\\n).evaluate(\\n    model=\\n    prompt_template="# System_prompt\\\\n{system_prompt} # Question\\\\n{question}",\\n)'}];\nfor idx, c in enumerate(cells):\n    fixed = wb._auto_repair_cell_source(idx, c['source'], cells)\n    assert 'TODO' not in fixed, f'Residual TODO in cell {idx}: {fixed}'\n    ast.parse(fixed)\nassert 'summarization_helpfulness_metric' in wb._auto_repair_cell_source(3, cells[3]['source'], cells)\n`,
     ]);
   } finally {
     try {
       fsMod.unlinkSync(tmpWbPy);
     } catch {}
   }
-  console.log('✓ wb_helper.py Python syntax, ComplexWarning/numpy<2 shims, VM SSH delegation, and notebook TODO auto-repair verified.');
+  console.log('✓ wb_helper.py Python syntax, ComplexWarning/np.long shims, VM SSH delegation, and notebook TODO auto-repair verified.');
 
   // 12. Verify CEPF L300 evaluation.ipynb fast-path synthesis & indentation preservation
   const cepfTask2 = await synthesizeTaskShellScript({
@@ -509,6 +509,30 @@ async function runVerificationTests() {
     throw new Error('CEPF L300 Task 2 fast-path synthesis or indentation check failed.');
   }
   console.log('✓ CEPF L300 evaluation.ipynb fast-path synthesis & indentation verified.');
+
+  // 13. Verify CEPF L300 RAG Application using ADK fast-path synthesis across retry attempts
+  const ragTask3 = await synthesizeTaskShellScript({
+    labTitle: '[CEPF L300]: Build and Deploy a RAG Application using ADK',
+    task: {
+      number: 3,
+      title: 'Task 3. Deploy the ADK agent to Vertex AI Agent Engine',
+      hasCheckProgress: true,
+      checkProgressStepNumber: 3,
+      rawSectionText: 'Deploy the ADK agent to Vertex AI Agent Engine using deploy.py.',
+      steps: [],
+    },
+    credentials: modernParsed.credentials,
+    attemptNumber: 2,
+    previousFailureReason: 'Progress check did not pass.',
+  });
+  if (
+    !ragTask3 ||
+    !ragTask3.script.includes('google-adk') ||
+    !ragTask3.script.includes('agent_engines.create')
+  ) {
+    throw new Error('CEPF L300 RAG ADK Task 3 fast-path synthesis failed.');
+  }
+  console.log('✓ CEPF L300 RAG Application using ADK fast-path synthesis verified.');
 
   await browser.close();
   console.log('✅ All verification tests passed!');

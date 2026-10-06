@@ -1498,7 +1498,7 @@ async function checkStudentGcloudAuth(username, projectId) {
   return { authenticated: false, configDir };
 }
 
-async function startStudentGcloudAuth(username, projectId, enableGdrive = true) {
+async function startStudentGcloudAuth(username, projectId, enableGdrive = false) {
   const existing = await checkStudentGcloudAuth(username, projectId);
   if (existing.authenticated) {
     return { alreadyAuthenticated: true, configDir: existing.configDir };
@@ -1601,7 +1601,7 @@ async function ensureStudentGcloudAuth(username, password, projectId, preferredW
     return checkStudentGcloudAuth(username, projectId);
   }
 
-  for (const enableGdrive of [true, false]) {
+  for (const enableGdrive of [false, true]) {
     try {
       const started = await startStudentGcloudAuth(username, projectId, enableGdrive);
       if (started.alreadyAuthenticated) {
@@ -1695,6 +1695,7 @@ async function execInLocalStudentWorkspace(authStatus, projectId, command, timeo
     HOME: workspaceDir,
     CLOUDSDK_CONFIG: authStatus.configDir,
     CLOUDSDK_CORE_DISABLE_PROMPTS: '1',
+    PYTHONUNBUFFERED: '1',
     GOOGLE_CLOUD_PROJECT: projectId || '',
     DEVSHELL_PROJECT_ID: projectId || '',
     CLOUDSDK_CORE_PROJECT: projectId || '',
@@ -1749,10 +1750,10 @@ async function execInStudentCloudShell(username, projectId, command, timeoutMs =
     const projExport = projectId
       ? `export GOOGLE_CLOUD_PROJECT="${projectId}"; export DEVSHELL_PROJECT_ID="${projectId}"; `
       : '';
-    const envPrefix = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1; ${projExport}${driveExport}`;
+    const envPrefix = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1; export PYTHONUNBUFFERED=1; ${projExport}${driveExport}`;
     const fullScript = `${envPrefix}\n${command}`;
     const b64Script = Buffer.from(fullScript, 'utf8').toString('base64');
-    const remoteCmd = `echo ${b64Script} | base64 -d | bash`;
+    const remoteCmd = `echo ${b64Script} | base64 -d > /tmp/ql_cmd_$$.sh && bash /tmp/ql_cmd_$$.sh < /dev/null; _ec=$?; rm -f /tmp/ql_cmd_$$.sh; exit $_ec`;
     const { stdout, stderr } = await execFileAsync(
       'gcloud',
       [
