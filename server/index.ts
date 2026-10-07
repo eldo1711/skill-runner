@@ -201,6 +201,20 @@ app.post('/api/lab/switch-course', async (req, res) => {
   }
 });
 
+// 6d. Reset for a New Lab (closes Incognito windows, ends active lab if requested, resets screen to initial state)
+app.post('/api/lab/reset', async (req, res) => {
+  try {
+    const { endLabInChrome = true, closeIncognito = true } = req.body || {};
+    const result = await orchestrator.resetForNewLab({
+      endLabInChrome: Boolean(endLabInChrome),
+      closeIncognito: Boolean(closeIncognito),
+    });
+    res.json({ ok: true, ...result, state: orchestrator.getState() });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || String(err) });
+  }
+});
+
 // 7. Toggle Execution Mode (autonomous vs step_by_step)
 app.post('/api/lab/mode', (req, res) => {
   const mode: ExecutionMode =

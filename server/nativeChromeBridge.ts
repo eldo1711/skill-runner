@@ -1882,7 +1882,14 @@ def _delegate_to_vm(func_name, payload, timeout=300):
     self_path = os.path.abspath(__file__) if "__file__" in globals() and os.path.exists(__file__) else "/tmp/wb_helper.py"
     wb_bytes = open(self_path, "rb").read()
     wb_b64 = base64.b64encode(wb_bytes).decode("ascii")
-    req_obj = {"func": func_name, "payload": payload, "project": proj}
+    req_obj = {
+        "func": func_name,
+        "payload": payload,
+        "project": proj,
+        "lab_bucket": os.environ.get("LAB_BUCKET_NAME", ""),
+        "lab_region": os.environ.get("LAB_REGION", ""),
+        "lab_lr": os.environ.get("LAB_LEARNING_RATE", ""),
+    }
     req_b64 = base64.b64encode(json.dumps(req_obj).encode("utf-8")).decode("ascii")
     remote_sh = (
         f"echo {wb_b64} | base64 -d > /tmp/wb_helper.py && "
@@ -2374,11 +2381,24 @@ def _auto_repair_cell_source(idx, src, cells):
             src = src.rstrip() + ' "scikit-learn>=1.5"\\n'
     if 'BUCKET_URI = f"gs://{BUCKET_NAME}"' in src and ("PROJECT_ID" in src or "REGION" in src):
         _, wb_zone, _ = get_workbench_vm_info(proj)
-        reg = "-".join(wb_zone.split("-")[:2]) if wb_zone and "-" in wb_zone else "us-central1"
+        reg = os.environ.get("LAB_REGION") or ("-".join(wb_zone.split("-")[:2]) if wb_zone and "-" in wb_zone else "us-central1")
+        bkt = os.environ.get("LAB_BUCKET_NAME", "").strip()
+        if not bkt and proj:
+            try:
+                ls_out = subprocess.check_output(["gsutil", "ls", "-p", proj], text=True, stderr=subprocess.DEVNULL, timeout=10)
+                for line in ls_out.splitlines():
+                    b_candidate = line.strip().replace("gs://", "").rstrip("/")
+                    if b_candidate.endswith("-artifact-bucket") or b_candidate.endswith("-bucket"):
+                        bkt = b_candidate
+                        break
+            except Exception:
+                pass
+        if not bkt:
+            bkt = f"{proj}-bucket"
         return (
             f'PROJECT_ID = "{proj}"\\n'
             f'REGION = "{reg}"\\n'
-            f'BUCKET_NAME = "{proj}-bucket"\\n'
+            f'BUCKET_NAME = "{bkt}"\\n'
             'BUCKET_URI = f"gs://{BUCKET_NAME}"\\n'
         )
     if "bigquery-public-data.stackoverflow.posts_questions" in src and "stack_overflow_df" in src:
@@ -2452,13 +2472,14 @@ def _auto_repair_cell_source(idx, src, cells):
             'subprocess.run(["gsutil", "-m", "cp", train_file, validation_file, test_data_file, f"{BUCKET_URI}/"], check=True)\\n'
         )
     if "class TuningConfig:" in src and "output_uri" in src:
+        lr_val = os.environ.get("LAB_LEARNING_RATE", "2e-6").strip() or "2e-6"
         return (
             "@dataclass\\n"
             "class TuningConfig:\\n"
             '    base_model: str = "google/gemma3@gemma-3-1b-it"\\n'
             '    tuning_mode: str = "FULL"\\n'
             "    epochs: int = 1\\n"
-            "    learning_rate: float = 2e-6\\n\\n\\n"
+            f"    learning_rate: float = {lr_val}\\n\\n\\n"
             "config = TuningConfig()\\n\\n"
             'output_uri = f"{BUCKET_URI}/tuning-output/{uuid.uuid4()}"\\n'
         )
@@ -2973,6 +2994,12 @@ if __name__ == "__main__" and len(sys.argv) >= 3 and sys.argv[1] == "--cli-req":
     req_data = json.load(open(sys.argv[2], "r", encoding="utf-8"))
     if req_data.get("project"):
         os.environ["GOOGLE_CLOUD_PROJECT"] = req_data["project"]
+    if req_data.get("lab_bucket"):
+        os.environ["LAB_BUCKET_NAME"] = req_data["lab_bucket"]
+    if req_data.get("lab_region"):
+        os.environ["LAB_REGION"] = req_data["lab_region"]
+    if req_data.get("lab_lr"):
+        os.environ["LAB_LEARNING_RATE"] = req_data["lab_lr"]
     fn = req_data.get("func")
     pl = req_data.get("payload") or {}
     if fn == "list_notebooks":
@@ -3185,4 +3212,49 @@ if proj and user_email:
   return res.stderr ? `Workspace probe warning: ${res.stderr}` : '';
 }
 
+export async function closeIncognitoWindowsInUserChrome(): Promise<{
+  ok: boolean;
+  closedCount?: number;
+}> {
+  if (macBridgeHub.isConnected()) {
+    try {
+      const res = await macBridgeHub.call<{ ok: boolean; closedCount?: number }>(
+        'close_incognito_windows',
+        {},
+        10000
+      );
+      return res || { ok: true, closedCount: 0 };
+    } catch {
+      return { ok: false, closedCount: 0 };
+    }
+  }
+  if (process.platform === 'darwin') {
+    const script = `
+tell application "Google Chrome"
+  set closedCount to 0
+  repeat with w in (every window)
+    try
+      if mode of w is "incognito" then
+        close w
+        set closedCount to closedCount + 1
+      end if
+    end try
+  end repeat
+  return closedCount as text
+end tell
+`;
+    const r = await runOsascript(script, 10000);
+    return { ok: r.ok, closedCount: parseInt(r.stdout.trim(), 10) || 0 };
+  }
+  return { ok: false, closedCount: 0 };
+}
 
+export async function clearSavedStateOnMacBridge(): Promise<void> {
+  if (macBridgeHub.isConnected()) {
+    try {
+      await macBridgeHub.call('clear_state', {}, 5000);
+    } catch {
+      // Ignore error
+    }
+  }
+}

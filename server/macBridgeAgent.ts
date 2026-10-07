@@ -2033,6 +2033,36 @@ async function connectBridge() {
           } else {
             result = null;
           }
+        } else if (method === 'clear_state') {
+          try {
+            if (fs.existsSync(STATE_FILE_PATH)) {
+              fs.unlinkSync(STATE_FILE_PATH);
+            }
+          } catch {}
+          result = { ok: true };
+        } else if (method === 'close_incognito_windows') {
+          const closeScript = `
+tell application "Google Chrome"
+  set closedCount to 0
+  set winList to every window
+  repeat with w in winList
+    try
+      if (mode of w) is "incognito" then
+        close w
+        set closedCount to closedCount + 1
+      end if
+    end try
+  end repeat
+  return closedCount as string
+end tell
+`;
+          const closedStr = await runAppleScript(closeScript).catch(() => '0');
+          try {
+            if (fs.existsSync(STATE_FILE_PATH)) {
+              fs.unlinkSync(STATE_FILE_PATH);
+            }
+          } catch {}
+          result = { ok: true, closedWindows: parseInt(closedStr, 10) || 0 };
         } else if (method === 'shutdown') {
           shuttingDown = true;
           if (pingTimer) clearInterval(pingTimer);

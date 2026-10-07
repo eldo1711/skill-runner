@@ -588,11 +588,36 @@ async function runVerificationTests() {
     },
     credentials: modernParsed.credentials,
   });
+  const ossTuningChallengeTask5 = await synthesizeTaskShellScript({
+    labTitle: 'Fine-Tune Open-Source Models on Agent Platform',
+    task: {
+      number: 5,
+      title: 'Task 5. Launch the fine-tuning job',
+      hasCheckProgress: true,
+      checkProgressStepNumber: 6,
+      checkProgressStepNumbers: [6],
+      rawSectionText:
+        'Configure and run the supervised tuning job in get_started_with_oss_tuning_on_vertexai.ipynb with Learning Rate 2e-6.',
+      steps: [],
+    },
+    credentials: {
+      ...modernParsed.credentials,
+      extraVars: {
+        'primary_project.startup_script.model_artifact_bucket':
+          'qwiklabs-gcp-02-44b374896675-artifact-bucket',
+        'primary_project.startup_script.instance_name': 'cepf-l300-workbench-instance',
+        'primary_project.startup_script.challenge_file_path':
+          'gs://qwiklabs-gcp-02-44b374896675-l300-bucket/get_started_with_oss_tuning_on_vertexai.ipynb',
+      },
+    },
+  });
   if (
     !ossTuningTask4?.script.includes('get_started_with_oss_tuning_on_vertexai.ipynb') ||
     !ossTuningTask4.script.includes('run_through_cell=43') ||
     !ossTuningTask5?.summary.includes('StackOverflow Q&A Supervised Tuned Model') ||
-    !ossTuningTask5.script.includes('run_through_cell=47')
+    !ossTuningTask5.script.includes('run_through_cell=47') ||
+    !ossTuningChallengeTask5?.script.includes('qwiklabs-gcp-02-44b374896675-artifact-bucket') ||
+    !ossTuningChallengeTask5.script.includes('LAB_LEARNING_RATE="2e-6"')
   ) {
     throw new Error('CEPF L300 Fine-Tune Open-Source Models fast-path synthesis failed.');
   }

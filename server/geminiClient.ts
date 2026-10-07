@@ -3279,15 +3279,40 @@ PYEOF`;
     (workspaceSnapshot || '').includes('get_started_with_oss_tuning_on_vertexai.ipynb');
 
   if (isOssTuningNotebookLab && proj) {
-    const ossZoneMatch = (combinedText + '\n' + (allTasksSummary || '')).match(
-      /\b([a-z]+-[a-z]+\d-[a-z])\b/
-    );
-    const ossZone = credentials.zone || (ossZoneMatch ? ossZoneMatch[1] : `${region}-b`);
+    const fullLabText = combinedText + '\n' + (allTasksSummary || '') + '\n' + (workspaceSnapshot || '');
+    const extraVars = credentials.extraVars || {};
+    const ossZoneMatch = fullLabText.match(/\b([a-z]+-[a-z]+\d-[a-z])\b/);
+    const ossZone =
+      credentials.zone ||
+      extraVars['primary_project.startup_script.zone'] ||
+      (ossZoneMatch ? ossZoneMatch[1] : `${region}-b`);
     const ossRegion =
-      credentials.region || ossZone.split('-').slice(0, 2).join('-') || 'us-east1';
-    const ossBucket = `${proj}-bucket`;
-    const ossInstance = 'cymbal-workbench-instance';
+      credentials.region ||
+      extraVars['primary_project.startup_script.region'] ||
+      ossZone.split('-').slice(0, 2).join('-') ||
+      'us-east1';
+
+    const bucketMatch = fullLabText.match(/\b(qwiklabs-gcp-[a-z0-9-]+-(?:artifact-)?bucket)\b/i);
+    const ossBucket =
+      extraVars['primary_project.startup_script.model_artifact_bucket'] ||
+      (bucketMatch ? bucketMatch[1] : `${proj}-bucket`);
+
+    const instanceMatch = fullLabText.match(/\b([a-z0-9-]+-workbench-instance)\b/i);
+    const ossInstance =
+      extraVars['primary_project.startup_script.instance_name'] ||
+      (instanceMatch ? instanceMatch[1] : 'cymbal-workbench-instance');
+
+    const machineTypeMatch = fullLabText.match(/\b([ne]\d-[a-z]+-\d+)\b/i);
+    const ossMachineType = machineTypeMatch ? machineTypeMatch[1] : 'e2-standard-4';
+
     const ossNotebook = 'get_started_with_oss_tuning_on_vertexai.ipynb';
+    const gcsNbMatch = fullLabText.match(/gs:\/\/[a-z0-9-]+\/get_started_with_oss_tuning_on_vertexai\.ipynb/i);
+    const ossSourceNotebookGcs =
+      extraVars['primary_project.startup_script.challenge_file_path'] ||
+      (gcsNbMatch ? gcsNbMatch[0] : `gs://${ossBucket}/${ossNotebook}`);
+
+    const lrMatch = fullLabText.match(/Learning\s+Rate[^0-9\n]*([0-9]+(?:\.[0-9]+)?(?:e-[0-9]+)?)/i);
+    const ossLearningRate = lrMatch ? lrMatch[1] : fullLabText.includes('2e-6') ? '2e-6' : '0.01';
 
     if (
       task.number === 1 ||
@@ -3305,14 +3330,14 @@ echo "Verified Cloud Storage bucket gs://${ossBucket} in ${ossRegion}"`;
 
     if (
       task.number === 2 ||
-      (lower.includes('workbench instance') && lower.includes('cymbal-workbench-instance') && !lower.includes('gsutil cp'))
+      (lower.includes('workbench instance') && !lower.includes('gsutil cp'))
     ) {
       const script = `set -e
 gcloud services enable notebooks.googleapis.com aiplatform.googleapis.com compute.googleapis.com --project=${proj} --quiet || true
 if ! gcloud workbench instances describe ${ossInstance} --location=${ossZone} --project=${proj} >/dev/null 2>&1; then
   gcloud workbench instances create ${ossInstance} \\
     --location=${ossZone} \\
-    --machine-type=e2-standard-4 \\
+    --machine-type=${ossMachineType} \\
     --project=${proj} \\
     --quiet
 fi
@@ -3324,7 +3349,7 @@ for i in $(seq 1 45); do
 done`;
       return {
         script,
-        summary: `Create or verify Vertex AI Workbench instance ${ossInstance} in ${ossZone}.`,
+        summary: `Create or verify Vertex AI Workbench instance ${ossInstance} (${ossMachineType}) in ${ossZone}.`,
       };
     }
 
@@ -3338,13 +3363,13 @@ sys.path.insert(0, "/tmp")
 import wb_helper
 
 wb_helper.exec_on_workbench(
-    "gsutil cp gs://${ossBucket}/${ossNotebook} /home/jupyter/${ossNotebook} && chown jupyter:jupyter /home/jupyter/${ossNotebook} 2>/dev/null || true && ls -la /home/jupyter/${ossNotebook}",
+    "(gsutil cp ${ossSourceNotebookGcs} /home/jupyter/${ossNotebook} || gsutil cp gs://${ossBucket}/${ossNotebook} /home/jupyter/${ossNotebook}) && chown jupyter:jupyter /home/jupyter/${ossNotebook} 2>/dev/null || true && ls -la /home/jupyter/${ossNotebook}",
     timeout=120,
 )
 PYEOF`;
       return {
         script,
-        summary: `Copy ${ossNotebook} from gs://${ossBucket} into /home/jupyter/${ossNotebook} on ${ossInstance}.`,
+        summary: `Copy ${ossNotebook} from ${ossSourceNotebookGcs} into /home/jupyter/${ossNotebook} on ${ossInstance}.`,
       };
     }
 
@@ -3353,13 +3378,16 @@ PYEOF`;
       lower.includes('prepare the training, validation, and evaluation datasets') ||
       lower.includes('clean and split the dataset')
     ) {
-      const script = `python3 - << 'PYEOF'
+      const script = `export LAB_BUCKET_NAME="${ossBucket}"
+export LAB_REGION="${ossRegion}"
+export LAB_LEARNING_RATE="${ossLearningRate}"
+python3 - << 'PYEOF'
 import sys
 sys.path.insert(0, "/tmp")
 import wb_helper
 
 wb_helper.exec_on_workbench(
-    "test -f /home/jupyter/${ossNotebook} || (gsutil cp gs://${ossBucket}/${ossNotebook} /home/jupyter/${ossNotebook} && chown jupyter:jupyter /home/jupyter/${ossNotebook} 2>/dev/null || true)",
+    "test -f /home/jupyter/${ossNotebook} || ((gsutil cp ${ossSourceNotebookGcs} /home/jupyter/${ossNotebook} || gsutil cp gs://${ossBucket}/${ossNotebook} /home/jupyter/${ossNotebook}) && chown jupyter:jupyter /home/jupyter/${ossNotebook} 2>/dev/null || true)",
     timeout=90,
 )
 res = wb_helper.update_and_run_notebook(
@@ -3383,13 +3411,16 @@ PYEOF`;
       lower.includes('gemma 3 1b') ||
       lower.includes('sft.train')
     ) {
-      const script = `python3 - << 'PYEOF'
+      const script = `export LAB_BUCKET_NAME="${ossBucket}"
+export LAB_REGION="${ossRegion}"
+export LAB_LEARNING_RATE="${ossLearningRate}"
+python3 - << 'PYEOF'
 import sys, time
 sys.path.insert(0, "/tmp")
 import wb_helper
 
 wb_helper.exec_on_workbench(
-    "test -f /home/jupyter/${ossNotebook} || (gsutil cp gs://${ossBucket}/${ossNotebook} /home/jupyter/${ossNotebook} && chown jupyter:jupyter /home/jupyter/${ossNotebook} 2>/dev/null || true)",
+    "test -f /home/jupyter/${ossNotebook} || ((gsutil cp ${ossSourceNotebookGcs} /home/jupyter/${ossNotebook} || gsutil cp gs://${ossBucket}/${ossNotebook} /home/jupyter/${ossNotebook}) && chown jupyter:jupyter /home/jupyter/${ossNotebook} 2>/dev/null || true)",
     timeout=90,
 )
 res = wb_helper.update_and_run_notebook(
@@ -3404,7 +3435,7 @@ time.sleep(8)
 PYEOF`;
       return {
         script,
-        summary: `Patch, execute, and save Cells 0..47 of /home/jupyter/${ossNotebook} on ${ossInstance} to launch the Gemma 3 1B FULL Supervised Fine-Tuning job ("StackOverflow Q&A Supervised Tuned Model") and persist cell outputs.`,
+        summary: `Patch, execute, and save Cells 0..47 of /home/jupyter/${ossNotebook} on ${ossInstance} (with BUCKET_NAME=gs://${ossBucket} and learning_rate=${ossLearningRate}) to launch the Gemma 3 1B FULL Supervised Fine-Tuning job ("StackOverflow Q&A Supervised Tuned Model") and persist cell outputs.`,
       };
     }
   }

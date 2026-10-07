@@ -81,24 +81,16 @@ export default function App() {
   const [checkingAllProgress, setCheckingAllProgress] = useState<boolean>(false);
   const [checkingModels, setCheckingModels] = useState<boolean>(false);
   const [endingLab, setEndingLab] = useState<boolean>(false);
-  const [showSwitchCourseModal, setShowSwitchCourseModal] = useState<boolean>(false);
-  const [switchingCourse, setSwitchingCourse] = useState<boolean>(false);
-  const [newCourseUrl, setNewCourseUrl] = useState<string>('');
-  const [newCourseTabKey, setNewCourseTabKey] = useState<string>('');
-  const [endCurrentBeforeSwitch, setEndCurrentBeforeSwitch] = useState<boolean>(true);
-  const [showBridgeModal, setShowBridgeModal] = useState<boolean>(false);
   const [canStartLocally, setCanStartLocally] = useState<boolean>(false);
   const [startingBridge, setStartingBridge] = useState<boolean>(false);
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
-  const [pendingActionLabel, setPendingActionLabel] = useState<string | null>(null);
-  const pendingActionRef = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     fetch('/api/state')
       .then((r) => r.json())
       .then((data: RunnerState) => {
         setState(data);
-        if (data.labUrl) setUrlInput(data.labUrl);
+        setUrlInput(data.labUrl || '');
       })
       .catch(() => {});
 
@@ -140,38 +132,6 @@ export default function App() {
     };
   }, []);
 
-  // Poll bridge status while the setup modal is open and auto-run any pending action once connected
-  useEffect(() => {
-    if (!showBridgeModal) return;
-    const interval = setInterval(async () => {
-      try {
-        const res = await fetch('/api/bridge/status');
-        const data = await res.json();
-        if (data && typeof data.canStartLocally === 'boolean') {
-          setCanStartLocally(data.canStartLocally);
-        }
-        if (data?.connected) {
-          setState((prev) => ({ ...prev, macBridgeConnected: true }));
-        }
-      } catch {
-        // Ignore
-      }
-    }, 2000);
-    return () => clearInterval(interval);
-  }, [showBridgeModal]);
-
-  useEffect(() => {
-    if (state.macBridgeConnected && showBridgeModal) {
-      setShowBridgeModal(false);
-      const action = pendingActionRef.current;
-      pendingActionRef.current = null;
-      setPendingActionLabel(null);
-      if (action) {
-        action().catch(() => {});
-      }
-    }
-  }, [state.macBridgeConnected, showBridgeModal]);
-
   useEffect(() => {
     if (!editingCreds) {
       setCredDraft(state.credentials);
@@ -180,6 +140,10 @@ export default function App() {
 
   // Auto-expand active task
   useEffect(() => {
+    if (state.tasks.length === 0) {
+      setExpandedTasks({});
+      return;
+    }
     if (state.activeTaskId) {
       setExpandedTasks((prev) => ({ ...prev, [state.activeTaskId!]: true }));
     } else if (state.tasks.length > 0 && Object.keys(expandedTasks).length === 0) {
@@ -201,9 +165,7 @@ export default function App() {
       const data = await res.json();
       if (data?.state) {
         setState(data.state);
-        if (data.state.labUrl) {
-          setUrlInput(data.state.labUrl);
-        }
+        setUrlInput(data.state.labUrl || '');
       }
       return data;
     } catch {
@@ -213,10 +175,10 @@ export default function App() {
 
   /**
    * Verifies that the Mac Chrome Bridge is connected before executing an action that interacts with desktop Chrome.
-   * If not running, opens the Download & Launch modal and queues the action to run automatically once connected.
+   * Never opens any blocking modal overlay in front of the main screen.
    */
   const ensureMacBridgeConnected = async (
-    actionLabel: string,
+    _actionLabel: string,
     action: () => Promise<void>
   ) => {
     if (state.macBridgeConnected) {
@@ -234,27 +196,42 @@ export default function App() {
         await action();
         return;
       }
+      if (data?.canStartLocally) {
+        const startRes = await apiPost('/api/bridge/start');
+        if (startRes?.started || startRes?.state?.macBridgeConnected) {
+          await action();
+          return;
+        }
+      }
     } catch {
-      // Fall through to modal
+      // Ignore bridge probe error
     }
-    pendingActionRef.current = action;
-    setPendingActionLabel(actionLabel);
-    setShowBridgeModal(true);
+    await action();
   };
 
   const handleStartMacBridge = async () => {
-    if (!canStartLocally) {
-      setShowBridgeModal(true);
-      return;
-    }
     setStartingBridge(true);
     try {
       const data = await apiPost('/api/bridge/start');
       if (!data?.started && !data?.state?.macBridgeConnected) {
-        setShowBridgeModal(true);
+        const cmd = `curl -fsSL ${window.location.origin}/api/bridge/start.sh | sh`;
+        try {
+          await navigator.clipboard.writeText(cmd);
+          setCopiedField('bridge-oneliner');
+          setTimeout(() => setCopiedField(null), 2500);
+        } catch {
+          // Ignore clipboard error
+        }
       }
     } catch {
-      setShowBridgeModal(true);
+      const cmd = `curl -fsSL ${window.location.origin}/api/bridge/start.sh | sh`;
+      try {
+        await navigator.clipboard.writeText(cmd);
+        setCopiedField('bridge-oneliner');
+        setTimeout(() => setCopiedField(null), 2500);
+      } catch {
+        // Ignore clipboard error
+      }
     } finally {
       setStartingBridge(false);
     }
@@ -416,44 +393,31 @@ export default function App() {
   };
 
   const handleEndLab = async () => {
-    await ensureMacBridgeConnected('End Current Lab', async () => {
-      setEndingLab(true);
-      try {
-        await apiPost('/api/lab/end');
-      } finally {
-        setEndingLab(false);
-      }
-    });
-  };
-
-  const handleOpenSwitchCourseModal = async () => {
-    setEndCurrentBeforeSwitch(Boolean(state.isLabStarted));
-    setNewCourseUrl('');
-    setNewCourseTabKey('');
-    setShowSwitchCourseModal(true);
-    if (state.macBridgeConnected) {
-      apiPost('/api/chrome/scan').catch(() => {});
+    setEndingLab(true);
+    try {
+      await apiPost('/api/lab/reset', {
+        endLabInChrome: true,
+        closeIncognito: true,
+      });
+      setUrlInput('');
+      setExpandedTasks({});
+    } finally {
+      setEndingLab(false);
     }
   };
 
-  const handleConfirmSwitchCourse = async (autoRun: boolean) => {
-    await ensureMacBridgeConnected('Switch Lab', async () => {
-      setSwitchingCourse(true);
-      try {
-        await apiPost('/api/lab/switch-course', {
-          url: newCourseUrl.trim() || undefined,
-          labTabKey: newCourseTabKey || undefined,
-          endCurrentFirst: endCurrentBeforeSwitch,
-          autoRun,
-        });
-        if (newCourseUrl.trim()) {
-          setUrlInput(newCourseUrl.trim());
-        }
-        setShowSwitchCourseModal(false);
-      } finally {
-        setSwitchingCourse(false);
-      }
-    });
+  const handleResetForNewLab = async () => {
+    setEndingLab(true);
+    try {
+      await apiPost('/api/lab/reset', {
+        endLabInChrome: true,
+        closeIncognito: true,
+      });
+      setUrlInput('');
+      setExpandedTasks({});
+    } finally {
+      setEndingLab(false);
+    }
   };
 
   const handleModeChange = async (mode: ExecutionMode) => {
@@ -684,14 +648,16 @@ export default function App() {
               </div>
             )}
 
-            {state.tasks.length > 0 && (
+            {(state.tasks.length > 0 || state.isLabStarted || state.selectedLabTabKey || state.labUrl) && (
               <button
                 type="button"
-                onClick={handleOpenSwitchCourseModal}
-                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition"
+                onClick={handleResetForNewLab}
+                disabled={endingLab}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition disabled:opacity-60"
+                title="End current lab, close student Incognito windows, and reset screen for a new lab"
               >
-                <Layers className="w-3.5 h-3.5 text-indigo-400" />
-                Switch Lab
+                <RefreshCw className={`w-3.5 h-3.5 text-indigo-400 ${endingLab ? 'animate-spin' : ''}`} />
+                {endingLab ? 'Resetting...' : 'New Lab / Reset'}
               </button>
             )}
           </div>
@@ -779,6 +745,11 @@ export default function App() {
                         <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                         Starting Bridge...
                       </>
+                    ) : copiedField === 'bridge-oneliner' ? (
+                      <>
+                        <Check className="w-3.5 h-3.5" />
+                        Copied Bridge Command
+                      </>
                     ) : (
                       <>
                         <Play className="w-3.5 h-3.5 fill-current" />
@@ -786,14 +757,14 @@ export default function App() {
                       </>
                     )}
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowBridgeModal(true)}
+                  <a
+                    href="/api/bridge/Start-Mac-Chrome-Bridge.command?download=1"
+                    download="Start-Mac-Chrome-Bridge.command"
                     className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium flex items-center gap-1 cursor-pointer transition"
-                    title="View terminal command & downloadable Mac Bridge launcher"
+                    title="Download Start-Mac-Chrome-Bridge.command launcher"
                   >
                     <Download className="w-3.5 h-3.5 text-cyan-400" />
-                  </button>
+                  </a>
                 </>
               )}
             </div>
@@ -1999,278 +1970,6 @@ export default function App() {
           </section>
         </div>
       </main>
-
-      {/* Mac Chrome Bridge Setup Modal */}
-      {showBridgeModal && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-xl w-full shadow-2xl overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center">
-                  <Monitor className="w-5 h-5 text-cyan-400" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-white">
-                    Step 1: Start the Mac Chrome Bridge
-                  </h3>
-                  <p className="text-xs text-slate-400">
-                    {pendingActionLabel
-                      ? `Will automatically continue "${pendingActionLabel}" as soon as connected`
-                      : 'Connects Skills Runner to your desktop Chrome and spawns student Incognito sessions'}
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowBridgeModal(false);
-                  pendingActionRef.current = null;
-                  setPendingActionLabel(null);
-                }}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-5 text-xs text-slate-300">
-              {canStartLocally && (
-                <div className="rounded-xl bg-emerald-950/30 border border-emerald-500/30 p-3.5 flex items-center justify-between gap-3">
-                  <div>
-                    <div className="font-semibold text-emerald-300">
-                      Local macOS Server Detected
-                    </div>
-                    <p className="text-[11px] text-slate-300 mt-0.5">
-                      Start the Mac Chrome Bridge process directly with one click:
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleStartMacBridge}
-                    disabled={startingBridge}
-                    className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center gap-1.5 cursor-pointer shrink-0 disabled:opacity-60"
-                  >
-                    {startingBridge ? (
-                      <>
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        Starting...
-                      </>
-                    ) : (
-                      <>
-                        <Play className="w-3.5 h-3.5 fill-current" />
-                        Start Bridge Now
-                      </>
-                    )}
-                  </button>
-                </div>
-              )}
-
-              {/* Option 1: 1-Line Terminal Command */}
-              <div className="space-y-2">
-                <div className="font-semibold text-slate-100 flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 flex items-center justify-center text-[11px] font-bold">
-                    A
-                  </span>
-                  Run This 1-Line Command in macOS Terminal (Recommended)
-                </div>
-                <div className="pl-7 flex items-center gap-2">
-                  <code className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-[11px] text-cyan-300 overflow-x-auto">
-                    {`curl -fsSL ${window.location.origin}/api/bridge/start.sh | sh`}
-                  </code>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      copyToClipboard(
-                        'bridge-oneliner',
-                        `curl -fsSL ${window.location.origin}/api/bridge/start.sh | sh`
-                      )
-                    }
-                    className="px-3 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold flex items-center gap-1.5 cursor-pointer shrink-0"
-                  >
-                    {copiedField === 'bridge-oneliner' ? (
-                      <>
-                        <Check className="w-3.5 h-3.5" />
-                        Copied
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-3.5 h-3.5" />
-                        Copy Command
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-
-              {/* Option 2: Download Launcher */}
-              <div className="space-y-2">
-                <div className="font-semibold text-slate-100 flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 flex items-center justify-center text-[11px] font-bold">
-                    B
-                  </span>
-                  Or Download the macOS Launcher
-                </div>
-                <div className="flex flex-wrap gap-2.5 pl-7 pt-1">
-                  <a
-                    href="/api/bridge/Start-Mac-Chrome-Bridge.command?download=1"
-                    download="Start-Mac-Chrome-Bridge.command"
-                    className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 font-semibold flex items-center gap-2 transition"
-                  >
-                    <Download className="w-4 h-4 text-cyan-400" />
-                    Download Start-Mac-Chrome-Bridge.command
-                  </a>
-                </div>
-              </div>
-
-              <div className="rounded-xl bg-slate-950 border border-slate-800 p-3 text-[11px] text-slate-400 leading-relaxed">
-                <strong className="text-slate-200">Tip for fastest Chrome automation:</strong> In Google Chrome's top menu bar, enable{' '}
-                <code className="text-cyan-300">View → Developer → Allow JavaScript from Apple Events</code> so Skills Runner can sign into student Incognito windows silently.
-              </div>
-            </div>
-
-            <div className="px-6 py-3.5 border-t border-slate-800 bg-slate-950/70 flex items-center justify-between">
-              <div className="flex items-center gap-2 text-xs text-amber-300 font-mono">
-                <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
-                Waiting for Mac Bridge connection...
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowBridgeModal(false);
-                  pendingActionRef.current = null;
-                  setPendingActionLabel(null);
-                }}
-                className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium cursor-pointer"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Switch Lab Modal */}
-      {showSwitchCourseModal && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-xl w-full rounded-2xl bg-slate-900 border border-slate-700/80 shadow-2xl overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center">
-                  <Layers className="w-4 h-4 text-indigo-400" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-white">Switch to Another Lab</h3>
-                  <p className="text-[11px] text-slate-400">
-                    End the current lab and point at a new Google Cloud Skills Boost lab
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowSwitchCourseModal(false)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-4 text-xs text-slate-300">
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <label className="font-semibold text-slate-200">
-                    Select an Open Lab Tab in Chrome
-                  </label>
-                  <button
-                    type="button"
-                    onClick={handleScanChromeWindows}
-                    disabled={scanningWindows}
-                    className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1 cursor-pointer"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${scanningWindows ? 'animate-spin' : ''}`} />
-                    Refresh Tabs
-                  </button>
-                </div>
-                <select
-                  value={newCourseTabKey}
-                  onChange={(e) => {
-                    setNewCourseTabKey(e.target.value);
-                    if (e.target.value) setNewCourseUrl('');
-                  }}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
-                >
-                  <option value="">-- Choose an Open Chrome Tab (or paste a URL below) --</option>
-                  {allLabSelectTabs.map((t) => (
-                    <option key={t.key} value={t.key}>
-                      {formatTabLabel(t)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="font-semibold text-slate-200 block">
-                  Or Paste a Lab URL
-                </label>
-                <input
-                  type="url"
-                  value={newCourseUrl}
-                  onChange={(e) => {
-                    setNewCourseUrl(e.target.value);
-                    if (e.target.value) setNewCourseTabKey('');
-                  }}
-                  placeholder="https://www.cloudskillsboost.google/focuses/... or https://partner.skills.google/..."
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3.5 py-2 text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              <label className="flex items-center gap-2.5 p-3 rounded-xl bg-slate-950/90 border border-slate-800 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={endCurrentBeforeSwitch}
-                  onChange={(e) => setEndCurrentBeforeSwitch(e.target.checked)}
-                  className="rounded border-slate-600 bg-slate-900 text-indigo-600 focus:ring-indigo-500"
-                />
-                <div>
-                  <span className="font-semibold text-slate-200 block">
-                    End current active lab in Google Chrome before switching
-                  </span>
-                  <span className="text-[11px] text-slate-400">
-                    Clicks "End Lab" and confirms termination so your next lab can start immediately.
-                  </span>
-                </div>
-              </label>
-            </div>
-
-            <div className="px-6 py-3.5 border-t border-slate-800 bg-slate-950/70 flex flex-wrap items-center justify-end gap-2.5">
-              <button
-                type="button"
-                onClick={() => setShowSwitchCourseModal(false)}
-                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => handleConfirmSwitchCourse(false)}
-                disabled={switchingCourse}
-                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-500/30 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition disabled:opacity-60"
-              >
-                <FileSearch className="w-3.5 h-3.5" />
-                Switch & Load Instructions
-              </button>
-              <button
-                type="button"
-                onClick={() => handleConfirmSwitchCourse(true)}
-                disabled={switchingCourse}
-                className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shadow-sm disabled:opacity-60"
-              >
-                <Play className="w-3.5 h-3.5 fill-current" />
-                Switch, Start & Run Lab
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

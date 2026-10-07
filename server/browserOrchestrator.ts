@@ -19,7 +19,9 @@ import {
   triggerStartLabAndExtractCredentials,
 } from './labParser.js';
 import {
+  clearSavedStateOnMacBridge,
   clickEndLabInUserChrome,
+  closeIncognitoWindowsInUserChrome,
   execInStudentCloudShellBridge,
   focusUserChromeTab,
   inspectStudentCloudShellWorkspace,
@@ -119,25 +121,24 @@ export class LabBrowserOrchestrator {
       macBridgeConnected: macBridgeHub.isConnected(),
     };
 
-    // Restore persisted state from disk on startup if available
-    this.restoreSavedState().catch(() => {});
+    // Always start on the clean initial screen (do not auto-restore stale runner_state.json)
+    try {
+      if (fs.existsSync(LOCAL_STATE_FILE)) {
+        fs.unlinkSync(LOCAL_STATE_FILE);
+      }
+    } catch {
+      // Ignore cleanup error
+    }
 
     macBridgeHub.onConnectionChange((connected) => {
       this.state.macBridgeConnected = connected;
       if (connected) {
-        this.addLog(
-          'success',
-          'system',
-          'Live Mac Chrome Bridge connected (Passive Mode) — open Chrome tabs synced.'
-        );
-        this.restoreSavedState()
-          .catch(() => {})
-          .finally(() => {
-            this.scanOpenChromeWindows(false).catch(() => {});
-          });
+        if (this.state.status === 'idle' && this.state.tasks.length === 0) {
+          clearSavedStateOnMacBridge().catch(() => {});
+        }
+        this.scanOpenChromeWindows(false).catch(() => {});
       } else {
         this.state.availableChromeTabs = [];
-        this.addLog('info', 'system', 'Mac Chrome Bridge disconnected.');
         this.emitState();
       }
     });
@@ -393,7 +394,7 @@ export class LabBrowserOrchestrator {
     }
   }
 
-  private applyScannedTabs(tabs: ChromeTabDescriptor[]) {
+  private applyScannedTabs(tabs: ChromeTabDescriptor[], autoSelectLab = false) {
     const connected = macBridgeHub.isConnected();
     this.state.macBridgeConnected = connected;
     if (!connected) {
@@ -403,9 +404,23 @@ export class LabBrowserOrchestrator {
     this.state.availableChromeTabs = tabs;
 
     const findByKey = (k?: string | null) => tabs.find((t) => t.key === k);
+    const hasActiveLabSession = Boolean(
+      this.state.selectedLabTabKey ||
+        this.state.labUrl ||
+        this.state.isLabStarted ||
+        this.state.tasks.length > 0 ||
+        autoSelectLab
+    );
 
-    const currentLabTab = findByKey(this.state.selectedLabTabKey);
-    if (!currentLabTab || currentLabTab.suggestedRole !== 'lab') {
+    if (this.state.selectedLabTabKey) {
+      const currentLabTab = findByKey(this.state.selectedLabTabKey);
+      if (!currentLabTab) {
+        const movedLabTab =
+          (this.state.labUrl && tabs.find((t) => t.url === this.state.labUrl)) ||
+          tabs.find((t) => t.suggestedRole === 'lab');
+        this.state.selectedLabTabKey = movedLabTab ? movedLabTab.key : null;
+      }
+    } else if (autoSelectLab) {
       const labTab = tabs.find((t) => t.suggestedRole === 'lab');
       if (labTab) {
         this.state.selectedLabTabKey = labTab.key;
@@ -414,32 +429,37 @@ export class LabBrowserOrchestrator {
       }
     }
 
-    const currentConsoleTab = findByKey(this.state.selectedConsoleTabKey);
-    if (!currentConsoleTab || currentConsoleTab.windowMode !== 'incognito') {
-      const consoleTab = tabs.find(
-        (t) => t.suggestedRole === 'console' && t.windowMode === 'incognito'
-      );
-      this.state.selectedConsoleTabKey = consoleTab ? consoleTab.key : null;
-    }
+    if (hasActiveLabSession) {
+      const currentConsoleTab = findByKey(this.state.selectedConsoleTabKey);
+      if (!currentConsoleTab || currentConsoleTab.windowMode !== 'incognito') {
+        const consoleTab = tabs.find(
+          (t) => t.suggestedRole === 'console' && t.windowMode === 'incognito'
+        );
+        this.state.selectedConsoleTabKey = consoleTab ? consoleTab.key : null;
+      }
 
-    const currentShellTab = findByKey(this.state.selectedCloudShellTabKey);
-    if (!currentShellTab || currentShellTab.windowMode !== 'incognito') {
-      const shellTab =
-        tabs.find((t) => t.suggestedRole === 'cloud_shell' && t.windowMode === 'incognito') ||
-        findByKey(this.state.selectedConsoleTabKey);
-      this.state.selectedCloudShellTabKey =
-        shellTab && shellTab.windowMode === 'incognito' ? shellTab.key : null;
-    }
+      const currentShellTab = findByKey(this.state.selectedCloudShellTabKey);
+      if (!currentShellTab || currentShellTab.windowMode !== 'incognito') {
+        const shellTab =
+          tabs.find((t) => t.suggestedRole === 'cloud_shell' && t.windowMode === 'incognito') ||
+          findByKey(this.state.selectedConsoleTabKey);
+        this.state.selectedCloudShellTabKey =
+          shellTab && shellTab.windowMode === 'incognito' ? shellTab.key : null;
+      }
 
-    this.syncMetadataFromSelectedTabs();
+      this.syncMetadataFromSelectedTabs();
+    } else {
+      this.state.selectedConsoleTabKey = null;
+      this.state.selectedCloudShellTabKey = null;
+      this.state.isConsoleSignedIn = false;
+    }
   }
 
   /**
-   * Scans all open windows and tabs in the user's Google Chrome (`Google Chrome.app`),
-   * auto-selecting the best Lab, Cloud Console, and Cloud Shell tabs if not yet chosen.
+   * Scans all open windows and tabs in the user's Google Chrome (`Google Chrome.app`).
    * Never triggers `save tab` automatically so in-progress navigations or SSO logins are never interrupted.
    */
-  public async scanOpenChromeWindows(_autoBindOnStartup = false): Promise<ChromeTabDescriptor[]> {
+  public async scanOpenChromeWindows(autoBindOnStartup = false): Promise<ChromeTabDescriptor[]> {
     if (!macBridgeHub.isConnected()) {
       this.state.macBridgeConnected = false;
       this.state.availableChromeTabs = [];
@@ -447,7 +467,7 @@ export class LabBrowserOrchestrator {
       return [];
     }
     const tabs = await listUserChromeTabs();
-    this.applyScannedTabs(tabs);
+    this.applyScannedTabs(tabs, autoBindOnStartup);
     this.emitState();
     return tabs;
   }
@@ -498,6 +518,21 @@ export class LabBrowserOrchestrator {
     consoleTabKey?: string | null;
     cloudShellTabKey?: string | null;
   }): Promise<void> {
+    if (params.labTabKey === null || params.labTabKey === '') {
+      await this.resetForNewLab({ endLabInChrome: false, closeIncognito: false });
+      return;
+    }
+
+    const isSwitchingFromLoadedLab = Boolean(
+      params.labTabKey &&
+        this.state.selectedLabTabKey &&
+        params.labTabKey !== this.state.selectedLabTabKey &&
+        (this.state.tasks.length > 0 || this.state.isLabStarted)
+    );
+    if (isSwitchingFromLoadedLab) {
+      await this.resetForNewLab({ endLabInChrome: false, closeIncognito: true });
+    }
+
     await this.scanOpenChromeWindows(false);
 
     if (params.labTabKey !== undefined) {
@@ -639,7 +674,15 @@ export class LabBrowserOrchestrator {
    * so corporate SSO / google.com authentication is preserved automatically, then snapshots and parses the lab.
    */
   public async openLabUrl(labUrl: string): Promise<void> {
-    this.state.labUrl = labUrl.trim();
+    const trimmedUrl = labUrl.trim();
+    if (
+      (this.state.tasks.length > 0 || this.state.isLabStarted) &&
+      this.state.labUrl &&
+      this.state.labUrl !== trimmedUrl
+    ) {
+      await this.resetForNewLab({ endLabInChrome: false, closeIncognito: true });
+    }
+    this.state.labUrl = trimmedUrl;
     this.setStatus('launching_lab');
 
     try {
@@ -1096,53 +1139,123 @@ export class LabBrowserOrchestrator {
   }
 
   /**
-   * Stops any active execution loop, clicks "End Lab" + confirms termination in the user's Chrome Lab tab,
-   * and clears expired student credentials.
+   * Closes out of all open student Incognito Chrome windows, optionally ends the active lab in Chrome,
+   * clears persisted state on disk/Mac Bridge, and resets the UI back to the clean Screenshot-329.png screen.
    */
-  public async endCurrentLab(): Promise<{ ended: boolean; message: string }> {
+  public async resetForNewLab(options?: {
+    endLabInChrome?: boolean;
+    closeIncognito?: boolean;
+  }): Promise<{ ended: boolean; closedIncognitoCount: number }> {
     this.pauseRequested = true;
     this.isLoopRunning = false;
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
 
-    this.addLog('action', 'lab_window', 'Ending active lab session in Google Chrome...');
-    const res = await clickEndLabInUserChrome(
-      this.state.labCurrentUrl || this.state.labUrl,
-      parseTabKey(this.state.selectedLabTabKey)
-    );
+    let ended = false;
+    if (
+      options?.endLabInChrome !== false &&
+      (this.state.isLabStarted || this.state.labCurrentUrl || this.state.labUrl || this.state.selectedLabTabKey)
+    ) {
+      try {
+        const endRes = await clickEndLabInUserChrome(
+          this.state.labCurrentUrl || this.state.labUrl,
+          parseTabKey(this.state.selectedLabTabKey)
+        );
+        ended = endRes.ended;
+      } catch {
+        // Ignore end lab errors during reset
+      }
+    }
 
-    this.state.isLabStarted = false;
-    this.state.isConsoleSignedIn = false;
-    this.state.labTimer = '00:00:00';
-    this.state.labInstanceId = '';
-    this.state.credentials = {
-      username: '',
-      password: '',
-      projectId: '',
-      consoleUrl: '',
-      region: '',
-      zone: '',
-      extraVars: {},
-    };
-    this.setStatus('idle');
-
-    if (res.ended) {
-      this.addLog('success', 'lab_window', res.message);
-    } else {
-      this.addLog('warn', 'lab_window', res.message);
+    let closedIncognitoCount = 0;
+    if (options?.closeIncognito !== false) {
+      try {
+        const incRes = await closeIncognitoWindowsInUserChrome();
+        closedIncognitoCount = incRes.closedCount || 0;
+      } catch {
+        // Ignore incognito close errors
+      }
+      try {
+        if (this.consolePage && !this.consolePage.isClosed()) {
+          await this.consolePage.close();
+        }
+        if (this.incognitoContext) {
+          await this.incognitoContext.close();
+        }
+      } catch {
+        // Ignore Playwright context close errors
+      }
+      this.consolePage = null;
+      this.incognitoContext = null;
     }
 
     try {
-      await this.syncLabPageFromUserChrome();
-      await this.refreshScreenshots();
+      if (fs.existsSync(LOCAL_STATE_FILE)) {
+        fs.unlinkSync(LOCAL_STATE_FILE);
+      }
     } catch {
-      // Ignore snapshot refresh errors after ending
+      // Ignore file removal error
     }
+    await clearSavedStateOnMacBridge().catch(() => {});
+
+    this.state = {
+      ...this.state,
+      status: 'idle',
+      labUrl: '',
+      labTitle: '',
+      labTimer: '00:00:00',
+      isLabStarted: false,
+      isConsoleSignedIn: false,
+      labInstanceId: '',
+      totalScore: 0,
+      maxScore: 0,
+      credentials: {
+        username: '',
+        password: '',
+        projectId: '',
+        consoleUrl: '',
+        region: '',
+        zone: '',
+        extraVars: {},
+      },
+      tasks: [],
+      activeTaskId: null,
+      activeStepId: null,
+      labScreenshot: null,
+      consoleScreenshot: null,
+      labCurrentUrl: '',
+      consoleCurrentUrl: '',
+      logs: [],
+      lastThought: '',
+      selectedLabTabKey: null,
+      selectedConsoleTabKey: null,
+      selectedCloudShellTabKey: null,
+    };
+
+    await this.scanOpenChromeWindows(false);
     this.emitState();
-    return res;
+    return { ended, closedIncognitoCount };
   }
 
   /**
-   * Ends the current lab (if requested), resets all lab state/credentials/tasks cleanly,
-   * switches to a different Skill Course / Lab URL or open Chrome tab, and optionally starts autonomous execution.
+   * Stops any active execution loop, clicks "End Lab" + confirms termination in the user's Chrome Lab tab,
+   * closes all student Incognito Chrome windows, and resets the screen to the clean initial view.
+   */
+  public async endCurrentLab(): Promise<{ ended: boolean; message: string }> {
+    const res = await this.resetForNewLab({ endLabInChrome: true, closeIncognito: true });
+    return {
+      ended: res.ended,
+      message: res.ended
+        ? 'Lab ended, Incognito windows closed, and screen reset.'
+        : 'Closed Incognito windows and reset screen for new lab.',
+    };
+  }
+
+  /**
+   * Ends the current lab (if requested), closes out of all student Incognito windows,
+   * resets all lab state/credentials/tasks cleanly to the initial screen, and optionally loads a new lab.
    */
   public async switchSkillCourse(params: {
     url?: string;
@@ -1150,43 +1263,12 @@ export class LabBrowserOrchestrator {
     endCurrentFirst?: boolean;
     autoRun?: boolean;
   }): Promise<void> {
-    this.pauseRequested = true;
-    this.isLoopRunning = false;
-
-    if (params.endCurrentFirst && this.state.isLabStarted) {
-      await this.endCurrentLab();
-    }
-
-    this.state.isLabStarted = false;
-    this.state.isConsoleSignedIn = false;
-    this.state.labTitle = '';
-    this.state.labTimer = '00:00:00';
-    this.state.labInstanceId = '';
-    this.state.totalScore = 0;
-    this.state.maxScore = 0;
-    this.state.tasks = [];
-    this.state.activeTaskId = null;
-    this.state.activeStepId = null;
-    this.state.selectedConsoleTabKey = null;
-    this.state.selectedCloudShellTabKey = null;
-    this.state.credentials = {
-      username: '',
-      password: '',
-      projectId: '',
-      consoleUrl: '',
-      region: '',
-      zone: '',
-      extraVars: {},
-    };
-    this.setStatus('idle');
-    this.emitState();
+    await this.resetForNewLab({
+      endLabInChrome: Boolean(params.endCurrentFirst && this.state.isLabStarted),
+      closeIncognito: true,
+    });
 
     if (params.labTabKey) {
-      this.addLog(
-        'info',
-        'lab_window',
-        `Switching to selected Chrome Lab tab (${params.labTabKey})...`
-      );
       await this.bindChromeTargets({
         labTabKey: params.labTabKey,
         consoleTabKey: null,
@@ -1194,15 +1276,7 @@ export class LabBrowserOrchestrator {
       });
     } else if (params.url && params.url.trim()) {
       const cleanUrl = params.url.trim();
-      this.addLog('info', 'lab_window', `Opening new Skill Course / Lab URL: ${cleanUrl}...`);
       await this.openLabUrl(cleanUrl);
-    } else {
-      await this.scanOpenChromeWindows(false);
-      this.addLog(
-        'info',
-        'system',
-        'Cleared previous lab session. Select an open Chrome tab or paste a new Skill Course URL to begin.'
-      );
     }
 
     if (params.autoRun && this.state.tasks.length > 0) {
