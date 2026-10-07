@@ -534,6 +534,70 @@ async function runVerificationTests() {
   }
   console.log('✓ CEPF L300 RAG Application using ADK fast-path synthesis verified.');
 
+  // 14. Verify multi-checkpoint <ql-activity-tracking> parsing and CEPF L300 Fine-Tune Open-Source Models fast-path
+  await page.setContent(`
+    <!DOCTYPE html>
+    <html>
+      <body>
+        <div class="js-lab-content-body">
+          <h2>Task 4. Prepare the data for fine-tuning</h2>
+          <ol>
+            <li>Clean and split the dataset in get_started_with_oss_tuning_on_vertexai.ipynb</li>
+            <li>Generate and upload JSONL files to Cloud Storage</li>
+          </ol>
+          <ql-activity-tracking step="4">Check my progress</ql-activity-tracking>
+          <ql-activity-tracking step="5">Check my progress</ql-activity-tracking>
+        </div>
+      </body>
+    </html>
+  `);
+  const multiCheckParsed = await parseLabPageDom(page);
+  if (
+    multiCheckParsed.tasks.length !== 1 ||
+    JSON.stringify(multiCheckParsed.tasks[0].checkProgressStepNumbers) !== JSON.stringify([4, 5]) ||
+    multiCheckParsed.tasks[0].checkProgressStepNumber !== 4
+  ) {
+    throw new Error(
+      `Expected checkProgressStepNumbers [4, 5] and primary 4, got: ${JSON.stringify(multiCheckParsed.tasks[0])}`
+    );
+  }
+
+  const ossTuningTask4 = await synthesizeTaskShellScript({
+    labTitle: '[CEPF L300]: Fine-Tune Open-Source Models on Agent Platform',
+    task: {
+      number: 4,
+      title: 'Task 4. Prepare the data for fine-tuning',
+      hasCheckProgress: true,
+      checkProgressStepNumber: 4,
+      checkProgressStepNumbers: [4, 5],
+      rawSectionText: 'Clean and split the dataset, then generate and upload JSONL files.',
+      steps: [],
+    },
+    credentials: modernParsed.credentials,
+  });
+  const ossTuningTask5 = await synthesizeTaskShellScript({
+    labTitle: '[CEPF L300]: Fine-Tune Open-Source Models on Agent Platform',
+    task: {
+      number: 5,
+      title: 'Task 5. Launch the fine-tuning job',
+      hasCheckProgress: true,
+      checkProgressStepNumber: 6,
+      checkProgressStepNumbers: [6],
+      rawSectionText: 'Configure and run the supervised tuning job in get_started_with_oss_tuning_on_vertexai.ipynb.',
+      steps: [],
+    },
+    credentials: modernParsed.credentials,
+  });
+  if (
+    !ossTuningTask4?.script.includes('get_started_with_oss_tuning_on_vertexai.ipynb') ||
+    !ossTuningTask4.script.includes('run_through_cell=43') ||
+    !ossTuningTask5?.summary.includes('StackOverflow Q&A Supervised Tuned Model') ||
+    !ossTuningTask5.script.includes('run_through_cell=47')
+  ) {
+    throw new Error('CEPF L300 Fine-Tune Open-Source Models fast-path synthesis failed.');
+  }
+  console.log('✓ Multi-checkpoint <ql-activity-tracking> parsing & CEPF L300 OSS Tuning fast-path verified.');
+
   await browser.close();
   console.log('✅ All verification tests passed!');
 }

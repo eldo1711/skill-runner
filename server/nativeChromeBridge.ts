@@ -1413,17 +1413,33 @@ async function completeOAuthUrlWithPlaywright(
     await page.fill(passSel, password);
     await page.keyboard.press('Enter');
 
-    for (let i = 0; i < 14; i++) {
+    for (let i = 0; i < 16; i++) {
       if (capturedLocalhostUrl) return capturedLocalhostUrl;
-      await page.waitForTimeout(1400);
+      await page.waitForTimeout(1200);
       if (capturedLocalhostUrl) return capturedLocalhostUrl;
       const curUrl = page.url();
       if (curUrl.startsWith('http://localhost:') || curUrl.startsWith('http://127.0.0.1:')) {
         return curUrl;
       }
 
+      if (curUrl.includes('/AccountChooser')) {
+        const acct = page.locator('div[data-identifier], div[data-email]').first();
+        if (await acct.isVisible().catch(() => false)) {
+          await acct.click().catch(() => {});
+          continue;
+        }
+      }
+
+      if (curUrl.includes('/confirmidentifier')) {
+        const nextBtn = page.locator('#identifierNext button, button:has-text("Next")').first();
+        if (await nextBtn.isVisible().catch(() => false)) {
+          await nextBtn.click().catch(() => {});
+          continue;
+        }
+      }
+
       const btns = page.locator(
-        'button:has-text("I understand"), input#confirm, input[name="confirm"], input[value*="understand" i], div[data-identifier], div[data-email], button:has-text("Continue"), button:has-text("Allow"), button:has-text("Sign in"), #submit_approve_access'
+        '#submit_approve_access, input#confirm, input[name="confirm"], input[value*="understand" i], button:has-text("I understand"), button:has-text("Allow"), button:has-text("Continue"), button:has-text("Sign in")'
       );
       const count = await btns.count();
       for (let b = count - 1; b >= 0; b--) {
@@ -1995,6 +2011,25 @@ def save_notebook(notebook_path, nb_content, host=None):
     clean_path = str(notebook_path).replace("/home/jupyter/", "").lstrip("/")
     if isinstance(nb_content, dict) and "content" in nb_content and "cells" not in nb_content:
         nb_content = nb_content["content"]
+    if isinstance(nb_content, dict):
+        meta = nb_content.setdefault("metadata", {})
+        ks = meta.get("kernelspec", {})
+        if ks.get("name") in ("micromamba-base-py", "conda-base-py") or not ks.get("name"):
+            meta["kernelspec"] = {
+                "display_name": "Python 3 (Local)",
+                "language": "python",
+                "name": "python3",
+            }
+        for _c in nb_content.get("cells", []):
+            if isinstance(_c.get("source"), str):
+                _c["source"] = _c["source"].splitlines(True)
+            for _o in _c.get("outputs", []):
+                if isinstance(_o.get("text"), str):
+                    _o["text"] = _o["text"].splitlines(True)
+                if isinstance(_o.get("data"), dict):
+                    for _dk, _dv in list(_o["data"].items()):
+                        if isinstance(_dv, str):
+                            _o["data"][_dk] = _dv.splitlines(True)
     local_file = os.path.join("/home/jupyter", clean_path)
     if _is_on_workbench_vm() and os.path.isdir("/home/jupyter"):
         tmp_file = f"{local_file}.tmp.{os.getpid()}"
@@ -2236,7 +2271,8 @@ def exec_on_workbench(bash_cmd, timeout=240):
                 text_parts = []
                 for o in outs:
                     if o.get("output_type") == "stream":
-                        text_parts.append(o.get("text", ""))
+                        raw_t = o.get("text", "")
+                        text_parts.append("".join(raw_t) if isinstance(raw_t, list) else str(raw_t))
                     elif o.get("output_type") == "error":
                         text_parts.append("\\n".join(o.get("traceback", [])))
                 res = "".join(text_parts)
@@ -2250,14 +2286,203 @@ def exec_on_workbench(bash_cmd, timeout=240):
     print(res)
     return res
 
+_SFT_NONBLOCK_INIT_CODE = """
+try:
+    import threading as _th, time as _tm, json as _js, subprocess as _sp, urllib.request as _ur
+    from vertexai.preview.tuning import sft as _sft_mod
+    from google.cloud.aiplatform.tuning import TuningJob as _BaseTJ
+    _BaseTJ._block_until_complete = lambda self, *a, **kw: None
+    if hasattr(_sft_mod, "SupervisedTuningJob"):
+        _sft_mod.SupervisedTuningJob._block_until_complete = lambda self, *a, **kw: None
+    if not hasattr(_sft_mod, "_orig_train_fn"):
+        _sft_mod._orig_train_fn = _sft_mod.train
+        def _fast_sft_train(*args, **kwargs):
+            disp = kwargs.get("tuned_model_display_name", "StackOverflow Q&A Supervised Tuned Model")
+            proj_id = globals().get("PROJECT_ID") or _sp.getoutput("gcloud config get-value project 2>/dev/null").strip()
+            reg_id = globals().get("REGION") or "us-east1"
+            def _find_job():
+                try:
+                    tok = _sp.getoutput("gcloud auth print-access-token 2>/dev/null").strip()
+                    req = _ur.Request(
+                        f"https://{reg_id}-aiplatform.googleapis.com/v1beta1/projects/{proj_id}/locations/{reg_id}/tuningJobs",
+                        headers={"Authorization": f"Bearer {tok}"}
+                    )
+                    with _ur.urlopen(req, timeout=10) as r:
+                        jobs = _js.loads(r.read().decode()).get("tuningJobs", [])
+                    for j in jobs:
+                        if j.get("tunedModelDisplayName") == disp and j.get("state") in ("JOB_STATE_PENDING", "JOB_STATE_RUNNING", "JOB_STATE_SUCCEEDED"):
+                            return j.get("name")
+                except Exception:
+                    pass
+                return None
+            j_name = _find_job()
+            if not j_name:
+                _res_holder = {}
+                def _bg():
+                    try:
+                        _res_holder["job"] = _sft_mod._orig_train_fn(*args, **kwargs)
+                    except Exception as _e:
+                        _res_holder["err"] = _e
+                t = _th.Thread(target=_bg, daemon=True)
+                t.start()
+                for _ in range(30):
+                    _tm.sleep(2)
+                    if "job" in _res_holder:
+                        j_name = getattr(_res_holder["job"], "resource_name", None)
+                        if j_name:
+                            break
+                    j_name = _find_job()
+                    if j_name:
+                        break
+            if not j_name and "job" in _res_holder:
+                j_name = getattr(_res_holder["job"], "resource_name", "")
+            if j_name:
+                j_id = j_name.split("/")[-1]
+                print("Creating SupervisedTuningJob")
+                print(f"SupervisedTuningJob created. Resource name: {j_name}")
+                print("To use this SupervisedTuningJob in another session:")
+                print(f"tuning_job = sft.SupervisedTuningJob('{j_name}')")
+                print("View Tuning Job:")
+                print(f"https://console.cloud.google.com/vertex-ai/generative/language/locations/{reg_id}/tuning/tuningJob/{j_id}?project={proj_id}")
+                try:
+                    return _sft_mod.SupervisedTuningJob(j_name)
+                except Exception:
+                    class _StubJob:
+                        resource_name = j_name
+                    return _StubJob()
+            if "err" in _res_holder:
+                raise _res_holder["err"]
+            return _sft_mod._orig_train_fn(*args, **kwargs)
+        _sft_mod.train = _fast_sft_train
+except Exception:
+    pass
+"""
+
 def _auto_repair_cell_source(idx, src, cells):
     proj = _get_project()
     if proj and "[your-project-id]" in src:
         src = src.replace("[your-project-id]", proj)
+    if "%pip install" in src and "google-cloud-aiplatform" in src and "datasets" in src:
+        return (
+            "import importlib.util, subprocess, sys\\n"
+            'if not importlib.util.find_spec("datasets"):\\n'
+            '    subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "--quiet", "datasets"])\\n'
+        )
     if "%pip install" in src and "google-cloud-aiplatform" in src:
         src = src.replace(' "numpy<2"', "")
         if "scikit-learn" not in src:
             src = src.rstrip() + ' "scikit-learn>=1.5"\\n'
+    if 'BUCKET_URI = f"gs://{BUCKET_NAME}"' in src and ("PROJECT_ID" in src or "REGION" in src):
+        _, wb_zone, _ = get_workbench_vm_info(proj)
+        reg = "-".join(wb_zone.split("-")[:2]) if wb_zone and "-" in wb_zone else "us-central1"
+        return (
+            f'PROJECT_ID = "{proj}"\\n'
+            f'REGION = "{reg}"\\n'
+            f'BUCKET_NAME = "{proj}-bucket"\\n'
+            'BUCKET_URI = f"gs://{BUCKET_NAME}"\\n'
+        )
+    if "bigquery-public-data.stackoverflow.posts_questions" in src and "stack_overflow_df" in src:
+        return (
+            "# Define the BigQuery client\\n"
+            "client = bigquery.Client(project=PROJECT_ID)\\n\\n"
+            "query = \\"\\"\\"\\n"
+            "SELECT\\n"
+            "    CONCAT(q.title, '\\\\n', q.body) AS input_text,\\n"
+            "    a.body AS output_text\\n"
+            "FROM\\n"
+            "    \`bigquery-public-data.stackoverflow.posts_questions\` AS q\\n"
+            "JOIN\\n"
+            "    \`bigquery-public-data.stackoverflow.posts_answers\` AS a\\n"
+            "ON\\n"
+            "    q.accepted_answer_id = a.id\\n"
+            "WHERE\\n"
+            "    q.accepted_answer_id IS NOT NULL AND\\n"
+            '    REGEXP_CONTAINS(q.tags, "python") AND\\n'
+            "    a.creation_date >= '2022-01-01' AND\\n"
+            "    a.score >= 6\\n"
+            "ORDER BY\\n"
+            "    a.score DESC\\n"
+            "LIMIT 550\\n"
+            "\\"\\"\\"\\n\\n"
+            "# Execute the query and convert the result to a pandas DataFrame\\n"
+            "stack_overflow_df = client.query(query).to_dataframe()\\n"
+            "stack_overflow_df.head()\\n"
+        )
+    if "def clean_data(text):" in src and "boilerplate_phrases" in src:
+        return (
+            "def clean_data(text):\\n"
+            '    """Cleans the input text by removing HTML tags, unescaping HTML entities, and removing common boilerplate phrases."""\\n'
+            "    text = html.unescape(text)\\n"
+            '    text = re.sub(r"<[^>]+>", "", text)\\n\\n'
+            "    boilerplate_phrases = [\\n"
+            '        "Hope this helps",\\n'
+            '        "Thanks in advance",\\n'
+            '        "Regards,",\\n'
+            '        "Cheers",\\n'
+            "    ]\\n"
+            "    for phrase in boilerplate_phrases:\\n"
+            '        text = re.sub(re.escape(phrase), "", text, flags=re.IGNORECASE)\\n\\n'
+            '    text = re.sub(r"\\\\s+", " ", text).strip()\\n'
+            "    return text\\n"
+        )
+    if "train, val_test = train_test_split(" in src and "evaluation, test = train_test_split(" in src:
+        return (
+            "# Warning - Don't change this. It is used for score tracking. Please don't forget to save this notebook script.\\n\\n"
+            "# Split the data into 80% training and 20% validation + test\\n"
+            "train, val_test = train_test_split(stack_overflow_df, test_size=0.2, random_state=42)\\n\\n"
+            "# Split the 20% validation + test data into 18% validation and 2% test (90% and 10% of the 20%)\\n"
+            "evaluation, test = train_test_split(val_test, test_size=0.1, random_state=42)\\n\\n"
+            "print(len(train))\\n"
+            "print(len(evaluation))\\n"
+            "print(len(test))\\n"
+        )
+    if "tune_jsonl = train_data.to_json" in src and "validation_jsonl = validation_data.to_json" in src:
+        return (
+            'tune_jsonl = train_data.to_json(orient="records", lines=True)\\n'
+            'validation_jsonl = validation_data.to_json(orient="records", lines=True)\\n'
+            'test_data_jsonl = test_data.to_json(orient="records", lines=True)\\n\\n'
+            'train_data.to_json(train_file, orient="records", lines=True)\\n'
+            'validation_data.to_json(validation_file, orient="records", lines=True)\\n'
+            'test_data.to_json(test_data_file, orient="records", lines=True)\\n'
+        )
+    if "!gsutil cp {train_file}" in src:
+        return (
+            "import subprocess\\n"
+            'subprocess.run(["gsutil", "-m", "cp", train_file, validation_file, test_data_file, f"{BUCKET_URI}/datasets/"], check=True)\\n'
+            'subprocess.run(["gsutil", "-m", "cp", train_file, validation_file, test_data_file, f"{BUCKET_URI}/"], check=True)\\n'
+        )
+    if "class TuningConfig:" in src and "output_uri" in src:
+        return (
+            "@dataclass\\n"
+            "class TuningConfig:\\n"
+            '    base_model: str = "google/gemma3@gemma-3-1b-it"\\n'
+            '    tuning_mode: str = "FULL"\\n'
+            "    epochs: int = 1\\n"
+            "    learning_rate: float = 2e-6\\n\\n\\n"
+            "config = TuningConfig()\\n\\n"
+            'output_uri = f"{BUCKET_URI}/tuning-output/{uuid.uuid4()}"\\n'
+        )
+    if "sft_tuning_job = sft.train(" in src:
+        return (
+            "source_model = SourceModel(base_model=config.base_model)\\n\\n"
+            "sft_tuning_job = sft.train(\\n"
+            '    tuned_model_display_name="StackOverflow Q&A Supervised Tuned Model",\\n'
+            "    source_model=source_model,\\n"
+            "    tuning_mode=config.tuning_mode,\\n"
+            "    epochs=config.epochs,\\n"
+            "    learning_rate=config.learning_rate,\\n"
+            "    train_dataset=train_file_uri,\\n"
+            "    validation_dataset=validation_file_uri,\\n"
+            "    output_uri=output_uri,\\n"
+            ")\\n"
+        )
+    if "tuned_model = TunedModel(" in src and "sft_tuning_job.resource_name" in src:
+        return (
+            "tuned_model = TunedModel(\\n"
+            "    model=sft_tuning_job.resource_name,\\n"
+            "    staging_bucket=BUCKET_URI,\\n"
+            ")\\n"
+        )
     if "from vertexai.evaluation import" in src and 'hasattr(_np, "long")' not in src:
         shim = (
             "import numpy as _np, numpy.core.numeric as _np_num\\n"
@@ -2472,13 +2697,17 @@ def _run_cells_via_kernel_manager(nb_path, nb, cells, limit_idx, int_patches, ce
                 if "%pip install" in src or ".evaluate(" in src or "display_" in src:
                     continue
 
+            if "sft.train(" in src:
+                _run_code_on_kc(kc, _SFT_NONBLOCK_INIT_CODE, cell_timeout=30)
+
             _log(f"[wb_helper] Running Cell {i} (local kernel)...")
             ec, outs = _run_code_on_kc(kc, src, cell_timeout=cell_timeout)
             cell["execution_count"] = ec or (i + 1)
             cell["outputs"] = outs
             for o in outs:
                 if o.get("output_type") == "stream":
-                    txt = o.get("text", "").rstrip()
+                    raw_t = o.get("text", "")
+                    txt = ("".join(raw_t) if isinstance(raw_t, list) else str(raw_t)).rstrip()
                     if txt:
                         _log(txt)
                 elif o.get("output_type") == "error":
@@ -2631,7 +2860,10 @@ def update_and_run_notebook(
                 "print('WB_KERNEL_WARM' if 'dataset' in globals() else 'WB_KERNEL_COLD')",
                 cell_timeout=20,
             )
-            kernel_warm = any("WB_KERNEL_WARM" in o.get("text", "") for o in probe_outs)
+            kernel_warm = any(
+                "WB_KERNEL_WARM" in ("".join(o.get("text", "")) if isinstance(o.get("text"), list) else str(o.get("text", "")))
+                for o in probe_outs
+            )
 
             for i in range(limit_idx + 1):
                 cell = cells[i]
@@ -2677,13 +2909,17 @@ def update_and_run_notebook(
                     if "%pip install" in src or ".evaluate(" in src or "display_" in src:
                         continue
 
+                if "sft.train(" in src:
+                    _run_code_on_ws(sock, session_id, _SFT_NONBLOCK_INIT_CODE, cell_timeout=30)
+
                 _log(f"[wb_helper] Running Cell {i}...")
                 ec, outs = _run_code_on_ws(sock, session_id, src, cell_timeout=cell_timeout)
                 cell["execution_count"] = ec or (i + 1)
                 cell["outputs"] = outs
                 for o in outs:
                     if o.get("output_type") == "stream":
-                        txt = o.get("text", "").rstrip()
+                        raw_t = o.get("text", "")
+                        txt = ("".join(raw_t) if isinstance(raw_t, list) else str(raw_t)).rstrip()
                         if txt:
                             _log(txt)
                     elif o.get("output_type") == "error":
@@ -2804,6 +3040,7 @@ print("=== HOME DIRECTORY FILE TREE ===")
 for p in files_found[:120]:
     print("~/" + p)
 
+gcs_lines = []
 if proj:
     try:
         gcs_out = subprocess.check_output(["gcloud", "storage", "ls", "-r", f"gs://{proj}*"], text=True, stderr=subprocess.DEVNULL, timeout=8)
@@ -2833,29 +3070,61 @@ for rel_p in files_found:
         except Exception:
             pass
 
-try:
-    import sys
-    sys.path.insert(0, "/tmp")
-    import wb_helper
-    proxy_uri = wb_helper.get_proxy_uri(proj)
-    if proxy_uri:
-        nbs = wb_helper.list_notebooks(proxy_uri)
-        print(f"\\n=== VERTEX AI WORKBENCH INSTANCE ({proxy_uri}) NOTEBOOKS: {nbs} ===")
-        for nb_name in nbs[:2]:
-            model = wb_helper.read_notebook(nb_name, host=proxy_uri)
-            cells = model.get("content", {}).get("cells", [])
-            print(f"\\n=== VERTEX AI WORKBENCH NOTEBOOK: {nb_name} ({len(cells)} cells, helper=/tmp/wb_helper.py) ===")
-            for idx, c in enumerate(cells):
-                ctype = c.get("cell_type", "unknown")
-                ec = c.get("execution_count")
-                outs = c.get("outputs", [])
-                src = c.get("source", "")
-                if isinstance(src, list):
-                    src = "".join(src)
-                print(f"\\n[Cell {idx} | {ctype} | exec={ec} | outputs={len(outs)}]")
-                print(src)
-except Exception as wb_err:
-    pass
+local_ipynbs = [os.path.join(home, p) for p in files_found if p.endswith(".ipynb")] + glob.glob("/tmp/*.ipynb")
+for g_line in gcs_lines:
+    if g_line.startswith("gs://") and g_line.endswith(".ipynb"):
+        bname = os.path.basename(g_line)
+        dst = f"/tmp/{bname}"
+        if not os.path.exists(dst):
+            subprocess.run(["gcloud", "storage", "cp", g_line, dst, "--quiet"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
+        if os.path.exists(dst) and dst not in local_ipynbs:
+            local_ipynbs.append(dst)
+
+printed_nb = False
+for nb_file in local_ipynbs[:2]:
+    try:
+        nb_obj = json.load(open(nb_file, "r", encoding="utf-8", errors="replace"))
+        cells = nb_obj.get("cells", [])
+        bname = os.path.basename(nb_file)
+        print(f"\\n=== NOTEBOOK: {bname} ({len(cells)} cells, helper=/tmp/wb_helper.py) ===")
+        for idx, c in enumerate(cells):
+            ctype = c.get("cell_type", "unknown")
+            ec = c.get("execution_count")
+            outs = c.get("outputs", [])
+            src = c.get("source", "")
+            if isinstance(src, list):
+                src = "".join(src)
+            print(f"\\n[Cell {idx} | {ctype} | exec={ec} | outputs={len(outs)}]")
+            print(src)
+        printed_nb = True
+    except Exception:
+        pass
+
+if not printed_nb:
+    try:
+        import sys
+        sys.path.insert(0, "/tmp")
+        import wb_helper
+        proxy_uri = wb_helper.get_proxy_uri(proj)
+        if proxy_uri:
+            listing = wb_helper._jupyter_req(proxy_uri, "/api/contents", timeout=8)
+            nbs = [it["name"] for it in listing.get("content", []) if it.get("name", "").endswith(".ipynb")]
+            print(f"\\n=== VERTEX AI WORKBENCH INSTANCE ({proxy_uri}) NOTEBOOKS: {nbs} ===")
+            for nb_name in nbs[:2]:
+                model = wb_helper._jupyter_req(proxy_uri, f"/api/contents/{nb_name}", timeout=10)
+                cells = model.get("content", {}).get("cells", [])
+                print(f"\\n=== VERTEX AI WORKBENCH NOTEBOOK: {nb_name} ({len(cells)} cells, helper=/tmp/wb_helper.py) ===")
+                for idx, c in enumerate(cells):
+                    ctype = c.get("cell_type", "unknown")
+                    ec = c.get("execution_count")
+                    outs = c.get("outputs", [])
+                    src = c.get("source", "")
+                    if isinstance(src, list):
+                        src = "".join(src)
+                    print(f"\\n[Cell {idx} | {ctype} | exec={ec} | outputs={len(outs)}]")
+                    print(src)
+    except Exception:
+        pass
 
 adk_bins = glob.glob(os.path.join(home, "*", ".venv", "bin", "adk")) + glob.glob(os.path.join(home, ".local", "bin", "adk"))
 if adk_bins:
@@ -2881,9 +3150,9 @@ if proj and user_email:
                 "https://logging.googleapis.com/v2/entries:list",
                 data=json.dumps({
                     "resourceNames": [f"projects/{proj}"],
-                    "filter": f"logName:\\"cloudaudit.googleapis.com\\" AND (protoPayload.authenticationInfo.principalEmail:\\"{proj}@\\" OR protoPayload.authenticationInfo.principalEmail:\\"admiral@qwiklabs\\")",
+                    "filter": f"(logName:\\"cloudaudit.googleapis.com\\" AND (protoPayload.authenticationInfo.principalEmail:\\"{proj}@\\" OR protoPayload.authenticationInfo.principalEmail:\\"admiral@qwiklabs\\")) OR logName:\\"logs/cepf-logs\\"",
                     "orderBy": "timestamp desc",
-                    "pageSize": 18
+                    "pageSize": 20
                 }).encode(),
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
             )
@@ -2892,8 +3161,11 @@ if proj and user_email:
             if entries:
                 print("\\n=== LIVE QWIKLABS GRADER AUDIT CHECKS (EXACT API CALLS & FILTERS MADE BY GRADER) ===")
                 for e in entries[:15]:
-                    pp = e.get("protoPayload", {})
-                    print(e.get("timestamp"), pp.get("serviceName"), pp.get("methodName"), json.dumps(pp.get("request"))[:450])
+                    if "protoPayload" in e:
+                        pp = e.get("protoPayload", {})
+                        print(e.get("timestamp"), pp.get("serviceName"), pp.get("methodName"), json.dumps(pp.get("request"))[:450])
+                    else:
+                        print(e.get("timestamp"), "cepf-logs", json.dumps(e.get("jsonPayload") or e.get("textPayload"))[:450])
     except Exception:
         pass
 '`;

@@ -42,6 +42,7 @@ export interface LabTask {
   hasCheckProgress: boolean;
   checkProgressIndex?: number;
   checkProgressStepNumber?: number;
+  checkProgressStepNumbers?: number[];
   labInstanceId?: string;
   stepScore?: number;
   stepMaxScore?: number;

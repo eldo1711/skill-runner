@@ -698,10 +698,15 @@ async function navigateOrOpenInUserChromeWindow(
   openInNewTab = false
 ) {
   const escapedUrl = url.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const mustBeIncognito =
+    url.includes('console.cloud.google.com') ||
+    url.includes('shell.cloud.google.com') ||
+    url.includes('accounts.google.com');
+  const modeCond = mustBeIncognito ? ' and (mode of w) is "incognito"' : '';
   const script = `
 tell application "Google Chrome"
   repeat with w in windows
-    if ((id of w) as string) is "${windowId}" then
+    if ((id of w) as string) is "${windowId}"${modeCond} then
       if ${openInNewTab ? 'true' : 'false'} or ${tabIndex === null ? 'true' : 'false'} then
         make new tab at end of tabs of w with properties {URL:"${escapedUrl}"}
         set active tab index of w to (count of tabs of w)
@@ -1498,6 +1503,21 @@ async function checkStudentGcloudAuth(username, projectId) {
   return { authenticated: false, configDir };
 }
 
+function ensureNoopBrowserBinDir() {
+  const dir = path.join(SNAPSHOT_DIR, 'noop-browser-bin');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    for (const binName of ['noop-browser', 'open', 'osascript', 'xdg-open']) {
+      const p = path.join(dir, binName);
+      fs.writeFileSync(p, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      fs.chmodSync(p, 0o755);
+    }
+  } catch {
+    // Ignore
+  }
+  return dir;
+}
+
 async function startStudentGcloudAuth(username, projectId, enableGdrive = false) {
   const existing = await checkStudentGcloudAuth(username, projectId);
   if (existing.authenticated) {
@@ -1513,6 +1533,7 @@ async function startStudentGcloudAuth(username, projectId, enableGdrive = false)
   }
 
   const configDir = existing.configDir;
+  const noopBinDir = ensureNoopBrowserBinDir();
   return new Promise((resolve, reject) => {
     const args = ['auth', 'login', '--quiet'];
     if (username) args.push(String(username).trim());
@@ -1520,7 +1541,13 @@ async function startStudentGcloudAuth(username, projectId, enableGdrive = false)
     if (projectId) args.push(`--project=${projectId}`);
 
     const proc = spawn('gcloud', args, {
-      env: { ...process.env, CLOUDSDK_CONFIG: configDir, BROWSER: '/usr/bin/true' },
+      env: {
+        ...process.env,
+        CLOUDSDK_CONFIG: configDir,
+        CLOUDSDK_CORE_DISABLE_PROMPTS: '1',
+        BROWSER: path.join(noopBinDir, 'noop-browser'),
+        PATH: `${noopBinDir}:${process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'}`,
+      },
     });
 
     let output = '';
@@ -1588,9 +1615,15 @@ async function ensureStudentGcloudAuth(username, password, projectId, preferredW
   const initialCheck = await checkStudentGcloudAuth(username, projectId);
   if (initialCheck.authenticated) return initialCheck;
 
+  const tabs = await listUserChromeTabs();
   let incWinId = Number(preferredWindowId) || 0;
+  if (incWinId) {
+    const isActuallyIncognito = tabs.some(
+      (t) => t.windowId === incWinId && t.windowMode === 'incognito'
+    );
+    if (!isActuallyIncognito) incWinId = 0;
+  }
   if (!incWinId) {
-    const tabs = await listUserChromeTabs();
     const incTab =
       tabs.find((t) => t.windowMode === 'incognito' && t.suggestedRole === 'console') ||
       tabs.find((t) => t.windowMode === 'incognito' && t.suggestedRole === 'cloud_shell') ||
@@ -1614,7 +1647,7 @@ async function ensureStudentGcloudAuth(username, password, projectId, preferredW
       const openOauthTabScript = `
 tell application "Google Chrome"
   repeat with w in windows
-    if ((id of w) as string) is "${incWinId}" then
+    if ((id of w) as string) is "${incWinId}" and (mode of w) is "incognito" then
       set newTab to make new tab at end of tabs of w with properties {URL:"${escapedOauthUrl}"}
       set tIdx to count of tabs of w
       set active tab index of w to tIdx
@@ -1658,7 +1691,7 @@ end tell
       const closeOauthTabScript = `
 tell application "Google Chrome"
   repeat with w in windows
-    if ((id of w) as string) is "${incWinId}" then
+    if ((id of w) as string) is "${incWinId}" and (mode of w) is "incognito" then
       if ${oauthTabIdx} <= (count of tabs of w) then
         close tab ${oauthTabIdx} of w
       end if

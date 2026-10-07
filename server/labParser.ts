@@ -626,6 +626,8 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
       const steps: LabStep[] = [];
       let hasCheckProgress = false;
       let checkProgressStepNumber: number | undefined;
+      const checkProgressStepNumbers: number[] = [];
+      let allTrackersVerified = true;
       let taskLabInstanceId: string | undefined = pageLabInstanceId || undefined;
       let progressVerified = false;
       let progressMessage: string | undefined;
@@ -791,49 +793,73 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
           sectionProseParts.push(`\`\`\`\n${cbText}\n\`\`\``);
         }
 
-        const trackerEl = node.matches('ql-activity-tracking')
-          ? node
-          : node.querySelector('ql-activity-tracking');
-        if (trackerEl) {
+        const trackerEls = [
+          ...(node.matches('ql-activity-tracking') ? [node] : []),
+          ...Array.from(node.querySelectorAll('ql-activity-tracking')),
+        ];
+        if (trackerEls.length > 0) {
           hasCheckProgress = true;
-          const stepAttr = parseInt(trackerEl.getAttribute('step') || '', 10);
-          if (Number.isFinite(stepAttr) && stepAttr > 0) {
-            checkProgressStepNumber = stepAttr;
-            const scoreSpan = document.querySelector(`.js-assessment-step-score-${stepAttr}`);
-            if (scoreSpan) {
-              const sc = parseInt((scoreSpan.textContent || '').trim(), 10);
-              if (Number.isFinite(sc)) stepScore = sc;
-              const parentText = (scoreSpan.parentElement?.textContent || '').trim();
-              const maxMatch = parentText.match(/\/\s*(\d+)/);
-              if (maxMatch) {
-                stepMaxScore = parseInt(maxMatch[1], 10);
+          for (const trackerEl of trackerEls) {
+            const stepAttr = parseInt(trackerEl.getAttribute('step') || '', 10);
+            let thisStepScore: number | undefined;
+            let thisStepMaxScore: number | undefined;
+            const isNewStep =
+              Number.isFinite(stepAttr) &&
+              stepAttr > 0 &&
+              !checkProgressStepNumbers.includes(stepAttr);
+            if (Number.isFinite(stepAttr) && stepAttr > 0) {
+              if (checkProgressStepNumber === undefined) {
+                checkProgressStepNumber = stepAttr;
+              }
+              if (isNewStep) {
+                checkProgressStepNumbers.push(stepAttr);
+              }
+              const scoreSpan = document.querySelector(`.js-assessment-step-score-${stepAttr}`);
+              if (scoreSpan) {
+                const sc = parseInt((scoreSpan.textContent || '').trim(), 10);
+                if (Number.isFinite(sc)) {
+                  thisStepScore = sc;
+                  if (isNewStep) stepScore = (stepScore ?? 0) + sc;
+                }
+                const parentText = (scoreSpan.parentElement?.textContent || '').trim();
+                const maxMatch = parentText.match(/\/\s*(\d+)/);
+                if (maxMatch) {
+                  const mx = parseInt(maxMatch[1], 10);
+                  thisStepMaxScore = mx;
+                  if (isNewStep) stepMaxScore = (stepMaxScore ?? 0) + mx;
+                }
               }
             }
-          }
-          const instAttr = (trackerEl.getAttribute('labinstanceid') || '').trim();
-          if (instAttr) {
-            taskLabInstanceId = instAttr;
-          }
+            const instAttr = (trackerEl.getAttribute('labinstanceid') || '').trim();
+            if (instAttr) {
+              taskLabInstanceId = instAttr;
+            }
 
-          // Inspect tracker status and message in DOM / Declarative Shadow DOM
-          const trackerDeep = queryAllDeep(trackerEl);
-          const statusDiv = trackerDeep.find((el) => el.classList?.contains('status'));
-          const statusVal = (statusDiv?.getAttribute('status') || '').toLowerCase();
-          const ariaVal = statusDiv?.getAttribute('aria-valuenow') || '';
-          const msgSpan = trackerDeep.find((el) => el.classList?.contains('message'));
-          const msgTxt = (msgSpan?.textContent || '').replace(/\s+/g, ' ').trim();
+            // Inspect tracker status and message in DOM / Declarative Shadow DOM
+            const trackerDeep = queryAllDeep(trackerEl);
+            const statusDiv = trackerDeep.find((el) => el.classList?.contains('status'));
+            const statusVal = (statusDiv?.getAttribute('status') || '').toLowerCase();
+            const ariaVal = statusDiv?.getAttribute('aria-valuenow') || '';
+            const msgSpan = trackerDeep.find((el) => el.classList?.contains('message'));
+            const msgTxt = (msgSpan?.textContent || '').replace(/\s+/g, ' ').trim();
 
-          if (
-            statusVal === 'complete' ||
-            statusVal === 'completed' ||
-            ariaVal === '100' ||
-            (stepMaxScore && stepScore !== undefined && stepScore >= stepMaxScore)
-          ) {
-            progressVerified = true;
-            progressMessage = msgTxt || 'Assessment Completed!';
-          } else if (msgTxt) {
-            progressMessage = msgTxt;
+            const thisVerified =
+              statusVal === 'complete' ||
+              statusVal === 'completed' ||
+              ariaVal === '100' ||
+              Boolean(
+                thisStepMaxScore &&
+                  thisStepScore !== undefined &&
+                  thisStepScore >= thisStepMaxScore
+              );
+            if (!thisVerified) {
+              allTrackersVerified = false;
+              if (msgTxt) progressMessage = msgTxt;
+            } else if (!progressMessage) {
+              progressMessage = msgTxt || 'Assessment Completed!';
+            }
           }
+          progressVerified = allTrackersVerified;
         } else if (
           node.tagName.toLowerCase().includes('activity-tracking') ||
           nodeText.toLowerCase().includes('check my progress')
@@ -901,6 +927,21 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
         }
       }
 
+      if (steps.length === 0 && hasCheckProgress && sectionProseParts.length > 1) {
+        const fallbackInstruction = sectionProseParts.slice(1).join(' ').slice(0, 900).trim();
+        if (fallbackInstruction) {
+          steps.push({
+            id: `task-${taskCounter + 1}-step-1`,
+            index: 1,
+            instruction: fallbackInstruction,
+            commands: [],
+            links: [],
+            targetSurface: classifySurface(fallbackInstruction, [], [], []),
+            status: progressVerified ? 'completed' : 'pending',
+          });
+        }
+      }
+
       if (steps.length > 0) {
         taskCounter++;
         tasks.push({
@@ -912,6 +953,8 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
           hasCheckProgress,
           checkProgressIndex: hIdx,
           checkProgressStepNumber,
+          checkProgressStepNumbers:
+            checkProgressStepNumbers.length > 0 ? checkProgressStepNumbers : undefined,
           labInstanceId: taskLabInstanceId,
           stepScore,
           stepMaxScore,

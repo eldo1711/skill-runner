@@ -415,24 +415,20 @@ export class LabBrowserOrchestrator {
     }
 
     const currentConsoleTab = findByKey(this.state.selectedConsoleTabKey);
-    if (!currentConsoleTab) {
-      const consoleTab =
-        tabs.find((t) => t.suggestedRole === 'console' && t.windowMode === 'incognito') ||
-        tabs.find((t) => t.suggestedRole === 'console');
-      if (consoleTab) {
-        this.state.selectedConsoleTabKey = consoleTab.key;
-      }
+    if (!currentConsoleTab || currentConsoleTab.windowMode !== 'incognito') {
+      const consoleTab = tabs.find(
+        (t) => t.suggestedRole === 'console' && t.windowMode === 'incognito'
+      );
+      this.state.selectedConsoleTabKey = consoleTab ? consoleTab.key : null;
     }
 
     const currentShellTab = findByKey(this.state.selectedCloudShellTabKey);
-    if (!currentShellTab) {
+    if (!currentShellTab || currentShellTab.windowMode !== 'incognito') {
       const shellTab =
         tabs.find((t) => t.suggestedRole === 'cloud_shell' && t.windowMode === 'incognito') ||
-        tabs.find((t) => t.suggestedRole === 'cloud_shell') ||
         findByKey(this.state.selectedConsoleTabKey);
-      if (shellTab) {
-        this.state.selectedCloudShellTabKey = shellTab.key;
-      }
+      this.state.selectedCloudShellTabKey =
+        shellTab && shellTab.windowMode === 'incognito' ? shellTab.key : null;
     }
 
     this.syncMetadataFromSelectedTabs();
@@ -782,17 +778,11 @@ export class LabBrowserOrchestrator {
 
     // If the lab is active and has an assessment instance ID, query the live Qwiklabs assessment status immediately
     const firstGradableTask = this.state.tasks.find(
-      (t) => t.hasCheckProgress && t.checkProgressStepNumber
+      (t) => t.hasCheckProgress && (t.checkProgressStepNumber || (t.checkProgressStepNumbers && t.checkProgressStepNumbers.length > 0))
     );
     if (this.state.isLabStarted && firstGradableTask && this.labPage && !this.labPage.isClosed()) {
       try {
-        const initialCheck = await clickCheckMyProgress(
-          this.labPage,
-          firstGradableTask.number,
-          this.state.labCurrentUrl || this.state.labUrl,
-          this.getCheckProgressOptions(firstGradableTask)
-        );
-        this.applyCheckResultToState(firstGradableTask, initialCheck);
+        await this.verifyTaskProgress(firstGradableTask);
       } catch {
         // Ignore initial status poll errors
       }
@@ -819,13 +809,74 @@ export class LabBrowserOrchestrator {
     await this.refreshScreenshots();
   }
 
-  private getCheckProgressOptions(task: LabTask) {
+  private getTaskStepNumbers(task: LabTask): number[] {
+    if (Array.isArray(task.checkProgressStepNumbers) && task.checkProgressStepNumbers.length > 0) {
+      return task.checkProgressStepNumbers;
+    }
+    if (task.checkProgressStepNumber) {
+      return [task.checkProgressStepNumber];
+    }
+    return [task.number];
+  }
+
+  private getCheckProgressOptions(task: LabTask, stepNumberOverride?: number) {
     const labTarget = parseTabKey(this.state.selectedLabTabKey);
     return {
-      checkProgressStepNumber: task.checkProgressStepNumber || task.number,
+      checkProgressStepNumber: stepNumberOverride || task.checkProgressStepNumber || task.number,
       labInstanceId: task.labInstanceId || this.state.labInstanceId,
       windowId: labTarget?.windowId,
       tabIndex: labTarget?.tabIndex,
+    };
+  }
+
+  private async verifyTaskProgress(
+    task: LabTask
+  ): Promise<Awaited<ReturnType<typeof clickCheckMyProgress>>> {
+    await this.ensureLabPreviewPage();
+    const stepNumbers = this.getTaskStepNumbers(task);
+    let lastRes: Awaited<ReturnType<typeof clickCheckMyProgress>> = {
+      clicked: false,
+      verified: false,
+      message: 'No progress check executed.',
+    };
+    const messages: string[] = [];
+    let allVerified = true;
+
+    for (const stepNum of stepNumbers) {
+      const res = await clickCheckMyProgress(
+        this.labPage!,
+        task.number,
+        this.state.labCurrentUrl || this.state.labUrl,
+        this.getCheckProgressOptions(task, stepNum)
+      );
+      lastRes = res;
+      this.applyCheckResultToState(task, res);
+      if (!res.verified) {
+        allVerified = false;
+      }
+      if (res.message) {
+        messages.push(
+          stepNumbers.length > 1 ? `[Step ${stepNum}] ${res.message}` : res.message
+        );
+      }
+    }
+
+    const combinedMessage =
+      messages.length > 0 ? messages.join(' | ') : lastRes.message;
+    task.progressVerified = allVerified;
+    task.progressMessage = combinedMessage;
+    if (allVerified) {
+      task.status = 'completed';
+      for (const s of task.steps) s.status = 'completed';
+    }
+    this.emitState();
+
+    return {
+      ...lastRes,
+      verified: allVerified,
+      message: combinedMessage,
+      stepScore: task.stepScore,
+      stepMaxScore: task.stepMaxScore,
     };
   }
 
@@ -846,36 +897,59 @@ export class LabBrowserOrchestrator {
 
     if (Array.isArray(res.stepCompleteList) && res.stepCompleteList.length > 0) {
       for (const t of this.state.tasks) {
-        if (!t.hasCheckProgress || !t.checkProgressStepNumber) continue;
-        const stepIdx = t.checkProgressStepNumber - 1;
-        if (stepIdx >= 0 && stepIdx < res.stepCompleteList.length) {
-          const isDone = Boolean(res.stepCompleteList[stepIdx]);
+        if (!t.hasCheckProgress) continue;
+        const stepNums = this.getTaskStepNumbers(t).filter(
+          (sn) => sn - 1 >= 0 && sn - 1 < res.stepCompleteList!.length
+        );
+        if (stepNums.length === 0) continue;
+
+        let sumScore = 0;
+        let hasScore = false;
+        let sumMax = 0;
+        let hasMax = false;
+        const stepMsgs: string[] = [];
+
+        for (const sn of stepNums) {
+          const stepIdx = sn - 1;
           if (Array.isArray(res.stepScoresList) && res.stepScoresList[stepIdx] !== undefined) {
-            t.stepScore = Number(res.stepScoresList[stepIdx]);
+            sumScore += Number(res.stepScoresList[stepIdx]);
+            hasScore = true;
           }
           if (Array.isArray(res.stepPointsList) && res.stepPointsList[stepIdx] !== undefined) {
-            t.stepMaxScore = Number(res.stepPointsList[stepIdx]);
+            sumMax += Number(res.stepPointsList[stepIdx]);
+            hasMax = true;
           }
           if (
             Array.isArray(res.studentMessagesList) &&
             res.studentMessagesList[stepIdx]
           ) {
-            t.progressMessage = String(res.studentMessagesList[stepIdx]);
+            const msg = String(res.studentMessagesList[stepIdx]);
+            stepMsgs.push(stepNums.length > 1 ? `[Step ${sn}] ${msg}` : msg);
           }
-          if (isDone) {
-            t.progressVerified = true;
-            t.status = 'completed';
-            for (const s of t.steps) s.status = 'completed';
-            if (!t.progressMessage) {
-              t.progressMessage = 'Assessment Completed!';
-            }
+        }
+
+        if (hasScore) t.stepScore = sumScore;
+        if (hasMax) t.stepMaxScore = sumMax;
+        if (stepMsgs.length > 0) {
+          t.progressMessage = stepMsgs.join(' | ');
+        }
+
+        const isAllDone = stepNums.every((sn) => Boolean(res.stepCompleteList![sn - 1]));
+        if (isAllDone) {
+          t.progressVerified = true;
+          t.status = 'completed';
+          for (const s of t.steps) s.status = 'completed';
+          if (!t.progressMessage) {
+            t.progressMessage = 'Assessment Completed!';
           }
+        } else if (t.id === task.id) {
+          t.progressVerified = false;
         }
       }
       // Also mark non-Check-Progress setup tasks as completed if a subsequent graded task is completed
       for (let i = 0; i < this.state.tasks.length; i++) {
         const curr = this.state.tasks[i];
-        if (!curr.hasCheckProgress) {
+        if (!curr.hasCheckProgress && !/\boptional\b/i.test(curr.title)) {
           const anyLaterCompleted = this.state.tasks
             .slice(i + 1)
             .some((later) => later.progressVerified || later.status === 'completed');
@@ -1198,21 +1272,22 @@ export class LabBrowserOrchestrator {
    */
   public async openUrlInIncognito(url: string): Promise<void> {
     const interpolatedUrl = interpolateLabVariables(url, this.state.credentials);
-    const nativeConsoleTarget = parseTabKey(
-      this.state.selectedConsoleTabKey || this.state.selectedCloudShellTabKey
-    );
+    const selectedKey = this.state.selectedConsoleTabKey || this.state.selectedCloudShellTabKey;
+    const selectedTab = (this.state.availableChromeTabs || []).find((t) => t.key === selectedKey);
+    const nativeConsoleTarget =
+      selectedTab && selectedTab.windowMode === 'incognito' ? parseTabKey(selectedKey) : null;
 
     if (nativeConsoleTarget) {
       this.addLog(
         'action',
         'incognito_console',
-        `Opening URL in your selected Chrome Console window: ${interpolatedUrl}`
+        `Opening URL in your selected Incognito Chrome Console window: ${interpolatedUrl}`
       );
       await navigateOrOpenInUserChromeWindow(
         nativeConsoleTarget.windowId,
         nativeConsoleTarget.tabIndex,
         interpolatedUrl,
-        false
+        true
       );
       this.state.consoleCurrentUrl = interpolatedUrl;
       this.emitState();
@@ -1272,14 +1347,15 @@ export class LabBrowserOrchestrator {
         if (!task || task.status === 'completed' || task.status === 'skipped') continue;
 
         const hasAnyCommand = task.steps.some((s) => (s.commands || []).length > 0);
-        const isInformationalOverview =
+        const isInformationalOrOptional =
           !task.hasCheckProgress &&
-          !hasAnyCommand &&
-          /\b(overview|introduction|scenario|objectives?)\b/i.test(task.title);
-        if (isInformationalOverview) {
+          ((!hasAnyCommand &&
+            /\b(overview|introduction|scenario|objectives?)\b/i.test(task.title)) ||
+            /\boptional\b/i.test(task.title));
+        if (isInformationalOrOptional) {
           task.status = 'completed';
           for (const s of task.steps) s.status = 'completed';
-          this.addLog('info', 'system', `Skipped informational section: ${task.title}`);
+          this.addLog('info', 'system', `Skipped non-graded section: ${task.title}`);
           this.emitState();
           continue;
         }
@@ -1287,14 +1363,7 @@ export class LabBrowserOrchestrator {
         // Pre-task live score & completion check: if this task is already verified on Qwiklabs, mark it completed and advance immediately
         if (task.hasCheckProgress && this.state.isLabStarted) {
           try {
-            await this.ensureLabPreviewPage();
-            const preCheck = await clickCheckMyProgress(
-              this.labPage!,
-              task.number,
-              this.state.labCurrentUrl || this.state.labUrl,
-              this.getCheckProgressOptions(task)
-            );
-            this.applyCheckResultToState(task, preCheck);
+            const preCheck = await this.verifyTaskProgress(task);
             if (preCheck.verified) {
               this.addLog(
                 'success',
@@ -1327,18 +1396,6 @@ export class LabBrowserOrchestrator {
             }
           }
           this.emitState();
-
-          // Open any explicit browser_link or console URLs referenced in the task
-          for (const step of task.steps) {
-            for (const link of step.links) {
-              if (
-                link.href.includes('console.cloud.google.com') ||
-                step.targetSurface === 'browser_link'
-              ) {
-                await this.openUrlInIncognito(link.href);
-              }
-            }
-          }
 
           const maxAttempts = task.hasCheckProgress ? 4 : 2;
           let previousErrorMessage: string | undefined;
@@ -1434,13 +1491,7 @@ export class LabBrowserOrchestrator {
                 'lab_window',
                 `[Task #${task.number} | Attempt ${attempt}/${maxAttempts}] Verifying via "Check my progress"...`
               );
-              const checkRes = await clickCheckMyProgress(
-                this.labPage!,
-                task.number,
-                this.state.labCurrentUrl || this.state.labUrl,
-                this.getCheckProgressOptions(task)
-              );
-              this.applyCheckResultToState(task, checkRes);
+              const checkRes = await this.verifyTaskProgress(task);
               this.addLog(
                 checkRes.verified ? 'success' : 'warn',
                 'lab_window',
@@ -1459,18 +1510,11 @@ export class LabBrowserOrchestrator {
                 for (const s of task.steps) s.status = 'completed';
                 // Poll the first gradable task after setup tasks so totalScore stays synced continuously
                 const firstGradable = this.state.tasks.find(
-                  (t) => t.hasCheckProgress && t.checkProgressStepNumber
+                  (t) => t.hasCheckProgress && (t.checkProgressStepNumber || (t.checkProgressStepNumbers && t.checkProgressStepNumbers.length > 0))
                 );
                 if (firstGradable && this.state.isLabStarted) {
                   try {
-                    await this.ensureLabPreviewPage();
-                    const pollRes = await clickCheckMyProgress(
-                      this.labPage!,
-                      firstGradable.number,
-                      this.state.labCurrentUrl || this.state.labUrl,
-                      this.getCheckProgressOptions(firstGradable)
-                    );
-                    this.applyCheckResultToState(firstGradable, pollRes);
+                    await this.verifyTaskProgress(firstGradable);
                     this.addLog(
                       'info',
                       'lab_window',
@@ -1550,19 +1594,12 @@ export class LabBrowserOrchestrator {
 
         // All steps in this task are done! If the task has a "Check my progress" button, click it in the Lab window
         if (task.hasCheckProgress) {
-          await this.ensureLabPreviewPage();
           this.addLog(
             'action',
             'lab_window',
             `Verifying Task #${task.number} via "Check my progress" in Lab window...`
           );
-          const checkRes = await clickCheckMyProgress(
-            this.labPage!,
-            task.number,
-            this.state.labCurrentUrl || this.state.labUrl,
-            this.getCheckProgressOptions(task)
-          );
-          this.applyCheckResultToState(task, checkRes);
+          const checkRes = await this.verifyTaskProgress(task);
           this.addLog(
             checkRes.verified ? 'success' : 'warn',
             'lab_window',
@@ -1958,15 +1995,13 @@ export class LabBrowserOrchestrator {
     }
     const task = this.state.tasks.find((t) => t.number === taskNumber);
     this.addLog('action', 'lab_window', `Checking progress for Task #${taskNumber}...`);
-    const res = await clickCheckMyProgress(
-      this.labPage,
-      taskNumber,
-      this.state.labCurrentUrl || this.state.labUrl,
-      task ? this.getCheckProgressOptions(task) : undefined
-    );
-    if (task) {
-      this.applyCheckResultToState(task, res);
-    }
+    const res = task
+      ? await this.verifyTaskProgress(task)
+      : await clickCheckMyProgress(
+          this.labPage,
+          taskNumber,
+          this.state.labCurrentUrl || this.state.labUrl
+        );
     this.addLog(
       res.verified ? 'success' : 'warn',
       'lab_window',
@@ -1991,13 +2026,7 @@ export class LabBrowserOrchestrator {
       `Running "Check my progress" across ${gradableTasks.length} graded task(s)...`
     );
     for (const task of gradableTasks) {
-      const res = await clickCheckMyProgress(
-        this.labPage,
-        task.number,
-        this.state.labCurrentUrl || this.state.labUrl,
-        this.getCheckProgressOptions(task)
-      );
-      this.applyCheckResultToState(task, res);
+      const res = await this.verifyTaskProgress(task);
       this.addLog(
         res.verified ? 'success' : 'warn',
         'lab_window',

@@ -3271,11 +3271,152 @@ PYEOF`;
     }
   }
 
+  // Fast-path: [CEPF L300] Fine-Tune Open-Source Models on Agent Platform (get_started_with_oss_tuning_on_vertexai.ipynb)
+  const isOssTuningNotebookLab =
+    /Fine-Tune Open-Source Models on Agent Platform/i.test(labTitle) ||
+    combinedText.includes('get_started_with_oss_tuning_on_vertexai.ipynb') ||
+    (allTasksSummary || '').includes('get_started_with_oss_tuning_on_vertexai.ipynb') ||
+    (workspaceSnapshot || '').includes('get_started_with_oss_tuning_on_vertexai.ipynb');
+
+  if (isOssTuningNotebookLab && proj) {
+    const ossZoneMatch = (combinedText + '\n' + (allTasksSummary || '')).match(
+      /\b([a-z]+-[a-z]+\d-[a-z])\b/
+    );
+    const ossZone = credentials.zone || (ossZoneMatch ? ossZoneMatch[1] : `${region}-b`);
+    const ossRegion =
+      credentials.region || ossZone.split('-').slice(0, 2).join('-') || 'us-east1';
+    const ossBucket = `${proj}-bucket`;
+    const ossInstance = 'cymbal-workbench-instance';
+    const ossNotebook = 'get_started_with_oss_tuning_on_vertexai.ipynb';
+
+    if (
+      task.number === 1 ||
+      (lower.includes('create a cloud storage bucket') && !lower.includes('workbench'))
+    ) {
+      const script = `set -e
+gcloud storage buckets describe gs://${ossBucket} --project=${proj} >/dev/null 2>&1 || \\
+  gcloud storage buckets create gs://${ossBucket} --location=${ossRegion} --project=${proj}
+echo "Verified Cloud Storage bucket gs://${ossBucket} in ${ossRegion}"`;
+      return {
+        script,
+        summary: `Create or verify Cloud Storage bucket gs://${ossBucket} in ${ossRegion}.`,
+      };
+    }
+
+    if (
+      task.number === 2 ||
+      (lower.includes('workbench instance') && lower.includes('cymbal-workbench-instance') && !lower.includes('gsutil cp'))
+    ) {
+      const script = `set -e
+gcloud services enable notebooks.googleapis.com aiplatform.googleapis.com compute.googleapis.com --project=${proj} --quiet || true
+if ! gcloud workbench instances describe ${ossInstance} --location=${ossZone} --project=${proj} >/dev/null 2>&1; then
+  gcloud workbench instances create ${ossInstance} \\
+    --location=${ossZone} \\
+    --machine-type=e2-standard-4 \\
+    --project=${proj} \\
+    --quiet
+fi
+for i in $(seq 1 45); do
+  ST=$(gcloud workbench instances describe ${ossInstance} --location=${ossZone} --project=${proj} --format="value(state)" 2>/dev/null || echo "PROVISIONING")
+  echo "Workbench ${ossInstance} state: $ST"
+  if [ "$ST" = "ACTIVE" ]; then break; fi
+  sleep 10
+done`;
+      return {
+        script,
+        summary: `Create or verify Vertex AI Workbench instance ${ossInstance} in ${ossZone}.`,
+      };
+    }
+
+    if (
+      task.number === 3 ||
+      (lower.includes('copy the template notebook') && lower.includes('get_started_with_oss_tuning_on_vertexai.ipynb'))
+    ) {
+      const script = `python3 - << 'PYEOF'
+import sys
+sys.path.insert(0, "/tmp")
+import wb_helper
+
+wb_helper.exec_on_workbench(
+    "gsutil cp gs://${ossBucket}/${ossNotebook} /home/jupyter/${ossNotebook} && chown jupyter:jupyter /home/jupyter/${ossNotebook} 2>/dev/null || true && ls -la /home/jupyter/${ossNotebook}",
+    timeout=120,
+)
+PYEOF`;
+      return {
+        script,
+        summary: `Copy ${ossNotebook} from gs://${ossBucket} into /home/jupyter/${ossNotebook} on ${ossInstance}.`,
+      };
+    }
+
+    if (
+      task.number === 4 ||
+      lower.includes('prepare the training, validation, and evaluation datasets') ||
+      lower.includes('clean and split the dataset')
+    ) {
+      const script = `python3 - << 'PYEOF'
+import sys
+sys.path.insert(0, "/tmp")
+import wb_helper
+
+wb_helper.exec_on_workbench(
+    "test -f /home/jupyter/${ossNotebook} || (gsutil cp gs://${ossBucket}/${ossNotebook} /home/jupyter/${ossNotebook} && chown jupyter:jupyter /home/jupyter/${ossNotebook} 2>/dev/null || true)",
+    timeout=90,
+)
+res = wb_helper.update_and_run_notebook(
+    path="${ossNotebook}",
+    run_through_cell=43,
+    cell_timeout=240,
+)
+print(res.get("stdout", ""))
+if not res.get("ok", False):
+    raise SystemExit(res.get("stderr", "Failed to execute Task 4 cells in ${ossNotebook}"))
+PYEOF`;
+      return {
+        script,
+        summary: `Patch, execute, and save Cells 0..43 of /home/jupyter/${ossNotebook} on ${ossInstance} (cleaning BigQuery StackOverflow data, writing clean_data.txt, splitting 440/99/11, and uploading JSONL datasets to gs://${ossBucket}/datasets/).`,
+      };
+    }
+
+    if (
+      task.number === 5 ||
+      lower.includes('supervised fine-tuning') ||
+      lower.includes('gemma 3 1b') ||
+      lower.includes('sft.train')
+    ) {
+      const script = `python3 - << 'PYEOF'
+import sys, time
+sys.path.insert(0, "/tmp")
+import wb_helper
+
+wb_helper.exec_on_workbench(
+    "test -f /home/jupyter/${ossNotebook} || (gsutil cp gs://${ossBucket}/${ossNotebook} /home/jupyter/${ossNotebook} && chown jupyter:jupyter /home/jupyter/${ossNotebook} 2>/dev/null || true)",
+    timeout=90,
+)
+res = wb_helper.update_and_run_notebook(
+    path="${ossNotebook}",
+    run_through_cell=47,
+    cell_timeout=240,
+)
+print(res.get("stdout", ""))
+if not res.get("ok", False):
+    raise SystemExit(res.get("stderr", "Failed to execute Task 5 cells in ${ossNotebook}"))
+time.sleep(8)
+PYEOF`;
+      return {
+        script,
+        summary: `Patch, execute, and save Cells 0..47 of /home/jupyter/${ossNotebook} on ${ossInstance} to launch the Gemma 3 1B FULL Supervised Fine-Tuning job ("StackOverflow Q&A Supervised Tuned Model") and persist cell outputs.`,
+      };
+    }
+  }
+
   return null;
   })();
 
   const isDeterministicLab =
-    /Evaluate Single LLM Outputs|Build and Deploy a RAG Application using ADK/i.test(labTitle) ||
+    /Evaluate Single LLM Outputs|Build and Deploy a RAG Application using ADK|Fine-Tune Open-Source Models on Agent Platform/i.test(
+      labTitle
+    ) ||
+    combinedText.includes('get_started_with_oss_tuning_on_vertexai.ipynb') ||
     credentials.extraVars?.['primary_project.startup_script.notebook_file_name'] === 'evaluation.ipynb' ||
     Boolean(
       credentials.extraVars?.['primary_project.startup_script.datastore_id'] &&
