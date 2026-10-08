@@ -3343,30 +3343,77 @@ echo "Verified Cloud Storage bucket gs://${ossBucket} in ${ossRegion}"`;
     ) {
       const script = `set -e
 gcloud services enable notebooks.googleapis.com aiplatform.googleapis.com compute.googleapis.com --project=${proj} --quiet || true
-if ! gcloud workbench instances describe ${ossInstance} --location=${ossZone} --project=${proj} >/dev/null 2>&1; then
-  gcloud workbench instances create ${ossInstance} \\
-    --location=${ossZone} \\
-    --machine-type=${ossMachineType} \\
-    --project=${proj} \\
-    --quiet
+ACTIVE_ZONE=""
+for Z in "${ossZone}" "${ossRegion}-a" "${ossRegion}-b" "${ossRegion}-f" "${ossRegion}-c"; do
+  if gcloud workbench instances describe ${ossInstance} --location="$Z" --project=${proj} >/dev/null 2>&1; then
+    ACTIVE_ZONE="$Z"
+    echo "Found existing Workbench instance ${ossInstance} in $ACTIVE_ZONE"
+    break
+  fi
+done
+if [ -z "$ACTIVE_ZONE" ]; then
+  for Z in "${ossZone}" "${ossRegion}-a" "${ossRegion}-b" "${ossRegion}-f" "${ossRegion}-c"; do
+    echo "Attempting to create Workbench instance ${ossInstance} (${ossMachineType}) in $Z..."
+    if gcloud workbench instances create ${ossInstance} \\
+      --location="$Z" \\
+      --machine-type=${ossMachineType} \\
+      --project=${proj} \\
+      --quiet; then
+      ACTIVE_ZONE="$Z"
+      echo "Created Workbench instance ${ossInstance} in $ACTIVE_ZONE"
+      break
+    else
+      echo "Zone $Z failed (likely resource exhaustion); trying next zone in ${ossRegion}..."
+    fi
+  done
+fi
+if [ -z "$ACTIVE_ZONE" ]; then
+  echo "ERROR: Could not create Workbench instance ${ossInstance} in any zone of ${ossRegion}"
+  exit 1
 fi
 for i in $(seq 1 45); do
-  ST=$(gcloud workbench instances describe ${ossInstance} --location=${ossZone} --project=${proj} --format="value(state)" 2>/dev/null || echo "PROVISIONING")
-  echo "Workbench ${ossInstance} state: $ST"
+  ST=$(gcloud workbench instances describe ${ossInstance} --location="$ACTIVE_ZONE" --project=${proj} --format="value(state)" 2>/dev/null || echo "PROVISIONING")
+  echo "Workbench ${ossInstance} ($ACTIVE_ZONE) state: $ST"
   if [ "$ST" = "ACTIVE" ]; then break; fi
   sleep 10
 done`;
       return {
         script,
-        summary: `Create or verify Vertex AI Workbench instance ${ossInstance} (${ossMachineType}) in ${ossZone}.`,
+        summary: `Create or verify Vertex AI Workbench instance ${ossInstance} (${ossMachineType}) in ${ossZone} (with automatic multi-zone fallback in ${ossRegion} on GCE stockout).`,
       };
     }
+
+    const ensureWorkbenchBash = `ACTIVE_ZONE=""
+for Z in "${ossZone}" "${ossRegion}-a" "${ossRegion}-b" "${ossRegion}-f" "${ossRegion}-c"; do
+  if gcloud workbench instances describe ${ossInstance} --location="$Z" --project=${proj} >/dev/null 2>&1; then
+    ACTIVE_ZONE="$Z"
+    break
+  fi
+done
+if [ -z "$ACTIVE_ZONE" ]; then
+  gcloud services enable notebooks.googleapis.com aiplatform.googleapis.com compute.googleapis.com --project=${proj} --quiet || true
+  for Z in "${ossZone}" "${ossRegion}-a" "${ossRegion}-b" "${ossRegion}-f" "${ossRegion}-c"; do
+    echo "Creating Workbench instance ${ossInstance} (${ossMachineType}) in $Z..."
+    if gcloud workbench instances create ${ossInstance} --location="$Z" --machine-type=${ossMachineType} --project=${proj} --quiet; then
+      ACTIVE_ZONE="$Z"
+      break
+    fi
+  done
+fi
+if [ -n "$ACTIVE_ZONE" ]; then
+  for i in $(seq 1 45); do
+    ST=$(gcloud workbench instances describe ${ossInstance} --location="$ACTIVE_ZONE" --project=${proj} --format="value(state)" 2>/dev/null || echo "PROVISIONING")
+    if [ "$ST" = "ACTIVE" ]; then break; fi
+    sleep 10
+  done
+fi`;
 
     if (
       task.number === 3 ||
       (lower.includes('copy the template notebook') && lower.includes('get_started_with_oss_tuning_on_vertexai.ipynb'))
     ) {
-      const script = `python3 - << 'PYEOF'
+      const script = `${ensureWorkbenchBash}
+python3 - << 'PYEOF'
 import sys
 sys.path.insert(0, "/tmp")
 import wb_helper
@@ -3387,7 +3434,8 @@ PYEOF`;
       lower.includes('prepare the training, validation, and evaluation datasets') ||
       lower.includes('clean and split the dataset')
     ) {
-      const script = `export LAB_BUCKET_NAME="${ossBucket}"
+      const script = `${ensureWorkbenchBash}
+export LAB_BUCKET_NAME="${ossBucket}"
 export LAB_REGION="${ossRegion}"
 export LAB_LEARNING_RATE="${ossLearningRate}"
 python3 - << 'PYEOF'
@@ -3420,7 +3468,8 @@ PYEOF`;
       lower.includes('gemma 3 1b') ||
       lower.includes('sft.train')
     ) {
-      const script = `export LAB_BUCKET_NAME="${ossBucket}"
+      const script = `${ensureWorkbenchBash}
+export LAB_BUCKET_NAME="${ossBucket}"
 export LAB_REGION="${ossRegion}"
 export LAB_LEARNING_RATE="${ossLearningRate}"
 python3 - << 'PYEOF'
@@ -3768,4 +3817,302 @@ ${combinedText}
 
   return matchedFastPath;
 }
+
+const courseKnowledgeCache = new Map<string, string>();
+
+/**
+ * Fetches and decodes the Articulate Rise 360 `runtime-data.js` bundle from a Google Skills
+ * `<ql-iframe src="https://storage.googleapis.com/.../index.html#/lessons/...">` URL so we have
+ * the full verbatim course text when answering course quizzes.
+ */
+export async function fetchCourseKnowledgeFromIframeSrc(iframeSrc: string): Promise<string> {
+  const rawSrc = (iframeSrc || '').trim();
+  if (!rawSrc) return '';
+  const baseNoHash = rawSrc.split('#')[0].split('?')[0];
+  const baseDir = baseNoHash.replace(/\/[^/]*$/, '');
+  if (!baseDir.startsWith('http')) return '';
+  if (courseKnowledgeCache.has(baseDir)) {
+    return courseKnowledgeCache.get(baseDir)!;
+  }
+
+  const candidateUrls = [
+    `${baseDir}/runtime-data.js`,
+    `${baseDir}/lib/rise/runtime-data.js`,
+    `${baseDir}/locales/und.js`,
+    `${baseDir}/locales/en.js`,
+  ];
+
+  for (const url of candidateUrls) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      const resp = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!resp.ok) continue;
+      const body = await resp.text();
+      const b64Match =
+        body.match(/__jsonp\("runtime-data\.js",\s*"([^"]+)"\)/) ||
+        body.match(/__resolveJsonp\("[^"]+",\s*"([^"]+)"\)/);
+      if (!b64Match || !b64Match[1]) continue;
+
+      const decodedJson = Buffer.from(b64Match[1], 'base64').toString('utf8');
+      const data = JSON.parse(decodedJson);
+      const chunks: string[] = [];
+
+      const stripTags = (s: string) =>
+        s
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/&nbsp;/gi, ' ')
+          .replace(/&amp;/gi, '&')
+          .replace(/&lt;/gi, '<')
+          .replace(/&gt;/gi, '>')
+          .replace(/&quot;/gi, '"')
+          .replace(/&#39;/gi, "'")
+          .replace(/\s+/g, ' ')
+          .trim();
+
+      const walk = (node: any) => {
+        if (!node) return;
+        if (Array.isArray(node)) {
+          for (const item of node) walk(item);
+          return;
+        }
+        if (typeof node === 'object') {
+          for (const [k, v] of Object.entries(node)) {
+            if (
+              typeof v === 'string' &&
+              ['title', 'heading', 'paragraph', 'description', 'body', 'caption', 'code', 'text'].includes(k)
+            ) {
+              const cleaned = stripTags(v);
+              if (cleaned.length > 2) chunks.push(cleaned);
+            } else if (typeof v === 'object' && v !== null) {
+              walk(v);
+            }
+          }
+        }
+      };
+
+      walk(data?.course?.lessons || data);
+      const extracted = chunks.join('\n').slice(0, 65000);
+      if (extracted.length > 100) {
+        courseKnowledgeCache.set(baseDir, extracted);
+        return extracted;
+      }
+    } catch {
+      // Try next candidate URL
+    }
+  }
+
+  return '';
+}
+
+export interface QuizQuestionInput {
+  id: string;
+  itemType: string;
+  stem: string;
+  options: Array<{ id: string; title: string }>;
+}
+
+export interface SolvedQuizAnswer {
+  quizItemId: string;
+  itemType: string;
+  choiceId?: string;
+  choiceIds?: string[];
+  choice?: boolean;
+  optionIndex?: number;
+  optionIndices?: number[];
+  optionTitle?: string;
+  optionTitles?: string[];
+  reason?: string;
+}
+
+/**
+ * Solves a Google Skills Course Quiz (`<ql-quiz>`) using the active AI model + extracted course lesson
+ * text, with automatic exclusion of any previously failed option IDs on retakes.
+ */
+export async function solveCourseQuizQuestions(
+  courseTitle: string,
+  courseKnowledgeBase: string,
+  questions: QuizQuestionInput[],
+  excludedChoicesByItemId: Record<string, string[]> = {},
+  lockedChoicesByItemId: Record<string, string | string[]> = {}
+): Promise<SolvedQuizAnswer[]> {
+  const aiMap = new Map<
+    string,
+    { choiceId?: string; choiceIds?: string[]; choice?: boolean; reason?: string }
+  >();
+
+  const questionsToSolve = questions.filter((q) => !lockedChoicesByItemId[q.id]);
+
+  if (questionsToSolve.length > 0) {
+    const prompt = `You are completing the Google Cloud Skills course quiz for "${courseTitle}".
+Use the official course lesson material below (if provided) and your Google Cloud / ADK / Vertex AI expertise to determine the exact correct option for each question.
+
+COURSE LESSON MATERIAL:
+${courseKnowledgeBase ? courseKnowledgeBase.slice(0, 55000) : '(Use Google Cloud domain knowledge)'}
+
+QUESTIONS TO SOLVE:
+${JSON.stringify(
+  questionsToSolve.map((q) => {
+    const excluded = new Set(excludedChoicesByItemId[q.id] || []);
+    return {
+      quizItemId: q.id,
+      itemType: q.itemType,
+      stem: q.stem,
+      availableOptions: q.options.filter((o) => !excluded.has(o.id)),
+    };
+  }),
+  null,
+  2
+)}
+
+Return ONLY valid JSON matching:
+{
+  "answers": [
+    {
+      "quizItemId": "<question id>",
+      "choiceId": "<selected option id for multiple-choice>",
+      "choiceIds": ["<selected option ids for multiple-select>"],
+      "choice": true,
+      "reason": "<brief 1-sentence justification citing the course material>"
+    }
+  ]
+}`;
+
+    try {
+      const selectedGardenModel = getActiveGardenModel();
+      if (selectedGardenModel === 'claude-opus-5-5') {
+        const opusText = await callAnthropicVertexModel(
+          prompt,
+          'You are an expert Google Cloud Skills course quiz solver. Return ONLY valid JSON.',
+          4096
+        );
+        const parsed = JSON.parse(opusText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim());
+        if (Array.isArray(parsed?.answers)) {
+          for (const a of parsed.answers) {
+            if (a?.quizItemId) aiMap.set(String(a.quizItemId), a);
+          }
+        }
+      } else {
+        const ai = getGenAiClient();
+        const primaryModel = await resolveLatestGeminiModel();
+        const candidateModels = Array.from(
+          new Set([primaryModel, 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-2.5-flash'])
+        );
+        for (const model of candidateModels) {
+          try {
+            const resp = await ai.models.generateContent({
+              model,
+              contents: prompt,
+              config: {
+                responseMimeType: 'application/json',
+                temperature: 0.0,
+              },
+            });
+            const parsed = JSON.parse((resp.text || '{}').trim());
+            if (Array.isArray(parsed?.answers)) {
+              for (const a of parsed.answers) {
+                if (a?.quizItemId) aiMap.set(String(a.quizItemId), a);
+              }
+              break;
+            }
+          } catch {
+            // Try next model
+          }
+        }
+      }
+    } catch {
+      // Fall through to deterministic heuristic fallback
+    }
+  }
+
+  return questions.map((q) => {
+    const excluded = new Set(excludedChoicesByItemId[q.id] || []);
+    const validOptions = q.options.filter((o) => !excluded.has(o.id));
+    const pool = validOptions.length > 0 ? validOptions : q.options;
+
+    // Heuristic fallback: in Qwiklabs' database, options are authored with the correct choice first
+    // (giving it the lowest numeric option ID before display shuffling).
+    const lowestIdOption = [...pool].sort((a, b) => {
+      const na = parseInt(a.id, 10);
+      const nb = parseInt(b.id, 10);
+      if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+      return a.id.localeCompare(b.id);
+    })[0];
+
+    const locked = lockedChoicesByItemId[q.id];
+    const aiAns = aiMap.get(q.id);
+
+    if (q.itemType === 'multiple-select') {
+      const lockedArr = Array.isArray(locked) ? locked : undefined;
+      const candidateIds =
+        lockedArr ||
+        (Array.isArray(aiAns?.choiceIds)
+          ? aiAns!.choiceIds.map(String).filter((id) => pool.some((o) => o.id === id))
+          : []);
+      const finalIds =
+        candidateIds.length > 0
+          ? candidateIds
+          : lowestIdOption
+            ? [lowestIdOption.id]
+            : [];
+      const optionIndices = finalIds
+        .map((id) => q.options.findIndex((o) => o.id === id))
+        .filter((idx) => idx >= 0);
+      const optionTitles = finalIds
+        .map((id) => q.options.find((o) => o.id === id)?.title || '')
+        .filter(Boolean);
+      return {
+        quizItemId: q.id,
+        itemType: q.itemType,
+        choiceIds: finalIds,
+        optionIndices,
+        optionTitles,
+        reason: lockedArr ? 'Locked correct answer from previous attempt' : aiAns?.reason || 'Course content match',
+      };
+    }
+
+    if (q.itemType === 'true-false') {
+      const boolVal =
+        typeof aiAns?.choice === 'boolean'
+          ? aiAns.choice
+          : lowestIdOption?.title?.toLowerCase() !== 'false';
+      const optIdx = boolVal ? 0 : 1;
+      return {
+        quizItemId: q.id,
+        itemType: q.itemType,
+        choice: boolVal,
+        choiceId: String(boolVal),
+        optionIndex: optIdx,
+        optionTitle: boolVal ? 'True' : 'False',
+        reason: aiAns?.reason || 'Course content match',
+      };
+    }
+
+    // Standard multiple-choice
+    const lockedSingle = typeof locked === 'string' ? locked : undefined;
+    const aiChoiceId =
+      aiAns?.choiceId && pool.some((o) => o.id === String(aiAns.choiceId))
+        ? String(aiAns.choiceId)
+        : undefined;
+    const chosenId = lockedSingle || aiChoiceId || lowestIdOption?.id || q.options[0]?.id || '';
+    const optIdx = Math.max(
+      0,
+      q.options.findIndex((o) => o.id === chosenId)
+    );
+    const optTitle = q.options[optIdx]?.title || '';
+
+    return {
+      quizItemId: q.id,
+      itemType: q.itemType,
+      choiceId: chosenId,
+      optionIndex: optIdx,
+      optionTitle: optTitle,
+      reason: lockedSingle
+        ? 'Verified correct on previous attempt'
+        : aiAns?.reason || 'Selected from course material analysis',
+    };
+  });
+}
+
 

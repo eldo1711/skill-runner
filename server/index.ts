@@ -135,26 +135,29 @@ app.post('/api/state/save', async (req, res) => {
   }
 });
 
-// 1. Open Lab URL in Main Lab Chrome Window
+// 1. Open Lab or Course URL in Main Lab Chrome Window
 app.post('/api/lab/open', async (req, res) => {
   try {
     const orch = getReqOrchestrator(req);
-    const { url } = req.body || {};
+    const { url, targetType } = req.body || {};
     if (!url || typeof url !== 'string') {
-      res.status(400).json({ error: 'A valid Lab URL is required.' });
+      res.status(400).json({ error: 'A valid Lab or Course URL is required.' });
       return;
+    }
+    if (targetType === 'course' || targetType === 'lab') {
+      orch.setTargetType(targetType);
     }
     // Launch asynchronously and return immediately while streaming via WS
     orch.openLabUrl(url).catch((err) => {
-      orch.addLog('error', 'lab_window', `Failed to open Lab URL: ${err.message}`);
+      orch.addLog('error', 'lab_window', `Failed to open URL: ${err.message}`);
     });
-    res.json({ ok: true, message: 'Launching Lab Chrome window...' });
+    res.json({ ok: true, message: 'Launching Chrome window...' });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || String(err) });
   }
 });
 
-// 2. Parse Lab Instructions (after login or refresh)
+// 2. Parse Lab / Course Instructions (after login or refresh)
 app.post('/api/lab/parse', async (req, res) => {
   try {
     const orch = getReqOrchestrator(req);
@@ -182,11 +185,14 @@ app.post('/api/lab/start-and-signin', async (req, res) => {
   }
 });
 
-// 3b. Unified One-Click "Start & Run Lab" (points at lab tab/URL, starts lab, spawns student Incognito, runs tasks & checks progress)
+// 3b. Unified One-Click "Start & Run Lab / Course"
 app.post('/api/lab/start-and-run', async (req, res) => {
   try {
     const orch = getReqOrchestrator(req);
-    const { url, labTabKey } = req.body || {};
+    const { url, labTabKey, targetType } = req.body || {};
+    if (targetType === 'course' || targetType === 'lab') {
+      orch.setTargetType(targetType);
+    }
     orch
       .startAndRunLab({
         url: typeof url === 'string' ? url : undefined,
@@ -196,13 +202,13 @@ app.post('/api/lab/start-and-run', async (req, res) => {
         orch.addLog(
           'error',
           'system',
-          `Start & Run Lab error: ${err?.message || String(err)}`
+          `Start & Run error: ${err?.message || String(err)}`
         );
       });
     res.json({
       ok: true,
       message:
-        'Starting lab, spawning student Incognito window, and launching autonomous execution...',
+        'Starting session and launching autonomous execution...',
     });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || String(err) });
@@ -248,11 +254,14 @@ app.post('/api/lab/end', async (req, res) => {
   }
 });
 
-// 6c. Switch / Run a Different Skill Course
+// 6c. Switch / Run a Different Skill Course or Lab
 app.post('/api/lab/switch-course', async (req, res) => {
   try {
     const orch = getReqOrchestrator(req);
-    const { url, labTabKey, endCurrentFirst, autoRun } = req.body || {};
+    const { url, labTabKey, endCurrentFirst, autoRun, targetType } = req.body || {};
+    if (targetType === 'course' || targetType === 'lab') {
+      orch.setTargetType(targetType);
+    }
     await orch.switchSkillCourse({
       url: typeof url === 'string' ? url : undefined,
       labTabKey: labTabKey !== undefined ? labTabKey : undefined,
@@ -287,6 +296,13 @@ app.post('/api/lab/mode', (req, res) => {
     req.body?.mode === 'step_by_step' ? 'step_by_step' : 'autonomous';
   orch.setExecutionMode(mode);
   res.json({ ok: true, mode });
+});
+
+// 7b. Toggle Target Type (lab vs course)
+app.post('/api/lab/target-type', (req, res) => {
+  const orch = getReqOrchestrator(req);
+  const targetType = orch.setTargetType(req.body?.targetType === 'course' ? 'course' : 'lab');
+  res.json({ ok: true, targetType, state: orch.getState() });
 });
 
 // 8. Queue Live Operator Override Instruction for Gemini

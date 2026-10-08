@@ -27,9 +27,10 @@ import {
   X,
   SlidersHorizontal,
 } from 'lucide-react';
-import { ExecutionMode, LabCredentials, RunnerState, TargetSurface } from './types';
+import { ExecutionMode, LabCredentials, RunnerState, TargetSurface, TargetType } from './types';
 
 const INITIAL_STATE: RunnerState = {
+  targetType: 'lab',
   status: 'idle',
   executionMode: 'autonomous',
   labUrl: '',
@@ -354,14 +355,22 @@ export default function App() {
     });
   };
 
+  const handleTargetTypeChange = async (nextType: TargetType) => {
+    setState((prev) => ({ ...prev, targetType: nextType }));
+    await apiPost('/api/lab/target-type', { targetType: nextType });
+  };
+
   const handleOpenLabUrl = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!urlInput.trim()) return;
     const targetUrl = urlInput.trim();
-    await ensureMacBridgeConnected('Open Lab URL in Chrome', async () => {
+    await ensureMacBridgeConnected('Open URL in Chrome', async () => {
       setSyncingLab(true);
       try {
-        await apiPost('/api/lab/open', { url: targetUrl });
+        await apiPost('/api/lab/open', {
+          url: targetUrl,
+          targetType: state.targetType || 'lab',
+        });
       } finally {
         setSyncingLab(false);
       }
@@ -369,7 +378,7 @@ export default function App() {
   };
 
   const handleParseLab = async () => {
-    await ensureMacBridgeConnected('Sync & Parse Lab Instructions', async () => {
+    await ensureMacBridgeConnected('Sync & Parse Instructions', async () => {
       setSyncingLab(true);
       try {
         await apiPost('/api/lab/parse');
@@ -392,16 +401,17 @@ export default function App() {
 
   /**
    * Primary Workflow:
-   * Points at the selected Lab tab (or URL), starts the lab, attaches to the user's Incognito
-   * Console & Cloud Shell session, runs all tasks, and verifies all progress checks.
+   * Points at the selected Lab or Course tab (or URL), starts the session,
+   * and executes all lab tasks or course modules/quizzes autonomously.
    */
   const handleStartAndRunLab = async () => {
-    await ensureMacBridgeConnected('Start & Run Lab', async () => {
+    await ensureMacBridgeConnected('Start & Run', async () => {
       setStartingAndRunning(true);
       try {
         await apiPost('/api/lab/start-and-run', {
           labTabKey: sourceMode === 'tab' ? state.selectedLabTabKey : undefined,
           url: sourceMode === 'url' && urlInput.trim() ? urlInput.trim() : undefined,
+          targetType: state.targetType || 'lab',
         });
       } finally {
         setStartingAndRunning(false);
@@ -633,9 +643,15 @@ export default function App() {
           },
         ];
 
+  const isCourseMode =
+    state.targetType === 'course' ||
+    state.tasks.some((t) => Boolean(t.activityType));
+
   const formatTabLabel = (t: (typeof chromeTabs)[number]) => {
     const roleTag =
-      t.suggestedRole === 'lab'
+      t.contentKind === 'course'
+        ? '★ COURSE • '
+        : t.suggestedRole === 'lab'
         ? '★ LAB • '
         : t.suggestedRole === 'console'
         ? 'CONSOLE • '
@@ -665,6 +681,15 @@ export default function App() {
                   {state.activeModel || 'gemini-3.8-flash'}
                 </span>
                 <span
+                  className={`px-2 py-0.5 text-[10px] font-semibold uppercase rounded-full border ${
+                    isCourseMode
+                      ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                      : 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                  }`}
+                >
+                  {isCourseMode ? 'Course Mode' : 'Lab Mode'}
+                </span>
+                <span
                   className="px-2 py-0.5 text-[10px] font-mono rounded-full bg-slate-800/90 text-slate-300 border border-slate-700"
                   title={`Isolated browser session ID: ${sessionId}`}
                 >
@@ -685,7 +710,7 @@ export default function App() {
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                Autonomous Google Cloud Skills Boost Lab Runner & Progress Grader
+                Autonomous Google Cloud Skills Boost Lab & Course Runner
               </p>
             </div>
           </div>
@@ -709,7 +734,7 @@ export default function App() {
               >
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 <span className="font-semibold">
-                  Score: {state.totalScore ?? 0} / {state.maxScore ?? 100}
+                  {isCourseMode ? 'Progress' : 'Score'}: {state.totalScore ?? 0} / {state.maxScore ?? 100}
                 </span>
               </div>
             )}
@@ -718,7 +743,7 @@ export default function App() {
               <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800/90 border border-slate-700 text-xs">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
                 <span className="font-medium text-slate-200">
-                  {completedTasksCount} / {totalTasksCount} Tasks Verified
+                  {completedTasksCount} / {totalTasksCount} {isCourseMode ? 'Activities Done' : 'Tasks Verified'}
                 </span>
               </div>
             )}
@@ -729,10 +754,10 @@ export default function App() {
                 onClick={handleResetForNewLab}
                 disabled={endingLab}
                 className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition disabled:opacity-60"
-                title="End current lab, close student Incognito windows, and reset screen for a new lab"
+                title="End current session, close student Incognito windows, and reset screen"
               >
                 <RefreshCw className={`w-3.5 h-3.5 text-indigo-400 ${endingLab ? 'animate-spin' : ''}`} />
-                {endingLab ? 'Resetting...' : 'New Lab / Reset'}
+                {endingLab ? 'Resetting...' : isCourseMode ? 'New Course / Reset' : 'New Lab / Reset'}
               </button>
             )}
 
@@ -855,10 +880,10 @@ export default function App() {
             </div>
           </div>
 
-          {/* TILE 2: Point at Your Self-Signed-In Lab Page */}
+          {/* TILE 2: Select Course or Lab & Point at Page/URL */}
           <div className="xl:col-span-3 rounded-xl bg-slate-900/90 border border-slate-800 p-3 flex flex-col justify-between gap-2">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
+            <div className="flex items-center justify-between gap-1.5 flex-wrap">
+              <div className="flex items-center gap-1.5">
                 <span
                   className={`w-5 h-5 rounded-full text-[11px] font-bold flex items-center justify-center ${
                     state.tasks.length > 0
@@ -868,9 +893,30 @@ export default function App() {
                 >
                   {state.tasks.length > 0 ? '✓' : '2'}
                 </span>
-                <span className="text-xs font-bold text-white">
-                  Lab Instructions Page
-                </span>
+                <div className="inline-flex rounded-md bg-slate-950 p-0.5 border border-slate-700 text-[11px]">
+                  <button
+                    type="button"
+                    onClick={() => handleTargetTypeChange('lab')}
+                    className={`px-2 py-0.5 rounded cursor-pointer transition ${
+                      !isCourseMode
+                        ? 'bg-indigo-600 text-white font-bold'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Lab
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleTargetTypeChange('course')}
+                    className={`px-2 py-0.5 rounded cursor-pointer transition ${
+                      isCourseMode
+                        ? 'bg-purple-600 text-white font-bold'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Course
+                  </button>
+                </div>
               </div>
 
               <div className="inline-flex rounded-md bg-slate-950 p-0.5 border border-slate-800 text-[11px]">
@@ -883,7 +929,7 @@ export default function App() {
                       : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  Chrome Tab
+                  Sync Tab
                 </button>
                 <button
                   type="button"
@@ -894,7 +940,7 @@ export default function App() {
                       : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  Lab URL
+                  {isCourseMode ? 'Course URL' : 'Lab URL'}
                 </button>
               </div>
             </div>
@@ -911,7 +957,9 @@ export default function App() {
                   className="flex-1 min-w-0 bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 font-mono focus:outline-none focus:border-cyan-500"
                 >
                   <option value="">
-                    -- Select Your Signed-In Lab Tab --
+                    {isCourseMode
+                      ? '-- Select Your Signed-In Course Tab --'
+                      : '-- Select Your Signed-In Lab Tab --'}
                   </option>
                   {allLabSelectTabs.map((t) => (
                     <option key={t.key} value={t.key}>
@@ -924,7 +972,7 @@ export default function App() {
                   onClick={handleParseLab}
                   disabled={syncingLab}
                   className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-xs font-semibold flex items-center gap-1 cursor-pointer transition shrink-0 disabled:opacity-60"
-                  title="Sync and parse instructions from the selected Chrome tab"
+                  title="Sync and parse from the selected Chrome tab"
                 >
                   <RefreshCw
                     className={`w-3.5 h-3.5 ${syncingLab ? 'animate-spin' : ''}`}
@@ -938,7 +986,11 @@ export default function App() {
                   type="url"
                   value={urlInput}
                   onChange={(e) => setUrlInput(e.target.value)}
-                  placeholder="https://www.cloudskillsboost.google/focuses/..."
+                  placeholder={
+                    isCourseMode
+                      ? 'https://partner.skills.google/paths/.../course_templates/...'
+                      : 'https://www.cloudskillsboost.google/focuses/...'
+                  }
                   className="flex-1 min-w-0 bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 placeholder-slate-500 font-mono focus:outline-none focus:border-cyan-500"
                 />
                 <button
@@ -956,9 +1008,11 @@ export default function App() {
               <span className="truncate">
                 {state.labTitle
                   ? `Loaded: ${state.labTitle}`
+                  : isCourseMode
+                  ? 'Select your open course tab or paste a course URL.'
                   : 'Select your signed-in lab tab or paste a URL.'}
               </span>
-              {!state.isLabStarted && state.tasks.length > 0 && (
+              {!state.isLabStarted && state.tasks.length > 0 && !isCourseMode && (
                 <button
                   type="button"
                   onClick={handleStartLabOnly}
@@ -971,89 +1025,132 @@ export default function App() {
             </div>
           </div>
 
-          {/* TILE 3: Launch Initial Incognito Window for Console & Cloud Shell */}
-          <div
-            className={`xl:col-span-3 rounded-xl p-3 border flex flex-col justify-between gap-2 transition ${
-              bothIncognitoTabsReady
-                ? 'bg-emerald-950/20 border-emerald-500/30'
-                : 'bg-indigo-950/30 border-indigo-500/40'
-            }`}
-          >
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <span
-                  className={`w-5 h-5 rounded-full text-[11px] font-bold flex items-center justify-center ${
-                    bothIncognitoTabsReady
-                      ? 'bg-emerald-500 text-slate-950'
-                      : 'bg-indigo-400 text-slate-950'
+          {/* TILE 3: Launch Initial Incognito Window (Lab) OR Multimedia & Quiz Summary (Course) */}
+          {isCourseMode ? (
+            <div className="xl:col-span-3 rounded-xl p-3 border bg-purple-950/25 border-purple-500/35 flex flex-col justify-between gap-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="w-5 h-5 rounded-full bg-purple-500 text-slate-950 text-[11px] font-bold flex items-center justify-center">
+                    ✓
+                  </span>
+                  <span className="text-xs font-bold text-white">
+                    Course Multimedia & Quiz Engine
+                  </span>
+                </div>
+                <span className="px-2 py-0.5 rounded bg-purple-500/20 text-[10px] font-mono text-purple-200 border border-purple-500/30">
+                  Direct Chrome Tab
+                </span>
+              </div>
+
+              <p className="text-[11px] text-slate-300 leading-snug">
+                Executes interactive Rise 360 lessons, video playback, and graded quizzes directly in your signed-in Chrome tab.
+              </p>
+
+              <div className="grid grid-cols-3 gap-1.5 text-[10px]">
+                <div className="px-2 py-1 rounded border bg-slate-950/70 border-slate-800 text-slate-200 flex items-center justify-between">
+                  <span>Lessons</span>
+                  <span className="font-mono font-bold text-cyan-300">
+                    {state.tasks.filter((t) => t.activityType === 'link' || t.activityType === 'document').length}
+                  </span>
+                </div>
+                <div className="px-2 py-1 rounded border bg-slate-950/70 border-slate-800 text-slate-200 flex items-center justify-between">
+                  <span>Videos</span>
+                  <span className="font-mono font-bold text-indigo-300">
+                    {state.tasks.filter((t) => t.activityType === 'video').length}
+                  </span>
+                </div>
+                <div className="px-2 py-1 rounded border bg-slate-950/70 border-slate-800 text-slate-200 flex items-center justify-between">
+                  <span>Quizzes</span>
+                  <span className="font-mono font-bold text-emerald-300">
+                    {state.tasks.filter((t) => t.activityType === 'quiz').length}
+                  </span>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div
+              className={`xl:col-span-3 rounded-xl p-3 border flex flex-col justify-between gap-2 transition ${
+                bothIncognitoTabsReady
+                  ? 'bg-emerald-950/20 border-emerald-500/30'
+                  : 'bg-indigo-950/30 border-indigo-500/40'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`w-5 h-5 rounded-full text-[11px] font-bold flex items-center justify-center ${
+                      bothIncognitoTabsReady
+                        ? 'bg-emerald-500 text-slate-950'
+                        : 'bg-indigo-400 text-slate-950'
+                    }`}
+                  >
+                    {bothIncognitoTabsReady ? '✓' : '3'}
+                  </span>
+                  <span className="text-xs font-bold text-white">
+                    Launch Incognito Console & Cloud Shell
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleScanChromeWindows}
+                  disabled={scanningWindows}
+                  className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-cyan-300 border border-slate-700 cursor-pointer"
+                  title="Rescan open Chrome windows for your Incognito Console and Cloud Shell tabs"
+                >
+                  {scanningWindows ? 'Scanning...' : 'Verify Tabs'}
+                </button>
+              </div>
+
+              <p className="text-[11px] text-slate-300 leading-snug">
+                Open an <strong>Incognito Chrome window</strong> signed in as the student account for both{' '}
+                <strong>Cloud Console</strong> and <strong>Cloud Shell</strong>.
+              </p>
+
+              <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+                <div
+                  className={`px-2 py-1 rounded border flex items-center justify-between ${
+                    incognitoConsoleTab
+                      ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                      : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
                   }`}
                 >
-                  {bothIncognitoTabsReady ? '✓' : '3'}
-                </span>
-                <span className="text-xs font-bold text-white">
-                  Launch Incognito Console & Cloud Shell
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={handleScanChromeWindows}
-                disabled={scanningWindows}
-                className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-cyan-300 border border-slate-700 cursor-pointer"
-                title="Rescan open Chrome windows for your Incognito Console and Cloud Shell tabs"
-              >
-                {scanningWindows ? 'Scanning...' : 'Verify Tabs'}
-              </button>
-            </div>
+                  <span className="truncate font-medium">
+                    {incognitoConsoleTab ? '✓ Console Tab Open' : '⚠ Open Console Tab'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard('inc_console_url', consoleQuickUrl)}
+                    className="ml-1 underline hover:text-white shrink-0 cursor-pointer"
+                    title="Copy GCP Console URL for your Incognito window"
+                  >
+                    {copiedField === 'inc_console_url' ? 'Copied' : 'Copy URL'}
+                  </button>
+                </div>
 
-            <p className="text-[11px] text-slate-300 leading-snug">
-              Open an <strong>Incognito Chrome window</strong> signed in as the student account for both{' '}
-              <strong>Cloud Console</strong> and <strong>Cloud Shell</strong>.
-            </p>
-
-            <div className="grid grid-cols-2 gap-1.5 text-[10px]">
-              <div
-                className={`px-2 py-1 rounded border flex items-center justify-between ${
-                  incognitoConsoleTab
-                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
-                    : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
-                }`}
-              >
-                <span className="truncate font-medium">
-                  {incognitoConsoleTab ? '✓ Console Tab Open' : '⚠ Open Console Tab'}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => copyToClipboard('inc_console_url', consoleQuickUrl)}
-                  className="ml-1 underline hover:text-white shrink-0 cursor-pointer"
-                  title="Copy GCP Console URL for your Incognito window"
+                <div
+                  className={`px-2 py-1 rounded border flex items-center justify-between ${
+                    incognitoShellTab
+                      ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                      : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+                  }`}
                 >
-                  {copiedField === 'inc_console_url' ? 'Copied' : 'Copy URL'}
-                </button>
-              </div>
-
-              <div
-                className={`px-2 py-1 rounded border flex items-center justify-between ${
-                  incognitoShellTab
-                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
-                    : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
-                }`}
-              >
-                <span className="truncate font-medium">
-                  {incognitoShellTab ? '✓ Cloud Shell Open' : '⚠ Open Cloud Shell'}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => copyToClipboard('inc_shell_url', cloudShellQuickUrl)}
-                  className="ml-1 underline hover:text-white shrink-0 cursor-pointer"
-                  title="Copy Cloud Shell URL for your Incognito window"
-                >
-                  {copiedField === 'inc_shell_url' ? 'Copied' : 'Copy URL'}
-                </button>
+                  <span className="truncate font-medium">
+                    {incognitoShellTab ? '✓ Cloud Shell Open' : '⚠ Open Cloud Shell'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard('inc_shell_url', cloudShellQuickUrl)}
+                    className="ml-1 underline hover:text-white shrink-0 cursor-pointer"
+                    title="Copy Cloud Shell URL for your Incognito window"
+                  >
+                    {copiedField === 'inc_shell_url' ? 'Copied' : 'Copy URL'}
+                  </button>
+                </div>
               </div>
             </div>
-          </div>
+          )}
 
-          {/* TILE 4: Run Lab & Verify Progress Checks */}
+          {/* TILE 4: Run Lab / Course & Verify Progress Checks */}
           <div className="xl:col-span-3 rounded-xl bg-gradient-to-br from-slate-900 to-indigo-950/40 border border-indigo-500/30 p-3 flex flex-col justify-between gap-2">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
@@ -1061,10 +1158,10 @@ export default function App() {
                   4
                 </span>
                 <span className="text-xs font-bold text-white">
-                  Run Lab & Verify Progress
+                  {isCourseMode ? 'Run Course & Complete Quizzes' : 'Run Lab & Verify Progress'}
                 </span>
               </div>
-              {bothIncognitoTabsReady && (
+              {bothIncognitoTabsReady && !isCourseMode && (
                 <span className="px-2 py-0.5 text-[10px] font-mono rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                   Incognito Ready
                 </span>
@@ -1072,7 +1169,9 @@ export default function App() {
             </div>
 
             <p className="text-[11px] text-slate-300 leading-snug">
-              Executes all lab tasks using your selected Model Garden model and verifies every progress check.
+              {isCourseMode
+                ? 'Navigates all modules, completes interactive multimedia, and solves & submits all quizzes.'
+                : 'Executes all lab tasks using your selected Model Garden model and verifies every progress check.'}
             </p>
 
             <div className="flex items-center gap-1.5">
@@ -1091,7 +1190,7 @@ export default function App() {
                   ) : (
                     <>
                       <Play className="w-3.5 h-3.5 fill-current" />
-                      Start & Run Lab
+                      {isCourseMode ? 'Start & Run Course' : 'Start & Run Lab'}
                     </>
                   )}
                 </button>
@@ -1112,7 +1211,7 @@ export default function App() {
                   onClick={handleCheckAllProgress}
                   disabled={checkingAllProgress}
                   className="px-2.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-500/30 text-xs font-semibold flex items-center gap-1 cursor-pointer transition shrink-0 disabled:opacity-60"
-                  title="Run Check my progress across all graded tasks"
+                  title={isCourseMode ? 'Refresh course completion status' : 'Run Check my progress across all graded tasks'}
                 >
                   <CheckCircle2
                     className={`w-3.5 h-3.5 ${checkingAllProgress ? 'animate-spin' : ''}`}
@@ -1121,7 +1220,7 @@ export default function App() {
                 </button>
               )}
 
-              {state.isLabStarted && (
+              {state.isLabStarted && !isCourseMode && (
                 <button
                   type="button"
                   onClick={handleEndLab}
@@ -1376,13 +1475,13 @@ export default function App() {
             </div>
           </section>
 
-          {/* Structured Lab Tasks & Progress Checks */}
+          {/* Structured Lab Tasks / Course Activities & Progress Checks */}
           <section className="rounded-xl bg-slate-900 border border-slate-800 flex-1 flex flex-col overflow-hidden">
             <div className="p-4 border-b border-slate-800 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 min-w-0">
                 <Layers className="w-4 h-4 text-blue-400 shrink-0" />
                 <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300 truncate">
-                  {state.labTitle || 'Lab Tasks & Progress Checks'}
+                  {state.labTitle || (isCourseMode ? 'Course Modules, Videos & Quizzes' : 'Lab Tasks & Progress Checks')}
                 </h2>
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -1393,11 +1492,15 @@ export default function App() {
                     disabled={checkingAllProgress}
                     className="px-2.5 py-1 rounded bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold cursor-pointer transition disabled:opacity-60"
                   >
-                    {checkingAllProgress ? 'Checking...' : '✓ Check All Progress'}
+                    {checkingAllProgress
+                      ? 'Checking...'
+                      : isCourseMode
+                      ? '✓ Sync Course Status'
+                      : '✓ Check All Progress'}
                   </button>
                 )}
                 <span className="text-xs text-slate-400">
-                  {state.tasks.length} Tasks
+                  {state.tasks.length} {isCourseMode ? 'Activities' : 'Tasks'}
                 </span>
               </div>
             </div>
@@ -1407,11 +1510,14 @@ export default function App() {
                 <div className="text-center py-12 px-4 text-slate-400 text-xs space-y-2">
                   <FileSearch className="w-8 h-8 mx-auto text-slate-600 stroke-1" />
                   <p className="text-slate-200 font-semibold">
-                    Ready to load your lab
+                    {isCourseMode ? 'Ready to load your course' : 'Ready to load your lab'}
                   </p>
                   <p className="text-slate-400 max-w-sm mx-auto leading-relaxed">
-                    Select your open lab tab in <strong>Step 2</strong> above (or paste the lab URL) and click{' '}
-                    <strong className="text-emerald-300">Start & Run Lab</strong>.
+                    Select <strong>{isCourseMode ? 'Course' : 'Lab'}</strong> in <strong>Step 2</strong> above, choose your open Chrome tab (or paste the URL), and click{' '}
+                    <strong className="text-emerald-300">
+                      {isCourseMode ? 'Start & Run Course' : 'Start & Run Lab'}
+                    </strong>
+                    .
                   </p>
                 </div>
               ) : (
@@ -1443,8 +1549,20 @@ export default function App() {
                           ) : (
                             <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />
                           )}
-                          <span className="px-2 py-0.5 text-[11px] font-bold rounded bg-slate-800 text-slate-200">
-                            Task {task.number}
+                          <span
+                            className={`px-2 py-0.5 text-[10px] font-bold uppercase rounded ${
+                              task.activityType === 'quiz'
+                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                                : task.activityType === 'video'
+                                ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                                : task.activityType
+                                ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
+                                : 'bg-slate-800 text-slate-200'
+                            }`}
+                          >
+                            {task.activityType
+                              ? `${task.activityType} #${task.number}`
+                              : `Task ${task.number}`}
                           </span>
                           <h3 className="text-xs font-semibold text-slate-100 truncate">
                             {task.title}
@@ -1455,7 +1573,7 @@ export default function App() {
                           className="flex items-center gap-2 shrink-0"
                           onClick={(e) => e.stopPropagation()}
                         >
-                          {task.stepMaxScore !== undefined && task.stepMaxScore > 0 && (
+                          {task.stepMaxScore !== undefined && task.stepMaxScore > 0 && !task.activityType && (
                             <span
                               className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
                                 task.progressVerified
@@ -1482,7 +1600,9 @@ export default function App() {
                               }`}
                             >
                               {task.progressVerified
-                                ? '✓ Verified'
+                                ? '✓ Completed'
+                                : task.activityType
+                                ? 'Run Activity'
                                 : 'Check Progress'}
                             </button>
                           )}

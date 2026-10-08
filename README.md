@@ -8,12 +8,12 @@
 
 ## 1. Title & Executive Overview
 
-**Skills Runner** (`skills-runner`) is a cloud-hosted web control center and hybrid browser/SSH automation agent that autonomously executes and verifies structured **Google Cloud Skills Boost (Qwiklabs)** and **Google Skills for Partners** hands-on labs and Challenge Labs.
+**Skills Runner** (`skills-runner`) is a cloud-hosted web control center and hybrid browser/SSH automation agent that autonomously executes and verifies structured **Google Cloud Skills Boost (Qwiklabs)** and **Google Skills for Partners** hands-on **Labs**, **Challenge Labs**, and multi-module **Courses**.
 
 ### Business Rationale, Public Sector Impact & Strategic Intent
-Public sector cloud engineers, state and local government technical architects, and delivery partners regularly complete complex hands-on Google Cloud labs spanning **Vertex AI**, **Agent Development Kit (ADK)**, **Discovery Engine**, **BigQuery**, **Terraform**, **Cloud Run**, and **Antigravity (`agy`)**. Manual execution of multi-step labs—especially when debugging grader rubrics, configuring isolated student environments, and reconciling multi-turn agent evaluations—consumes hours of engineering time.
+Public sector cloud engineers, state and local government technical architects, and delivery partners regularly complete complex hands-on Google Cloud labs and partner enablement courses spanning **Vertex AI**, **Agent Development Kit (ADK)**, **Discovery Engine**, **BigQuery**, **Terraform**, **Cloud Run**, and **Antigravity (`agy`)**. Manual execution of multi-step labs and multi-module courses—especially when debugging grader rubrics, configuring isolated student environments, and reconciling multi-turn agent evaluations—consumes hours of engineering time.
 
-**Skills Runner** pairs a stateless **Google Cloud Run** orchestration dashboard with a lightweight, on-demand **Mac Chrome Bridge** (`macBridgeAgent.ts`) that connects only when a lab is actively running. It introspects live student Cloud Shell workspaces, synthesizes stateful end-to-end bash and Python solutions powered by **`gemini-3.8-flash`**, executes them directly in the student's Cloud Shell VM or Incognito GCP Console, and closes the loop with a **3-attempt self-healing grader verification cycle** against Qwiklabs' **"Check my progress"** assessment API.
+**Skills Runner** pairs a stateless **Google Cloud Run** orchestration dashboard with a lightweight, on-demand **Mac Chrome Bridge** (`macBridgeAgent.ts`) that connects only when a lab or course is actively running. It introspects live student Cloud Shell workspaces, synthesizes stateful end-to-end bash and Python solutions powered by **`gemini-3.8-flash`**, executes them directly in the student's Cloud Shell VM or Incognito GCP Console, and closes the loop with a **self-healing grader verification cycle** against Qwiklabs' **"Check my progress"** assessment API—as well as an **Autonomous Course Progression Engine** that completes interactive multimedia lessons, videos, and graded quizzes end-to-end.
 
 ---
 
@@ -46,10 +46,10 @@ skills-runner/
 ├── README.md
 ├── server/
 │   ├── index.ts                   # Express HTTP API + /ws UI & /ws-bridge RPC servers
-│   ├── types.ts                   # Shared domain models (Tasks, Steps, Credentials, Model Garden, Bridge RPC)
-│   ├── browserOrchestrator.ts     # Stateful task execution loop & self-healing grader
-│   ├── geminiClient.ts            # Model Garden checker + Gemini 3.8 Flash / 3.1 Pro / Opus 5.5 synthesizer
-│   ├── labParser.ts               # Deep Shadow-DOM parser for <ql-*> web components & templates
+│   ├── types.ts                   # Shared domain models (Tasks, Steps, Course Activities, Model Garden, Bridge RPC)
+│   ├── browserOrchestrator.ts     # Stateful lab & course execution loops & self-healing grader/quiz engine
+│   ├── geminiClient.ts            # Model Garden checker + Lab synthesizer + Course Rise 360 & Quiz solver
+│   ├── labParser.ts               # Deep Shadow-DOM parser for <ql-*> lab & course web components (<ql-contents-menu>, <ql-quiz>)
 │   ├── nativeChromeBridge.ts      # Hybrid local/remote Chrome tab & Cloud Shell SSH + Vertex Workbench bridge
 │   ├── macBridgeHub.ts            # Cloud Run WebSocket RPC hub for connected Mac bridge agents
 │   ├── macBridgeAgent.ts          # Downloadable on-demand macOS Chrome & Cloud Shell agent
@@ -58,7 +58,7 @@ skills-runner/
 │   └── selfTest.ts                # End-to-end automated verification & regression test suite
 └── src/
     ├── main.tsx
-    ├── App.tsx                    # Web Control Center UI + 4-Tile Workflow + Model Garden Selector
+    ├── App.tsx                    # Web Control Center UI + 4-Tile Lab/Course Workflow + Model Garden Selector
     ├── index.css
     └── types.ts
 ```
@@ -67,32 +67,37 @@ skills-runner/
 
 ## 3. Core Capabilities & Key Features
 
-1. **Vertex AI Model Garden Checker & Selector**:
+1. **Lab vs. Course Target Selector & Autonomous Course Progression**:
+   - Switch seamlessly between **Lab** mode and **Course** mode (`POST /api/lab/target-type`) in Tile 2, or paste/sync any Google Cloud Skills Boost / Partner Skills Course URL (e.g., `https://partner.skills.google/paths/.../course_templates/...`).
+   - Parses `<ql-contents-menu>` modules and activities (`link`, `document`, `video`, `quiz`), extracts Articulate Rise 360 lesson content (`runtime-data.js`) from `<ql-iframe>` activities, triggers multimedia & `<ql-youtube-video>` completion, and autonomously solves `<ql-quiz>` assessments (`multiple-choice`, `multiple-select`, `true-false`) with up to 3 self-healing retake attempts.
+2. **Vertex AI Model Garden Checker & Selector**:
    - Live status checker (`POST /api/models/check`) and model switcher (`POST /api/models/select`) for **`gemini-3.8-flash`**, **`gemini-3.1-pro-preview`**, and **`claude-opus-5-5`** in `ice-cream-cone-452722` (`locations/global`).
    - Displays real-time availability badges and round-trip latency (`ms`) in the UI header and Model Garden card.
-2. **Dedicated "Launch Incognito Console & Cloud Shell" Workflow Tile**:
+3. **Dedicated "Launch Incognito Console & Cloud Shell" Workflow Tile**:
    - Assumes the operator launches the initial Incognito Chrome window signed in as the student account (`student-...@qwiklabs.net`) for **Cloud Console** and **Cloud Shell**, and never closes or resets the user's open Incognito windows.
    - Provides 1-click copy chips for the Student Username, Password, Project ID, Console URL, and Cloud Shell URL, plus live tab detection badges (`✓ Console Tab Open`, `✓ Cloud Shell Open`) and a `Verify Tabs` button.
-3. **On-Demand Mac Chrome Bridge (Zero Background Polling)**:
-   - When starting or parsing a lab from the Cloud Run web app, the UI checks whether the local Mac Chrome Bridge (`macBridgeAgent.ts`) is connected.
+4. **On-Demand Mac Chrome Bridge (Zero Background Polling)**:
+   - When starting or parsing a lab or course from the Cloud Run web app, the UI checks whether the local Mac Chrome Bridge (`macBridgeAgent.ts`) is connected.
    - If not running, operators can download a 1-click launcher (`Start-Mac-Chrome-Bridge.command`) that automatically saves and updates `~/Downloads/skill-runner/macBridgeAgent.ts` and connects over `wss://.../ws-bridge`.
-4. **Deep Shadow-DOM Lab Parser & Template Interpolation**:
-   - Pierces modern `<ql-lab-header>`, `<ql-copyable-input>`, `<ql-code-block>`, `<ql-activity-tracking>`, and Declarative Shadow DOM templates.
+5. **Deep Shadow-DOM Lab & Course Parser & Template Interpolation**:
+   - Pierces modern `<ql-lab-header>`, `<ql-copyable-input>`, `<ql-code-block>`, `<ql-activity-tracking>`, `<ql-contents-menu>`, `<ql-quiz>`, and Declarative Shadow DOM templates.
    - Automatically resolves Qwiklabs template expressions including piped default filters (`{{{ project_0.project_id | "your-gcp-project-id" }}}`, `{{{ primary_project.project_id | "your-gcp-project-id" }}}`) against live student credentials.
-5. **Live Student Cloud Shell, Vertex AI Workbench (`wb_helper`) & Grader Audit Introspection**:
-   - Connects to the student's isolated Cloud Shell VM via `gcloud cloud-shell ssh` and inspects the directory tree (`~`), starter code, project GCS buckets, Vertex AI Workbench instances (`wb_helper.py` auto-repair and execution for Jupyter `.ipynb` labs such as `evaluation.ipynb`), and the live **Qwiklabs Grader Audit Trail**.
-6. **Unified Stateful Task Synthesis & 4-Attempt Self-Healing Grader Verification**:
+6. **Live Student Cloud Shell, Vertex AI Workbench (`wb_helper`) & Multi-Zone Stockout Recovery**:
+   - Connects to the student's isolated Cloud Shell VM via `gcloud cloud-shell ssh` and inspects the directory tree (`~`), starter code, project GCS buckets, Vertex AI Workbench instances (`wb_helper.py` auto-repair and execution for Jupyter `.ipynb` labs such as `evaluation.ipynb` and `get_started_with_oss_tuning_on_vertexai.ipynb`), and the live **Qwiklabs Grader Audit Trail**.
+   - Automatically falls back across `us-central1-a`, `us-central1-b`, `us-central1-f`, and `us-central1-c` when GCE experiences zone capacity stockouts (`ZONE_RESOURCE_POOL_EXHAUSTED`).
+7. **Unified Stateful Task Synthesis & 4-Attempt Self-Healing Grader Verification**:
    - Synthesizes idempotent bash and Python scripts per task, preserves Python indentation across heredocs, clicks **"Check my progress"** via the Qwiklabs assessment API, and self-heals up to 4 attempts per task until all progress checks pass.
 
 ### Operator Workflow: 4-Tile Guided Execution
 1. **Tile 1 — Connect Mac Bridge**:
    - Sign into your Google Cloud Skills Boost / Partner Skills account in your normal desktop Google Chrome browser and connect the Mac Bridge.
-2. **Tile 2 — Point at Lab Tab**:
-   - Select your open Lab Instructions tab from the dropdown (or paste the Lab URL) and click **Start Lab & Get Creds** to extract the student `username`, `password`, and `projectId`.
-3. **Tile 3 — Launch Incognito Console & Cloud Shell**:
-   - Open an Incognito Chrome window (`⌘+Shift+N`), sign in with the copied Student Username & Password, open **Cloud Console** and activate **Cloud Shell**, then click **Verify Tabs**.
-4. **Tile 4 — Run Lab & Pass Progress Checks**:
-   - Choose your preferred Model Garden model (**Gemini 3.8 Flash**, **Gemini 3.1 Pro**, or **Opus 5.5**) and click **Run Lab & Pass Checks**.
+2. **Tile 2 — Point at Lab or Course Tab**:
+   - Choose **Lab** or **Course**, select your open Chrome tab from the dropdown (or paste a Lab/Course URL), and click **Start Lab & Get Creds** (or **Sync Course & Parse Modules**).
+3. **Tile 3 — Launch Incognito Console & Cloud Shell (Labs) / Course Engine Ready (Courses)**:
+   - For Labs: Open an Incognito Chrome window (`⌘+Shift+N`), sign in with the copied Student Username & Password, open **Cloud Console** and activate **Cloud Shell**, then click **Verify Tabs**.
+   - For Courses: Runs directly inside your normal authenticated Chrome tab—no Incognito window or Cloud Shell required.
+4. **Tile 4 — Run Lab or Course**:
+   - Choose your preferred Model Garden model (**Gemini 3.8 Flash**, **Gemini 3.1 Pro**, or **Opus 5.5**) and click **Run Lab & Pass Checks** (or **Start & Run Course**).
 
 ---
 
@@ -106,23 +111,24 @@ skills-runner/
 | `/api/models/garden` | `GET` | — | Returns active model and cached Model Garden entries (`gemini-3.8-flash`, `gemini-3.1-pro-preview`, `claude-opus-5-5`) |
 | `/api/models/check` | `POST` | `{}` | Probes live enablement and latency (`ms`) for `gemini-3.8-flash`, `gemini-3.1-pro-preview`, and `claude-opus-5-5` in Model Garden |
 | `/api/models/select` | `POST` | `{ "model": "gemini-3.8-flash" \| "gemini-3.1-pro-preview" \| "claude-opus-5-5" }` | Switches the active model used for task synthesis and planning |
-| `/api/chrome/scan` | `POST` | `{}` | Scans open macOS Google Chrome windows/tabs (Normal + Incognito) and classifies `lab`, `console`, and `cloud_shell` roles |
-| `/api/chrome/bind` | `POST` | `{ "labTabKey": "win:tab", "consoleTabKey": "win:tab" }` | Binds selected Chrome tabs and snapshots the Lab DOM |
+| `/api/chrome/scan` | `POST` | `{}` | Scans open macOS Google Chrome windows/tabs (Normal + Incognito) and classifies `lab`, `console`, and `cloud_shell` roles plus `contentKind` (`lab` vs `course`) |
+| `/api/chrome/bind` | `POST` | `{ "labTabKey": "win:tab", "consoleTabKey": "win:tab" }` | Binds selected Chrome tabs and snapshots the Lab/Course DOM |
 | `/api/chrome/focus` | `POST` | `{ "key": "win:tab" }` | Brings a specific Chrome window and tab to the foreground |
-| `/api/lab/open` | `POST` | `{ "url": "https://..." }` | Opens a Lab URL in Chrome and parses instructions |
-| `/api/lab/parse` | `POST` | `{}` | Syncs the bound Lab tab DOM, parses tasks/credentials, and polls live assessment scores |
-| `/api/lab/start-and-signin` | `POST` | `{}` | Clicks "Start Lab", extracts student credentials, and scans for the user's open Incognito Console & Cloud Shell tabs |
-| `/api/lab/start-and-run` | `POST` | `{ "labTabKey": "win:tab", "url": "https://..." }` | Unified pipeline: binds/opens the lab tab, starts the lab, attaches to the user's Incognito Console & Cloud Shell tabs, runs all tasks, and verifies progress checks |
-| `/api/lab/run` | `POST` | `{ "singleStep": false }` | Starts or resumes the autonomous task execution & verification loop |
+| `/api/lab/target-type` | `POST` | `{ "targetType": "lab" \| "course" }` | Switches the active session between Hands-on Lab mode and Course Progression mode |
+| `/api/lab/open` | `POST` | `{ "url": "https://...", "targetType": "lab" \| "course" }` | Opens a Lab or Course URL in Chrome and parses instructions or course modules |
+| `/api/lab/parse` | `POST` | `{}` | Syncs the bound Lab or Course tab DOM, parses tasks/modules/credentials, and polls live scores |
+| `/api/lab/start-and-signin` | `POST` | `{}` | Starts the Lab or syncs the Course, extracts student credentials (if Lab), and scans open Chrome tabs |
+| `/api/lab/start-and-run` | `POST` | `{ "labTabKey": "win:tab", "url": "https://...", "targetType": "lab" \| "course" }` | Unified pipeline: binds/opens the Lab or Course tab and runs all tasks or course activities/quizzes to completion |
+| `/api/lab/run` | `POST` | `{ "singleStep": false }` | Starts or resumes the autonomous Lab or Course execution & verification loop |
 | `/api/lab/pause` | `POST` | `{}` | Pauses the active execution loop |
 | `/api/lab/skip-step` | `POST` | `{}` | Skips the currently active step |
 | `/api/lab/end` | `POST` | `{}` | Stops execution, clicks "End Lab" + confirms termination in Google Chrome, and clears expired credentials |
-| `/api/lab/switch-course` | `POST` | `{ "url": "...", "labTabKey": "win:tab", "endCurrentFirst": true, "autoRun": true }` | Ends the active lab (optional), resets state, switches to a new Skill Course URL or Chrome tab, and optionally starts autonomous execution |
+| `/api/lab/switch-course` | `POST` | `{ "url": "...", "labTabKey": "win:tab", "targetType": "lab" \| "course", "endCurrentFirst": true, "autoRun": true }` | Resets state, switches to a new Lab or Course URL or Chrome tab, and optionally starts autonomous execution |
 | `/api/lab/mode` | `POST` | `{ "mode": "autonomous" \| "step_by_step" }` | Switches between Autonomous and Step-by-Step execution modes |
 | `/api/lab/override` | `POST` | `{ "instruction": "..." }` | Queues a live operator override instruction for the next synthesis turn |
 | `/api/lab/credentials` | `POST` | `{ "projectId": "...", "region": "..." }` | Manually updates or overrides extracted lab credentials and re-interpolates commands |
-| `/api/lab/check-progress` | `POST` | `{ "taskNumber": 1 }` | Triggers "Check my progress" for a specific task and updates task/total scores |
-| `/api/lab/check-all-progress` | `POST` | `{}` | Triggers "Check my progress" across all graded tasks in the lab |
+| `/api/lab/check-progress` | `POST` | `{ "taskNumber": 1 }` | Triggers "Check my progress" for a specific task or re-syncs course activity completion |
+| `/api/lab/check-all-progress` | `POST` | `{}` | Triggers "Check my progress" across all graded tasks or re-syncs course completion status |
 | `/api/lab/cloud-shell-cmd` | `POST` | `{ "command": "..." }` | Executes a command directly in the student's Cloud Shell environment |
 | `/api/lab/antigravity-prompt` | `POST` | `{ "prompt": "..." }` | Injects a prompt into Antigravity in the Cloud Console |
 | `/api/bridge/status` | `GET` | — | Returns `{ connected, canStartLocally, wsUrl, httpBase }` for the local Mac Chrome Bridge |

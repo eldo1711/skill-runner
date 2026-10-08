@@ -5,6 +5,7 @@ import {
   getModelGardenEntries,
   interpolateLabVariables,
   resolveLatestGeminiModel,
+  solveCourseQuizQuestions,
   synthesizeTaskShellScript,
   transformAgyLaunchCommand,
 } from './geminiClient.js';
@@ -688,6 +689,136 @@ async function runVerificationTests() {
     throw new Error('Expected listActiveSessions() to include both test sessions.');
   }
   console.log('✓ Multi-instance session isolation verified (independent state, credentials, models, and reset).');
+
+  // 7. Verify Course DOM parsing (<ql-contents-menu>, <ql-iframe>, <ql-quiz>) and Quiz solver
+  const coursePage = await browser.newPage();
+  const sampleModules = [
+    {
+      title: 'Start the course',
+      expanded: true,
+      steps: [
+        {
+          id: 763599,
+          activities: [
+            {
+              id: 763599,
+              title: 'Module 1: Introduction to Gemini Enterprise',
+              type: 'link',
+              href: '/paths/3476/course_templates/1751/documents/763599?coursesession=24024927',
+              isComplete: true,
+            },
+          ],
+        },
+        {
+          id: 763601,
+          activities: [
+            {
+              id: 763601,
+              title: 'Gemini Enterprise Technical Deep Dive',
+              type: 'video',
+              href: '/paths/3476/course_templates/1751/videos/763601?coursesession=24024927',
+              isComplete: true,
+            },
+          ],
+        },
+        {
+          id: 763602,
+          activities: [
+            {
+              id: 763602,
+              title: 'Quiz',
+              type: 'quiz',
+              href: '/paths/3476/course_templates/1751/quizzes/763602?coursesession=24024927',
+              isComplete: false,
+            },
+          ],
+        },
+        {
+          id: -1,
+          activities: [
+            {
+              id: -1,
+              title: 'Completion badge',
+              type: 'credential',
+              href: '',
+              isComplete: false,
+            },
+          ],
+        },
+      ],
+    },
+  ];
+  const sampleQuizVersion = {
+    id: 999,
+    passingPercentage: 80,
+    quizItems: [
+      {
+        id: 1621652,
+        itemType: 'multiple-choice',
+        stem: '<p>Which architecture model allows federated search across connectors without moving data into Google Cloud?</p>',
+        options: [
+          { id: '1306332', title: '<p>Data Federation</p>' },
+          { id: '1306333', title: '<p>Full Data Ingestion</p>' },
+        ],
+      },
+    ],
+  };
+  const sampleQuizResponse = {
+    id: 16629874,
+    isSubmitted: false,
+    isPassing: false,
+    percentageGrade: null,
+    itemResponses: [
+      {
+        id: '89213659',
+        quizItemId: '1621652',
+        isSubmitted: false,
+        itemType: 'multiple-choice',
+        choiceId: null,
+      },
+    ],
+  };
+
+  await coursePage.setContent(`
+    <!DOCTYPE html>
+    <html>
+      <body>
+        <div class="breadcrumb-item">
+          <a href="/paths/3476/course_templates/1751">Gemini Enterprise: Architecture</a>
+        </div>
+        <ql-contents-menu modules='${JSON.stringify(sampleModules)}'></ql-contents-menu>
+        <ql-quiz
+          quizversion='${JSON.stringify(sampleQuizVersion)}'
+          quizresponse='${JSON.stringify(sampleQuizResponse)}'
+        ></ql-quiz>
+      </body>
+    </html>
+  `);
+
+  const parsedCourse = await parseLabPageDom(coursePage);
+  if (!parsedCourse.isCourse) {
+    throw new Error('Expected parseLabPageDom to detect course page (isCourse === true)');
+  }
+  if (parsedCourse.tasks.length !== 3) {
+    throw new Error(`Expected 3 non-credential course activities, got ${parsedCourse.tasks.length}`);
+  }
+  if (parsedCourse.totalScore !== 2 || parsedCourse.maxScore !== 3) {
+    throw new Error(`Expected course score 2/3, got ${parsedCourse.totalScore}/${parsedCourse.maxScore}`);
+  }
+  if (!parsedCourse.currentQuiz || parsedCourse.currentQuiz.items.length !== 1) {
+    throw new Error('Expected parsedCourse.currentQuiz to contain 1 quiz item');
+  }
+
+  const solvedAnswers = await solveCourseQuizQuestions(
+    parsedCourse.labTitle,
+    'Data Federation allows federated search across connectors in real time without moving data into Google Cloud.',
+    parsedCourse.currentQuiz.items
+  );
+  if (solvedAnswers.length !== 1 || solvedAnswers[0].choiceId !== '1306332') {
+    throw new Error(`Expected quiz solver to pick choiceId 1306332, got ${JSON.stringify(solvedAnswers)}`);
+  }
+  await coursePage.close();
+  console.log('✓ Course DOM parsing (<ql-contents-menu>, <ql-quiz>) and Quiz solver verified.');
 
   await browser.close();
   console.log('✅ All verification tests passed!');

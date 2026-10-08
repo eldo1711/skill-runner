@@ -191,17 +191,35 @@ end tell
 
     const lowerUrl = url.toLowerCase();
     let suggestedRole = 'other';
-    if (
+    let contentKind = undefined;
+    const isSkillsDomain =
+      (lowerUrl.includes('skills.google') ||
+        lowerUrl.includes('cloudskillsboost.google') ||
+        lowerUrl.includes('qwiklabs.com')) &&
       !lowerUrl.includes('accounts.google.com') &&
       !lowerUrl.includes('login.corp.google.com') &&
-      !lowerUrl.includes('google_sso') &&
-      (lowerUrl.includes('skills.google/focuses/') ||
+      !lowerUrl.includes('google_sso');
+
+    if (
+      isSkillsDomain &&
+      (lowerUrl.includes('/focuses/') ||
         lowerUrl.includes('/labs/') ||
-        lowerUrl.includes('cloudskillsboost.google/focuses/') ||
-        lowerUrl.includes('skills.google/catalog_lab/') ||
-        lowerUrl.includes('qwiklabs.com/focuses/'))
+        lowerUrl.includes('/catalog_lab/'))
     ) {
       suggestedRole = 'lab';
+      contentKind = 'lab';
+    } else if (
+      isSkillsDomain &&
+      (lowerUrl.includes('/course_templates/') ||
+        lowerUrl.includes('/course_sessions/') ||
+        lowerUrl.includes('/paths/') ||
+        lowerUrl.includes('/quests/') ||
+        lowerUrl.includes('/documents/') ||
+        lowerUrl.includes('/quizzes/') ||
+        lowerUrl.includes('/videos/'))
+    ) {
+      suggestedRole = 'lab';
+      contentKind = 'course';
     } else if (lowerUrl.includes('shell.cloud.google.com')) {
       suggestedRole = 'cloud_shell';
     } else if (lowerUrl.includes('console.cloud.google.com')) {
@@ -218,6 +236,7 @@ end tell
       url: url.trim(),
       isActiveTab: tabIndex === activeIdx,
       suggestedRole,
+      ...(contentKind ? { contentKind } : {}),
     });
   }
 
@@ -343,7 +362,7 @@ async function snapshotUserChromeTabByTarget(windowId, tabIndex) {
   }
 
   const escapedSnapshotPath = SNAPSHOT_HTML_PATH.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  const inMemoryJs = `(function(){try{function s(r){var h='';var c=r.childNodes;for(var i=0;i<c.length;i++){var n=c[i];if(n.nodeType===1){var t=n.tagName.toLowerCase();h+='<'+t;for(var a=0;a<n.attributes.length;a++){var at=n.attributes[a];h+=' '+at.name+'="'+at.value.replace(/"/g,'&quot;')+'"';}h+='>';if(n.shadowRoot){h+='<template shadowrootmode="open">'+s(n.shadowRoot)+'</template>';}h+=s(n)+'</'+t+'>';}else if(n.nodeType===3){h+=n.nodeValue;}}return h;}return document.documentElement.outerHTML.length>500 && document.querySelector('ql-lab-header') ? '<!DOCTYPE html><html>'+s(document.documentElement)+'</html>' : '';}catch(e){return '';}})()`;
+  const inMemoryJs = `(function(){try{function s(r){var h='';var c=r.childNodes;for(var i=0;i<c.length;i++){var n=c[i];if(n.nodeType===1){var t=n.tagName.toLowerCase();h+='<'+t;for(var a=0;a<n.attributes.length;a++){var at=n.attributes[a];h+=' '+at.name+'="'+at.value.replace(/"/g,'&quot;')+'"';}h+='>';if(n.shadowRoot){h+='<template shadowrootmode="open">'+s(n.shadowRoot)+'</template>';}h+=s(n)+'</'+t+'>';}else if(n.nodeType===3){h+=n.nodeValue;}}return h;}return document.documentElement.outerHTML.length>500 && (document.querySelector('ql-lab-header') || document.querySelector('ql-contents-menu') || document.querySelector('ql-quiz')) ? '<!DOCTYPE html><html>'+s(document.documentElement)+'</html>' : '';}catch(e){return '';}})()`;
   const escapedInMemoryJs = inMemoryJs.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
   const script = `
@@ -414,6 +433,10 @@ end tell
   }
   try {
     if (fs.existsSync(SNAPSHOT_FILES_DIR)) {
+      const rtDataPath = path.join(SNAPSHOT_FILES_DIR, 'runtime-data.js');
+      if (fs.existsSync(rtDataPath)) {
+        fs.copyFileSync(rtDataPath, path.join(SNAPSHOT_DIR, 'runtime-data.js'));
+      }
       fs.rmSync(SNAPSHOT_FILES_DIR, { recursive: true, force: true });
     }
   } catch {
@@ -1123,6 +1146,511 @@ return "done"
     message: 'Could not locate an active "End Lab" button in the selected Chrome tab.',
   };
 }
+
+async function completeCourseActivityInUserChrome(
+  windowId,
+  tabIndex,
+  activityUrl,
+  activityType = 'link'
+) {
+  let targetWindowId = Number(windowId) || 0;
+  let targetTabIndex = Number(tabIndex) || 1;
+  if (!targetWindowId) {
+    const tabs = await listUserChromeTabs();
+    const labTab = tabs.find((t) => t.suggestedRole === 'lab');
+    if (labTab) {
+      targetWindowId = labTab.windowId;
+      targetTabIndex = labTab.tabIndex;
+    }
+  }
+  if (!targetWindowId) {
+    return { ok: false, message: 'No Course tab found in Google Chrome.' };
+  }
+
+  if (activityUrl) {
+    const escapedUrl = String(activityUrl).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const navScript = `
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${targetWindowId}" then
+      if ${targetTabIndex} <= (count of tabs of w) then
+        set t to tab ${targetTabIndex} of w
+        if (URL of t) is not "${escapedUrl}" then
+          set URL of t to "${escapedUrl}"
+        end if
+        set active tab index of w to ${targetTabIndex}
+        set index of w to 1
+        activate
+        delay 0.8
+        repeat 40 times
+          if (loading of t) is false then exit repeat
+          delay 0.25
+        end repeat
+        delay 1.5
+        return "ok"
+      end if
+    end if
+  end repeat
+  return "not_found"
+end tell
+`;
+    await runAppleScript(navScript).catch(() => '');
+  }
+
+  const completeJs = `(function(){
+    try {
+      var csrf = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
+      if (csrf && (location.pathname.includes('/videos/') || location.pathname.includes('/documents/'))) {
+        fetch(location.pathname + '/complete', {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': csrf },
+          credentials: 'include'
+        }).catch(function(){});
+      }
+      var yt = document.querySelector('ql-youtube-video');
+      if (yt && yt.shadowRoot) {
+        var links = yt.shadowRoot.querySelectorAll('a.timecode');
+        if (links && links.length > 0) {
+          links[links.length - 1].click();
+        }
+      }
+      return 'ok';
+    } catch(e) {
+      return 'err';
+    }
+  })()`;
+  const jsRes = await executeJsInUserChromeTab(targetWindowId, targetTabIndex, completeJs);
+
+  if (!jsRes.ok && activityType === 'video') {
+    const videoAxScript = `
+tell application "Google Chrome" to activate
+delay 0.3
+tell application "System Events"
+  tell process "Google Chrome"
+    try
+      set value of attribute "AXEnhancedUserInterface" to true
+    end try
+    delay 0.4
+    if (count of windows) > 0 then
+      set w to front window
+      set allElems to entire contents of w
+      set lastTimeLink to missing value
+      repeat with el in allElems
+        try
+          if (role of el) is "AXLink" then
+            set nm to (name of el) as string
+            if nm contains ":" then
+              set lastTimeLink to el
+            end if
+          end if
+        end try
+      end repeat
+      if lastTimeLink is not missing value then
+        click lastTimeLink
+        return "clicked_timecode"
+      end if
+    end if
+  end tell
+end tell
+return "done"
+`;
+    await runAppleScript(videoAxScript).catch(() => '');
+    await new Promise((r) => setTimeout(r, 3500));
+  } else {
+    await new Promise((r) => setTimeout(r, 1200));
+  }
+
+  const snap = await snapshotUserChromeTabByTarget(targetWindowId, targetTabIndex);
+  const htmlContent =
+    snap && snap.htmlPath && fs.existsSync(snap.htmlPath)
+      ? fs.readFileSync(snap.htmlPath, 'utf8')
+      : '';
+  return {
+    ok: Boolean(htmlContent),
+    url: snap?.url || activityUrl || '',
+    title: snap?.title || '',
+    htmlContent,
+  };
+}
+
+async function submitCourseQuizInUserChrome(
+  windowId,
+  tabIndex,
+  quizUrl,
+  answers = [],
+  needsRetakeFirst = false
+) {
+  let targetWindowId = Number(windowId) || 0;
+  let targetTabIndex = Number(tabIndex) || 1;
+  if (!targetWindowId) {
+    const tabs = await listUserChromeTabs();
+    const labTab = tabs.find((t) => t.suggestedRole === 'lab');
+    if (labTab) {
+      targetWindowId = labTab.windowId;
+      targetTabIndex = labTab.tabIndex;
+    }
+  }
+  if (!targetWindowId) {
+    return { ok: false, message: 'No Course tab found in Google Chrome.' };
+  }
+
+  if (quizUrl) {
+    const escapedUrl = String(quizUrl).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const navScript = `
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${targetWindowId}" then
+      if ${targetTabIndex} <= (count of tabs of w) then
+        set t to tab ${targetTabIndex} of w
+        if (URL of t) is not "${escapedUrl}" then
+          set URL of t to "${escapedUrl}"
+        end if
+        set active tab index of w to ${targetTabIndex}
+        set index of w to 1
+        activate
+        delay 0.8
+        repeat 40 times
+          if (loading of t) is false then exit repeat
+          delay 0.25
+        end repeat
+        delay 1.5
+        return "ok"
+      end if
+    end if
+  end repeat
+  return "not_found"
+end tell
+`;
+    await runAppleScript(navScript).catch(() => '');
+  } else {
+    await focusUserChromeTab(targetWindowId, targetTabIndex);
+  }
+
+  // First try direct JS execution if enabled in Chrome
+  const answersJson = JSON.stringify(answers || []);
+  const quizJs = `(function(ansList, doRetake){
+    try {
+      var q = document.querySelector('ql-quiz');
+      if (!q || !q.shadowRoot) return 'no_quiz';
+      function findDeep(root, pred) {
+        var out = [];
+        var walker = function(n) {
+          if (!n) return;
+          if (n.nodeType === 1) {
+            if (pred(n)) out.push(n);
+            if (n.shadowRoot) walker(n.shadowRoot);
+          }
+          var ch = n.childNodes || [];
+          for (var i = 0; i < ch.length; i++) walker(ch[i]);
+        };
+        walker(root);
+        return out;
+      }
+      if (doRetake) {
+        var retakeBtns = findDeep(q.shadowRoot, function(el) {
+          return el.classList && el.classList.contains('retake-button');
+        });
+        if (retakeBtns.length > 0) {
+          retakeBtns[0].click();
+          return 'retake_clicked';
+        }
+      }
+      for (var i = 0; i < ansList.length; i++) {
+        var a = ansList[i];
+        if (a.choiceId) {
+          var radios = findDeep(q.shadowRoot, function(el) {
+            return el.id === 'radio-' + a.choiceId;
+          });
+          if (radios.length > 0) radios[0].click();
+        }
+      }
+      setTimeout(function() {
+        var subBtns = findDeep(q.shadowRoot, function(el) {
+          return el.classList && el.classList.contains('submit-button');
+        });
+        if (subBtns.length > 0) subBtns[0].click();
+        else if (typeof q.submit === 'function') q.submit();
+      }, 600);
+      return 'submitted_via_js';
+    } catch(e) {
+      return 'err:' + e.message;
+    }
+  })(${answersJson}, ${needsRetakeFirst ? 'true' : 'false'})`;
+
+  const jsRes = await executeJsInUserChromeTab(targetWindowId, targetTabIndex, quizJs);
+  if (jsRes.ok && jsRes.value === 'retake_clicked') {
+    await new Promise((r) => setTimeout(r, 2200));
+    await executeJsInUserChromeTab(
+      targetWindowId,
+      targetTabIndex,
+      quizJs.replace(/,\s*true\)$/, ', false)')
+    );
+  }
+
+  if (!jsRes.ok) {
+    // Accessibility / System Events path when "Allow JavaScript from Apple Events" is off
+    if (needsRetakeFirst) {
+      const retakeAxScript = `
+tell application "Google Chrome" to activate
+delay 0.3
+tell application "System Events"
+  tell process "Google Chrome"
+    try
+      set value of attribute "AXEnhancedUserInterface" to true
+    end try
+    delay 0.5
+    if (count of windows) > 0 then
+      set w to front window
+      set allElems to entire contents of w
+      repeat with el in allElems
+        try
+          if (role of el) is "AXButton" then
+            set nm to ""
+            try
+              set nm to (name of el) as string
+            end try
+            if nm is "" then
+              try
+                set nm to (description of el) as string
+              end try
+            end if
+            if nm is "Retake" or nm starts with "Retake" then
+              click el
+              return "retake_clicked"
+            end if
+          end if
+        end try
+      end repeat
+    end if
+  end tell
+end tell
+return "no_retake"
+`;
+      const rOut = await runAppleScript(retakeAxScript).catch(() => '');
+      if (rOut === 'retake_clicked') {
+        await new Promise((r) => setTimeout(r, 2500));
+        const reloadAfterRetake = `
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${targetWindowId}" then
+      if ${targetTabIndex} <= (count of tabs of w) then
+        set t to tab ${targetTabIndex} of w
+        set URL of t to (URL of t)
+        delay 0.8
+        repeat 40 times
+          if (loading of t) is false then exit repeat
+          delay 0.25
+        end repeat
+        delay 1.2
+      end if
+      exit repeat
+    end if
+  end repeat
+end tell
+`;
+        await runAppleScript(reloadAfterRetake).catch(() => '');
+      }
+    }
+
+    // Read fresh snapshot to compute exact 1-based AXRadioButton ordinals across quizItems
+    const preSnap = await snapshotUserChromeTabByTarget(targetWindowId, targetTabIndex);
+    const targetRadioOrdinals = [];
+    const targetCheckboxOrdinals = [];
+    if (preSnap && preSnap.htmlPath && fs.existsSync(preSnap.htmlPath)) {
+      try {
+        const html = fs.readFileSync(preSnap.htmlPath, 'utf8');
+        const qvMatch = html.match(/quizversion="([^"]+)"/i);
+        if (qvMatch && qvMatch[1]) {
+          const unescaped = qvMatch[1]
+            .replace(/&quot;/g, '"')
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&#39;/g, "'");
+          const qv = JSON.parse(unescaped);
+          const quizItems = Array.isArray(qv.quizItems) ? qv.quizItems : [];
+          let radioOffset = 0;
+          let checkboxOffset = 0;
+          for (let qIdx = 0; qIdx < quizItems.length; qIdx++) {
+            const item = quizItems[qIdx];
+            const opts = Array.isArray(item.options) ? item.options : [];
+            const ans =
+              (answers || []).find((a) => String(a.quizItemId) === String(item.id)) ||
+              (answers || [])[qIdx];
+            if (item.itemType === 'multiple-select') {
+              const chosenIds = new Set(
+                Array.isArray(ans?.choiceIds) ? ans.choiceIds.map(String) : []
+              );
+              for (let oIdx = 0; oIdx < opts.length; oIdx++) {
+                if (chosenIds.has(String(opts[oIdx].id))) {
+                  targetCheckboxOrdinals.push(checkboxOffset + oIdx + 1);
+                }
+              }
+              checkboxOffset += opts.length;
+            } else {
+              const numOpts = item.itemType === 'true-false' ? 2 : opts.length;
+              let chosenOptIdx =
+                typeof ans?.optionIndex === 'number' && ans.optionIndex >= 0
+                  ? ans.optionIndex
+                  : 0;
+              if (ans?.choiceId && opts.length > 0) {
+                const foundIdx = opts.findIndex((o) => String(o.id) === String(ans.choiceId));
+                if (foundIdx >= 0) chosenOptIdx = foundIdx;
+              }
+              targetRadioOrdinals.push(radioOffset + chosenOptIdx + 1);
+              radioOffset += numOpts;
+            }
+          }
+        }
+      } catch {
+        // Fallback below
+      }
+    }
+
+    const radioIndicesAppleList = `{${targetRadioOrdinals.join(', ')}}`;
+    const checkboxIndicesAppleList = `{${targetCheckboxOrdinals.join(', ')}}`;
+
+    const selectAndSubmitAxScript = `
+tell application "Google Chrome" to activate
+delay 0.4
+tell application "System Events"
+  tell process "Google Chrome"
+    try
+      set value of attribute "AXEnhancedUserInterface" to true
+    end try
+    delay 0.6
+    if (count of windows) > 0 then
+      set w to front window
+      set radioList to {}
+      set checkList to {}
+      set submitBtn to missing value
+      repeat 3 times
+        set radioList to {}
+        set checkList to {}
+        set submitBtn to missing value
+        set allElems to entire contents of w
+        repeat with el in allElems
+          try
+            set r to (role of el) as string
+            if r is "AXRadioButton" then
+              set end of radioList to el
+            else if r is "AXCheckBox" then
+              set end of checkList to el
+            else if r is "AXButton" then
+              set nm to ""
+              try
+                set nm to (name of el) as string
+              end try
+              if nm is "" then
+                try
+                  set nm to (description of el) as string
+                end try
+              end if
+              if nm is "Submit" then
+                set submitBtn to el
+              end if
+            end if
+          end try
+        end repeat
+        if (count of radioList) > 0 or (count of checkList) > 0 then
+          exit repeat
+        end if
+        delay 0.8
+      end repeat
+
+      set targetRadios to ${radioIndicesAppleList}
+      repeat with idx in targetRadios
+        set iVal to idx as integer
+        if iVal >= 1 and iVal <= (count of radioList) then
+          set rEl to item iVal of radioList
+          try
+            click rEl
+          end try
+          delay 0.25
+          try
+            set vStr to (value of rEl) as string
+            if vStr is not "1" and vStr is not "true" then
+              set focused of rEl to true
+              delay 0.15
+              keystroke space
+              delay 0.2
+            end if
+          end try
+          delay 0.35
+        end if
+      end repeat
+
+      set targetChecks to ${checkboxIndicesAppleList}
+      repeat with cIdx in targetChecks
+        set cVal to cIdx as integer
+        if cVal >= 1 and cVal <= (count of checkList) then
+          set cEl to item cVal of checkList
+          try
+            click cEl
+          end try
+          delay 0.35
+        end if
+      end repeat
+
+      delay 0.9
+      if submitBtn is not missing value then
+        try
+          click submitBtn
+        end try
+        delay 0.3
+        try
+          set focused of submitBtn to true
+          delay 0.15
+          key code 36
+        end try
+        return "ax_submitted:" & (count of radioList)
+      end if
+      return "ax_no_submit_btn:" & (count of radioList)
+    end if
+  end tell
+end tell
+return "ax_no_window"
+`;
+    await runAppleScript(selectAndSubmitAxScript, 60000).catch(() => '');
+  }
+
+  await new Promise((r) => setTimeout(r, 2500));
+
+  // Reload the quiz tab so the server-rendered quizresponse and contents-menu update
+  const reloadScript = `
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${targetWindowId}" then
+      if ${targetTabIndex} <= (count of tabs of w) then
+        set t to tab ${targetTabIndex} of w
+        set URL of t to (URL of t)
+        delay 0.8
+        repeat 40 times
+          if (loading of t) is false then exit repeat
+          delay 0.25
+        end repeat
+        delay 1.2
+      end if
+      exit repeat
+    end if
+  end repeat
+end tell
+`;
+  await runAppleScript(reloadScript).catch(() => '');
+
+  const postSnap = await snapshotUserChromeTabByTarget(targetWindowId, targetTabIndex);
+  const htmlContent =
+    postSnap && postSnap.htmlPath && fs.existsSync(postSnap.htmlPath)
+      ? fs.readFileSync(postSnap.htmlPath, 'utf8')
+      : '';
+  return {
+    ok: Boolean(htmlContent),
+    url: postSnap?.url || quizUrl || '',
+    title: postSnap?.title || '',
+    htmlContent,
+  };
+}
+
 
 function buildGoogleSignInStepJs(username, password) {
   const safeUser = JSON.stringify(String(username || '').trim());
@@ -2051,6 +2579,21 @@ async function connectBridge() {
           result = await clickEndLabInUserChrome(
             params.preferredUrl,
             params.preferredTarget
+          );
+        } else if (method === 'complete_course_activity') {
+          result = await completeCourseActivityInUserChrome(
+            params.windowId,
+            params.tabIndex,
+            params.activityUrl,
+            params.activityType
+          );
+        } else if (method === 'submit_course_quiz') {
+          result = await submitCourseQuizInUserChrome(
+            params.windowId,
+            params.tabIndex,
+            params.quizUrl,
+            params.answers,
+            Boolean(params.needsRetakeFirst)
           );
         } else if (method === 'save_state') {
           fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });

@@ -33,6 +33,18 @@ export interface LabStep {
   notes?: string;
 }
 
+export type TargetType = 'lab' | 'course';
+
+export type CourseActivityType =
+  | 'link'
+  | 'document'
+  | 'video'
+  | 'quiz'
+  | 'lab'
+  | 'credential'
+  | 'survey'
+  | 'other';
+
 export interface LabTask {
   id: string;
   number: number;
@@ -50,6 +62,14 @@ export interface LabTask {
   progressVerified: boolean;
   progressMessage?: string;
   status: ItemStatus;
+  activityId?: string;
+  activityType?: CourseActivityType;
+  activityHref?: string;
+  moduleTitle?: string;
+  iframeSrc?: string;
+  videoId?: string;
+  watchTimePath?: string;
+  quizQuestionsCount?: number;
 }
 
 export interface LogEntry {
@@ -139,6 +159,7 @@ export interface ChromeTabDescriptor {
   url: string;
   isActiveTab: boolean;
   suggestedRole: 'lab' | 'console' | 'cloud_shell' | 'other';
+  contentKind?: 'lab' | 'course';
 }
 
 export interface ModelGardenEntry {
@@ -153,6 +174,7 @@ export interface ModelGardenEntry {
 
 export interface RunnerState {
   sessionId?: string;
+  targetType?: TargetType;
   status: RunnerStatus;
   executionMode: ExecutionMode;
   labUrl: string;
@@ -180,6 +202,9 @@ export interface RunnerState {
   labInstanceId?: string;
   totalScore?: number;
   maxScore?: number;
+  courseOverviewUrl?: string;
+  courseStartHref?: string;
 }
+
 
 

@@ -118,17 +118,35 @@ end tell
 
     const lowerUrl = url.toLowerCase();
     let suggestedRole: ChromeTabDescriptor['suggestedRole'] = 'other';
-    if (
+    let contentKind: ChromeTabDescriptor['contentKind'] = undefined;
+    const isSkillsDomain =
+      (lowerUrl.includes('skills.google') ||
+        lowerUrl.includes('cloudskillsboost.google') ||
+        lowerUrl.includes('qwiklabs.com')) &&
       !lowerUrl.includes('accounts.google.com') &&
       !lowerUrl.includes('login.corp.google.com') &&
-      !lowerUrl.includes('google_sso') &&
-      (lowerUrl.includes('skills.google/focuses/') ||
+      !lowerUrl.includes('google_sso');
+
+    if (
+      isSkillsDomain &&
+      (lowerUrl.includes('/focuses/') ||
         lowerUrl.includes('/labs/') ||
-        lowerUrl.includes('cloudskillsboost.google/focuses/') ||
-        lowerUrl.includes('skills.google/catalog_lab/') ||
-        lowerUrl.includes('qwiklabs.com/focuses/'))
+        lowerUrl.includes('/catalog_lab/'))
     ) {
       suggestedRole = 'lab';
+      contentKind = 'lab';
+    } else if (
+      isSkillsDomain &&
+      (lowerUrl.includes('/course_templates/') ||
+        lowerUrl.includes('/course_sessions/') ||
+        lowerUrl.includes('/paths/') ||
+        lowerUrl.includes('/quests/') ||
+        lowerUrl.includes('/documents/') ||
+        lowerUrl.includes('/quizzes/') ||
+        lowerUrl.includes('/videos/'))
+    ) {
+      suggestedRole = 'lab';
+      contentKind = 'course';
     } else if (lowerUrl.includes('shell.cloud.google.com')) {
       suggestedRole = 'cloud_shell';
     } else if (lowerUrl.includes('console.cloud.google.com')) {
@@ -145,6 +163,7 @@ end tell
       url: url.trim(),
       isActiveTab: tabIndex === activeIdx,
       suggestedRole,
+      ...(contentKind ? { contentKind } : {}),
     });
   }
 
@@ -2305,71 +2324,87 @@ def exec_on_workbench(bash_cmd, timeout=240):
 _SFT_NONBLOCK_INIT_CODE = """
 try:
     import threading as _th, time as _tm, json as _js, subprocess as _sp, urllib.request as _ur
-    from vertexai.preview.tuning import sft as _sft_mod
     from google.cloud.aiplatform.tuning import TuningJob as _BaseTJ
     _BaseTJ._block_until_complete = lambda self, *a, **kw: None
-    if hasattr(_sft_mod, "SupervisedTuningJob"):
-        _sft_mod.SupervisedTuningJob._block_until_complete = lambda self, *a, **kw: None
-    if not hasattr(_sft_mod, "_orig_train_fn"):
-        _sft_mod._orig_train_fn = _sft_mod.train
-        def _fast_sft_train(*args, **kwargs):
-            disp = kwargs.get("tuned_model_display_name", "StackOverflow Q&A Supervised Tuned Model")
-            proj_id = globals().get("PROJECT_ID") or _sp.getoutput("gcloud config get-value project 2>/dev/null").strip()
-            reg_id = globals().get("REGION") or "us-east1"
-            def _find_job():
-                try:
-                    tok = _sp.getoutput("gcloud auth print-access-token 2>/dev/null").strip()
-                    req = _ur.Request(
-                        f"https://{reg_id}-aiplatform.googleapis.com/v1beta1/projects/{proj_id}/locations/{reg_id}/tuningJobs",
-                        headers={"Authorization": f"Bearer {tok}"}
-                    )
-                    with _ur.urlopen(req, timeout=10) as r:
-                        jobs = _js.loads(r.read().decode()).get("tuningJobs", [])
-                    for j in jobs:
-                        if j.get("tunedModelDisplayName") == disp and j.get("state") in ("JOB_STATE_PENDING", "JOB_STATE_RUNNING", "JOB_STATE_SUCCEEDED"):
-                            return j.get("name")
-                except Exception:
-                    pass
-                return None
-            j_name = _find_job()
-            if not j_name:
-                _res_holder = {}
-                def _bg():
-                    try:
-                        _res_holder["job"] = _sft_mod._orig_train_fn(*args, **kwargs)
-                    except Exception as _e:
-                        _res_holder["err"] = _e
-                t = _th.Thread(target=_bg, daemon=True)
-                t.start()
-                for _ in range(30):
-                    _tm.sleep(2)
-                    if "job" in _res_holder:
-                        j_name = getattr(_res_holder["job"], "resource_name", None)
-                        if j_name:
-                            break
+    _sft_mods = []
+    try:
+        from vertexai.tuning import sft as _sft_main
+        _sft_mods.append(_sft_main)
+    except Exception:
+        pass
+    try:
+        from vertexai.preview.tuning import sft as _sft_prev
+        if _sft_prev not in _sft_mods:
+            _sft_mods.append(_sft_prev)
+    except Exception:
+        pass
+    for _sft_mod in _sft_mods:
+        if hasattr(_sft_mod, "SupervisedTuningJob"):
+            _sft_mod.SupervisedTuningJob._block_until_complete = lambda self, *a, **kw: None
+        if not hasattr(_sft_mod, "_orig_train_fn"):
+            _sft_mod._orig_train_fn = _sft_mod.train
+            def _make_fast_sft_train(_mod):
+                def _fast_sft_train(*args, **kwargs):
+                    disp = kwargs.get("tuned_model_display_name", "StackOverflow Q&A Supervised Tuned Model")
+                    proj_id = globals().get("PROJECT_ID") or _sp.getoutput("gcloud config get-value project 2>/dev/null").strip()
+                    reg_id = globals().get("LOCATION") or globals().get("REGION") or "us-central1"
+                    if isinstance(reg_id, list):
+                        reg_id = reg_id[0] if reg_id else "us-central1"
+                    def _find_job():
+                        try:
+                            tok = _sp.getoutput("gcloud auth print-access-token 2>/dev/null").strip()
+                            req = _ur.Request(
+                                f"https://{reg_id}-aiplatform.googleapis.com/v1beta1/projects/{proj_id}/locations/{reg_id}/tuningJobs",
+                                headers={"Authorization": f"Bearer {tok}"}
+                            )
+                            with _ur.urlopen(req, timeout=10) as r:
+                                jobs = _js.loads(r.read().decode()).get("tuningJobs", [])
+                            for j in jobs:
+                                if j.get("tunedModelDisplayName") == disp and j.get("state") in ("JOB_STATE_PENDING", "JOB_STATE_RUNNING", "JOB_STATE_SUCCEEDED"):
+                                    return j.get("name")
+                        except Exception:
+                            pass
+                        return None
                     j_name = _find_job()
+                    _res_holder = {}
+                    if not j_name:
+                        def _bg():
+                            try:
+                                _res_holder["job"] = _mod._orig_train_fn(*args, **kwargs)
+                            except Exception as _e:
+                                _res_holder["err"] = _e
+                        t = _th.Thread(target=_bg, daemon=True)
+                        t.start()
+                        for _ in range(30):
+                            _tm.sleep(2)
+                            if "job" in _res_holder:
+                                j_name = getattr(_res_holder["job"], "resource_name", None)
+                                if j_name:
+                                    break
+                            j_name = _find_job()
+                            if j_name:
+                                break
+                    if not j_name and "job" in _res_holder:
+                        j_name = getattr(_res_holder["job"], "resource_name", "")
                     if j_name:
-                        break
-            if not j_name and "job" in _res_holder:
-                j_name = getattr(_res_holder["job"], "resource_name", "")
-            if j_name:
-                j_id = j_name.split("/")[-1]
-                print("Creating SupervisedTuningJob")
-                print(f"SupervisedTuningJob created. Resource name: {j_name}")
-                print("To use this SupervisedTuningJob in another session:")
-                print(f"tuning_job = sft.SupervisedTuningJob('{j_name}')")
-                print("View Tuning Job:")
-                print(f"https://console.cloud.google.com/vertex-ai/generative/language/locations/{reg_id}/tuning/tuningJob/{j_id}?project={proj_id}")
-                try:
-                    return _sft_mod.SupervisedTuningJob(j_name)
-                except Exception:
-                    class _StubJob:
-                        resource_name = j_name
-                    return _StubJob()
-            if "err" in _res_holder:
-                raise _res_holder["err"]
-            return _sft_mod._orig_train_fn(*args, **kwargs)
-        _sft_mod.train = _fast_sft_train
+                        j_id = j_name.split("/")[-1]
+                        print("Creating SupervisedTuningJob")
+                        print(f"SupervisedTuningJob created. Resource name: {j_name}")
+                        print("To use this SupervisedTuningJob in another session:")
+                        print(f"tuning_job = sft.SupervisedTuningJob('{j_name}')")
+                        print("View Tuning Job:")
+                        print(f"https://console.cloud.google.com/vertex-ai/generative/language/locations/{reg_id}/tuning/tuningJob/{j_id}?project={proj_id}")
+                        try:
+                            return _mod.SupervisedTuningJob(j_name)
+                        except Exception:
+                            class _StubJob:
+                                resource_name = j_name
+                            return _StubJob()
+                    if "err" in _res_holder:
+                        raise _res_holder["err"]
+                    return _mod._orig_train_fn(*args, **kwargs)
+                return _fast_sft_train
+            _sft_mod.train = _make_fast_sft_train(_sft_mod)
 except Exception:
     pass
 """
@@ -2405,12 +2440,35 @@ def _auto_repair_cell_source(idx, src, cells):
         if not bkt:
             bkt = f"{proj}-bucket"
         return (
+            "import os\\n"
+            "import vertexai\\n\\n"
             f'PROJECT_ID = "{proj}"\\n'
             f'REGION = "{reg}"\\n'
+            "LOCATION = REGION\\n"
             f'BUCKET_NAME = "{bkt}"\\n'
-            'BUCKET_URI = f"gs://{BUCKET_NAME}"\\n'
+            'BUCKET_URI = f"gs://{BUCKET_NAME}"\\n\\n'
+            "vertexai.init(project=PROJECT_ID, location=LOCATION, staging_bucket=BUCKET_URI)\\n"
         )
     if "bigquery-public-data.stackoverflow.posts_questions" in src and "stack_overflow_df" in src:
+        if "AS prompt" in src or "run_bq_query" in src:
+            return (
+                "stack_overflow_df = run_bq_query(\\n"
+                '    """SELECT\\n'
+                "    CONCAT(q.title, ' ', q.body) AS prompt,\\n"
+                "    a.body AS response\\n"
+                "    FROM \`bigquery-public-data.stackoverflow.posts_questions\` q\\n"
+                "    JOIN \`bigquery-public-data.stackoverflow.posts_answers\` a\\n"
+                "      ON q.accepted_answer_id = a.id\\n"
+                "    WHERE q.accepted_answer_id IS NOT NULL\\n"
+                '      AND REGEXP_CONTAINS(q.tags, "python")\\n'
+                "      AND a.creation_date >= '2022-01-01'\\n"
+                "      AND a.score >= 6\\n"
+                "    ORDER BY a.score DESC\\n"
+                "    LIMIT 550\\n"
+                '    """\\n'
+                ")\\n\\n"
+                "stack_overflow_df.head()\\n"
+            )
         return (
             "# Define the BigQuery client\\n"
             "client = bigquery.Client(project=PROJECT_ID)\\n\\n"
@@ -2437,33 +2495,45 @@ def _auto_repair_cell_source(idx, src, cells):
             "stack_overflow_df = client.query(query).to_dataframe()\\n"
             "stack_overflow_df.head()\\n"
         )
-    if "def clean_data(text):" in src and "boilerplate_phrases" in src:
-        return (
+    if "def clean_data(text):" in src and ("boilerplate_phrases" in src or "noise" in src):
+        base_clean = (
+            "import html, re\\n\\n"
             "def clean_data(text):\\n"
             '    """Cleans the input text by removing HTML tags, unescaping HTML entities, and removing common boilerplate phrases."""\\n'
+            "    if not isinstance(text, str):\\n"
+            "        return text\\n"
             "    text = html.unescape(text)\\n"
             '    text = re.sub(r"<[^>]+>", "", text)\\n\\n'
-            "    boilerplate_phrases = [\\n"
+            "    noise = [\\n"
             '        "Hope this helps",\\n'
             '        "Thanks in advance",\\n'
             '        "Regards,",\\n'
             '        "Cheers",\\n'
             "    ]\\n"
-            "    for phrase in boilerplate_phrases:\\n"
-            '        text = re.sub(re.escape(phrase), "", text, flags=re.IGNORECASE)\\n\\n'
+            "    for word in noise:\\n"
+            '        text = re.sub(re.escape(word), "", text, flags=re.IGNORECASE)\\n\\n'
             '    text = re.sub(r"\\\\s+", " ", text).strip()\\n'
-            "    return text\\n"
+            "    return text\\n\\n"
+            "clean_for_high_score = clean_data\\n"
         )
-    if "train, val_test = train_test_split(" in src and "evaluation, test = train_test_split(" in src:
+        if "stack_overflow_df['prompt']" in src or 'stack_overflow_df["prompt"]' in src:
+            base_clean += (
+                "stack_overflow_df['prompt'] = stack_overflow_df['prompt'].apply(clean_data)\\n"
+                "stack_overflow_df['response'] = stack_overflow_df['response'].apply(clean_data)\\n"
+                "stack_overflow_df.head(5)\\n"
+            )
+        return base_clean
+    if "train, val_test =" in src and "evaluation, test = train_test_split(" in src:
         return (
-            "# Warning - Don't change this. It is used for score tracking. Please don't forget to save this notebook script.\\n\\n"
             "# Split the data into 80% training and 20% validation + test\\n"
             "train, val_test = train_test_split(stack_overflow_df, test_size=0.2, random_state=42)\\n\\n"
             "# Split the 20% validation + test data into 18% validation and 2% test (90% and 10% of the 20%)\\n"
             "evaluation, test = train_test_split(val_test, test_size=0.1, random_state=42)\\n\\n"
-            "print(len(train))\\n"
-            "print(len(evaluation))\\n"
-            "print(len(test))\\n"
+            "# Warning - Don't change this. It is used for score tracking.\\n"
+            "# Please don't forget to save this notebook script.\\n"
+            "print('Total number of records in training dataset:', len(train))\\n"
+            "print('Total number of records in validation dataset:', len(evaluation))\\n"
+            "print('Total number of records in test dataset:', len(test))\\n"
         )
     if "tune_jsonl = train_data.to_json" in src and "validation_jsonl = validation_data.to_json" in src:
         return (
@@ -2474,14 +2544,37 @@ def _auto_repair_cell_source(idx, src, cells):
             'validation_data.to_json(validation_file, orient="records", lines=True)\\n'
             'test_data.to_json(test_data_file, orient="records", lines=True)\\n'
         )
-    if "!gsutil cp {train_file}" in src:
+    if ("!gsutil cp {train_file}" in src) or ("gcloud storage cp {train_file_path}" in src):
+        if "train_file_path" in src:
+            return (
+                "import subprocess\\n"
+                'train_file_uri = f"{BUCKET_URI}/datasets/tune_data_stack_overflow_qa.jsonl"\\n'
+                'validation_file_uri = f"{BUCKET_URI}/datasets/validation_data_stack_overflow_qa.jsonl"\\n'
+                'test_data_file_uri = f"{BUCKET_URI}/datasets/test_data_stack_overflow_qa.jsonl"\\n'
+                'subprocess.run(["gcloud", "storage", "cp", train_file_path, train_file_uri], check=True)\\n'
+                'subprocess.run(["gcloud", "storage", "cp", validation_file_path, validation_file_uri], check=True)\\n'
+                'subprocess.run(["gcloud", "storage", "cp", test_data_file_path, test_data_file_uri], check=True)\\n'
+                'subprocess.run(["gcloud", "storage", "cp", train_file_path, validation_file_path, test_data_file_path, f"{BUCKET_URI}/"], check=True)\\n'
+            )
         return (
             "import subprocess\\n"
             'subprocess.run(["gsutil", "-m", "cp", train_file, validation_file, test_data_file, f"{BUCKET_URI}/datasets/"], check=True)\\n'
             'subprocess.run(["gsutil", "-m", "cp", train_file, validation_file, test_data_file, f"{BUCKET_URI}/"], check=True)\\n'
         )
-    if "class TuningConfig:" in src and "output_uri" in src:
+    if "class TuningConfig" in src and "output_uri" in src:
         lr_val = os.environ.get("LAB_LEARNING_RATE", "2e-6").strip() or "2e-6"
+        if "BaseModel" in src:
+            return (
+                "class TuningConfig(BaseModel):\\n"
+                '    """Configuration settings for the fine-tuning job on Stack overflow data."""\\n'
+                '    base_model: str = Field(default="google/gemma3@gemma-3-1b-it")\\n'
+                '    tuning_mode: str = Field(default="FULL")\\n'
+                "    epochs: int = Field(default=1)\\n"
+                f"    learning_rate: float = Field(default={lr_val})\\n\\n"
+                "config = TuningConfig()\\n\\n"
+                'output_uri = f"{BUCKET_URI}/tuning-output/{uuid.uuid4()}"\\n'
+                'model_artifacts_gcs_uri = os.path.join(output_uri, "postprocess/node-0/checkpoints/final")\\n'
+            )
         return (
             "@dataclass\\n"
             "class TuningConfig:\\n"
@@ -3267,3 +3360,66 @@ export async function clearSavedStateOnMacBridge(): Promise<void> {
     }
   }
 }
+
+export async function completeCourseActivityInUserChrome(params: {
+  windowId?: number;
+  tabIndex?: number;
+  activityUrl: string;
+  activityType?: string;
+}): Promise<{ ok: boolean; url?: string; title?: string; htmlContent?: string }> {
+  if (macBridgeHub.isConnected()) {
+    try {
+      const res = await macBridgeHub.call<{
+        ok: boolean;
+        url?: string;
+        title?: string;
+        htmlContent?: string;
+      }>('complete_course_activity', params, 45000);
+      if (res && res.htmlContent) {
+        fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
+        fs.writeFileSync(SNAPSHOT_HTML_PATH, res.htmlContent, 'utf8');
+      }
+      return res || { ok: false };
+    } catch {
+      return { ok: false };
+    }
+  }
+  return { ok: false };
+}
+
+export async function submitCourseQuizInUserChrome(params: {
+  windowId?: number;
+  tabIndex?: number;
+  quizUrl: string;
+  answers: Array<{
+    quizItemId: string;
+    itemType: string;
+    choiceId?: string;
+    choiceIds?: string[];
+    choice?: boolean;
+    optionIndex?: number;
+    optionIndices?: number[];
+    optionTitle?: string;
+  }>;
+  needsRetakeFirst?: boolean;
+}): Promise<{ ok: boolean; url?: string; title?: string; htmlContent?: string }> {
+  if (macBridgeHub.isConnected()) {
+    try {
+      const res = await macBridgeHub.call<{
+        ok: boolean;
+        url?: string;
+        title?: string;
+        htmlContent?: string;
+      }>('submit_course_quiz', params, 90000);
+      if (res && res.htmlContent) {
+        fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
+        fs.writeFileSync(SNAPSHOT_HTML_PATH, res.htmlContent, 'utf8');
+      }
+      return res || { ok: false };
+    } catch {
+      return { ok: false };
+    }
+  }
+  return { ok: false };
+}
+

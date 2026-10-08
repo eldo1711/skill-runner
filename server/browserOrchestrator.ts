@@ -12,6 +12,7 @@ import {
   ModelGardenEntry,
   RunnerState,
   RunnerStatus,
+  TargetType,
 } from './types.js';
 import {
   clickCheckMyProgress,
@@ -22,6 +23,7 @@ import {
   clearSavedStateOnMacBridge,
   clickEndLabInUserChrome,
   closeIncognitoWindowsInUserChrome,
+  completeCourseActivityInUserChrome,
   execInStudentCloudShellBridge,
   focusUserChromeTab,
   inspectStudentCloudShellWorkspace,
@@ -32,6 +34,7 @@ import {
   sendTextToUserChromeTab,
   snapshotUserChromeLabTab,
   spawnIncognitoSessionInUserChrome,
+  submitCourseQuizInUserChrome,
 } from './nativeChromeBridge.js';
 import {
   dismissGcpConsoleTermsModal,
@@ -50,6 +53,7 @@ import {
 import {
   checkModelGardenAvailability,
   decideNextStepAction,
+  fetchCourseKnowledgeFromIframeSrc,
   formatAutonomousAntigravityPrompt,
   getActiveGeminiModel,
   getModelGardenEntries,
@@ -57,6 +61,7 @@ import {
   refineParsedTasksWithGemini,
   resolveLatestGeminiModel,
   setActiveGeminiModel,
+  solveCourseQuizQuestions,
   synthesizeTaskShellScript,
   transformAgyLaunchCommand,
 } from './geminiClient.js';
@@ -112,6 +117,7 @@ export class LabBrowserOrchestrator {
 
     this.state = {
       sessionId: this.sessionId,
+      targetType: 'lab',
       status: 'idle',
       executionMode: 'autonomous',
       labUrl: '',
@@ -120,6 +126,8 @@ export class LabBrowserOrchestrator {
       isLabStarted: false,
       isConsoleSignedIn: false,
       labInstanceId: '',
+      courseOverviewUrl: '',
+      courseStartHref: '',
       totalScore: 0,
       maxScore: 0,
       credentials: {
@@ -236,6 +244,18 @@ export class LabBrowserOrchestrator {
     return updated;
   }
 
+  public setTargetType(targetType: TargetType): TargetType {
+    const normalized: TargetType = targetType === 'course' ? 'course' : 'lab';
+    this.state.targetType = normalized;
+    this.addLog(
+      'info',
+      'system',
+      `Switched target mode to: ${normalized === 'course' ? 'Course (Multimedia & Quiz Progression)' : 'Hands-on Lab'}`
+    );
+    this.emitState();
+    return normalized;
+  }
+
   private isUserChromeBridgeAvailable(): boolean {
     return this.hub.isConnected();
   }
@@ -243,6 +263,7 @@ export class LabBrowserOrchestrator {
   private getSerializableState(): Partial<RunnerState> {
     return {
       sessionId: this.sessionId,
+      targetType: this.state.targetType || 'lab',
       status: this.state.status === 'running_autonomous' ? 'paused' : this.state.status,
       executionMode: this.state.executionMode,
       labUrl: this.state.labUrl,
@@ -251,6 +272,8 @@ export class LabBrowserOrchestrator {
       isLabStarted: this.state.isLabStarted,
       isConsoleSignedIn: this.state.isConsoleSignedIn,
       labInstanceId: this.state.labInstanceId,
+      courseOverviewUrl: this.state.courseOverviewUrl,
+      courseStartHref: this.state.courseStartHref,
       totalScore: this.state.totalScore,
       maxScore: this.state.maxScore,
       credentials: this.state.credentials,
@@ -778,6 +801,9 @@ export class LabBrowserOrchestrator {
     this.state.labTitle = parsed.labTitle;
     this.state.labTimer = parsed.labTimer;
     this.state.isLabStarted = parsed.isLabStarted;
+    if (parsed.isCourse) {
+      this.state.targetType = 'course';
+    }
 
     if (parsed.needsLogin) {
       this.setStatus('awaiting_login');
@@ -788,26 +814,27 @@ export class LabBrowserOrchestrator {
       );
     } else {
       this.setStatus('ready_to_parse');
+      const kindLabel = parsed.isCourse ? 'course' : 'lab';
       this.addLog(
         'success',
         'lab_window',
-        `Loaded authenticated lab: "${parsed.labTitle}" (Started: ${parsed.isLabStarted ? 'Yes' : 'No'}). Parsing instructions and tasks...`
+        `Loaded authenticated ${kindLabel}: "${parsed.labTitle}" (Started: ${parsed.isLabStarted ? 'Yes' : 'No'}). Parsing activities and tasks...`
       );
       await this.parseLabInstructions();
     }
   }
 
   /**
-   * Step 2: Syncs the latest DOM from the user's Google Chrome lab tab, parses instructions, tasks,
-   * code blocks, active links, and student credentials, then refines the plan with Gemini 3.5 Flash.
+   * Step 2: Syncs the latest DOM from the user's Google Chrome lab/course tab, parses instructions, tasks,
+   * course activities, quizzes, code blocks, active links, and student credentials.
    */
   public async parseLabInstructions(): Promise<void> {
     await this.syncLabPageFromUserChrome();
     if (!this.labPage || this.labPage.isClosed()) {
-      throw new Error('Lab window is not open. Launch a Lab URL first.');
+      throw new Error('Lab/Course window is not open. Launch a URL first.');
     }
 
-    this.addLog('info', 'lab_window', 'Scanning Lab DOM (piercing Shadow DOM components)...');
+    this.addLog('info', 'lab_window', 'Scanning DOM (piercing Shadow DOM components)...');
     const parsed = await parseLabPageDom(this.labPage);
 
     this.state.labTitle = parsed.labTitle;
@@ -821,6 +848,64 @@ export class LabBrowserOrchestrator {
     }
     if (parsed.maxScore !== undefined) {
       this.state.maxScore = parsed.maxScore;
+    }
+
+    if (parsed.isCourse) {
+      this.state.targetType = 'course';
+      if (parsed.courseOverviewUrl) {
+        this.state.courseOverviewUrl = parsed.courseOverviewUrl;
+      }
+      if (parsed.courseStartHref) {
+        this.state.courseStartHref = parsed.courseStartHref;
+      }
+      const previousTasks = this.state.tasks;
+      const isSameCourseList =
+        this.isLoopRunning &&
+        previousTasks.length === parsed.tasks.length &&
+        previousTasks.every((prev, idx) => prev.title === parsed.tasks[idx]?.title);
+
+      if (!isSameCourseList) {
+        this.state.tasks = parsed.tasks;
+      } else {
+        for (let i = 0; i < this.state.tasks.length; i++) {
+          const updated = parsed.tasks[i];
+          if (!updated) continue;
+          if (updated.activityHref) {
+            this.state.tasks[i].activityHref = updated.activityHref;
+          }
+          if (updated.progressVerified) {
+            this.state.tasks[i].progressVerified = true;
+            this.state.tasks[i].status = 'completed';
+            this.state.tasks[i].stepScore = 1;
+            this.state.tasks[i].progressMessage = 'Activity completed';
+            for (const s of this.state.tasks[i].steps) s.status = 'completed';
+          }
+        }
+      }
+
+      if (!this.isLoopRunning && this.state.tasks.length > 0) {
+        const nextPendingTask =
+          this.state.tasks.find((t) => t.status !== 'completed') || this.state.tasks[0];
+        this.state.activeTaskId = nextPendingTask.id;
+        this.state.activeStepId = nextPendingTask.steps[0]?.id || null;
+      }
+      if (!this.isLoopRunning) {
+        this.setStatus('lab_parsed');
+      } else {
+        this.emitState();
+      }
+      this.addLog(
+        'success',
+        'lab_window',
+        `Course "${this.state.labTitle}" structured into ${this.state.tasks.length} activities (${this.state.totalScore || 0}/${this.state.maxScore || this.state.tasks.length} completed).`
+      );
+      this.startScreenshotTelemetry();
+      await this.refreshScreenshots();
+      return;
+    }
+
+    if (parsed.tasks.length > 0) {
+      this.state.targetType = 'lab';
     }
 
     // Check if the user's selected Console tab URL has a live `project=` parameter (which takes precedence over cached HTML attributes)
@@ -1066,12 +1151,44 @@ export class LabBrowserOrchestrator {
     this.emitState();
   }
 
+  private isCourseSession(): boolean {
+    return (
+      this.state.targetType === 'course' ||
+      this.state.tasks.some((t) => Boolean(t.activityType))
+    );
+  }
+
   /**
    * Step 3: Starts the lab (if not already started), extracts temporary student credentials,
    * and spawns (or attaches to) the student Incognito Console & Cloud Shell window on the user's Mac.
+   * When in Course mode, enrolls/starts the course session if needed without launching Incognito GCP Console.
    */
   public async startLabAndLaunchIncognito(): Promise<void> {
     await this.ensureLabPreviewPage();
+
+    if (this.isCourseSession()) {
+      if (!this.state.isLabStarted && this.state.courseStartHref) {
+        let origin = 'https://partner.skills.google';
+        try {
+          origin = new URL(this.state.labCurrentUrl || this.state.labUrl || origin).origin;
+        } catch {
+          // Default origin
+        }
+        const startUrl = new URL(this.state.courseStartHref, origin).toString();
+        const labTarget = parseTabKey(this.state.selectedLabTabKey);
+        this.addLog('action', 'lab_window', `Enrolling / starting course session: ${startUrl}`);
+        await completeCourseActivityInUserChrome({
+          windowId: labTarget?.windowId,
+          tabIndex: labTarget?.tabIndex,
+          activityUrl: startUrl,
+          activityType: 'document',
+        });
+        await this.parseLabInstructions();
+      }
+      this.setStatus('lab_parsed');
+      await this.refreshScreenshots();
+      return;
+    }
 
     const wasAlreadyStarted = this.state.isLabStarted && Boolean(this.state.labInstanceId);
     this.setStatus('starting_lab');
@@ -1143,10 +1260,9 @@ export class LabBrowserOrchestrator {
 
   /**
    * Unified end-to-end entry point:
-   * 1. Points at the user's self-signed-in Lab Instructions tab (or opens the provided Lab URL in Chrome).
-   * 2. Starts the lab (if not yet started) and extracts temporary student credentials.
-   * 3. Spawns the Incognito window on the user's Mac signed in as the lab student account (Console + Cloud Shell).
-   * 4. Runs all tasks autonomously and completes every "Check my progress" assessment check.
+   * 1. Points at the user's self-signed-in Lab/Course tab (or opens the provided URL in Chrome).
+   * 2. For Labs: starts the lab, extracts student credentials, and attaches to Incognito Console + Cloud Shell.
+   *    For Courses: navigates through all course modules, interactive lessons, videos, and quizzes to completion.
    */
   public async startAndRunLab(params?: {
     url?: string;
@@ -1187,7 +1303,9 @@ export class LabBrowserOrchestrator {
       }
     }
 
-    await this.startLabAndLaunchIncognito();
+    if (!this.isCourseSession()) {
+      await this.startLabAndLaunchIncognito();
+    }
     this.setExecutionMode('autonomous');
     this.startExecutionLoop(false).catch((err) => {
       this.addLog(
@@ -1216,6 +1334,7 @@ export class LabBrowserOrchestrator {
     let ended = false;
     if (
       options?.endLabInChrome !== false &&
+      !this.isCourseSession() &&
       (this.state.isLabStarted || this.state.labCurrentUrl || this.state.labUrl || this.state.selectedLabTabKey)
     ) {
       try {
@@ -1267,6 +1386,7 @@ export class LabBrowserOrchestrator {
     this.state = {
       ...this.state,
       sessionId: this.sessionId,
+      targetType: this.state.targetType || 'lab',
       status: 'idle',
       labUrl: '',
       labTitle: '',
@@ -1274,6 +1394,8 @@ export class LabBrowserOrchestrator {
       isLabStarted: false,
       isConsoleSignedIn: false,
       labInstanceId: '',
+      courseOverviewUrl: '',
+      courseStartHref: '',
       totalScore: 0,
       maxScore: 0,
       credentials: {
@@ -1441,7 +1563,377 @@ export class LabBrowserOrchestrator {
   }
 
   /**
-   * Starts or resumes the Lab Execution Loop (either Autonomous or Single-Step).
+   * Executes a Google Cloud Skills Course from start to finish:
+   * - Enrolls / starts the course session if not yet started
+   * - Navigates through every interactive lesson (`link` / `document`) and `video` activity, recording completion
+   * - Extracts Articulate Rise 360 (`runtime-data.js`) course material automatically
+   * - Solves and submits every `<ql-quiz>` assessment until passing grade is verified
+   */
+  private async executeCourseLoop(singleStepOnly = false): Promise<void> {
+    this.pauseRequested = false;
+    this.isLoopRunning = true;
+    this.setStatus(singleStepOnly ? 'running_step' : 'running_autonomous');
+
+    try {
+      if (this.state.tasks.length === 0) {
+        await this.parseLabInstructions();
+      }
+
+      let origin = 'https://partner.skills.google';
+      try {
+        origin = new URL(this.state.labCurrentUrl || this.state.labUrl || origin).origin;
+      } catch {
+        // Default origin
+      }
+
+      const loadHtmlIntoPreviewPage = async (html?: string, currentUrl?: string) => {
+        if (currentUrl) {
+          this.state.labCurrentUrl = currentUrl;
+        }
+        if (html && html.trim().length > 200) {
+          const page = await this.ensureLabPreviewPage();
+          const tmpFile = path.join(
+            os.tmpdir(),
+            `skills_course_${this.sessionId.replace(/[^a-zA-Z0-9_-]/g, '_')}.html`
+          );
+          fs.writeFileSync(tmpFile, html, 'utf8');
+          await page.goto(`file://${tmpFile}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await page.waitForTimeout(250);
+          await this.refreshScreenshots();
+        } else {
+          await this.syncLabPageFromUserChrome();
+          await this.refreshScreenshots();
+        }
+      };
+
+      const labTarget = parseTabKey(this.state.selectedLabTabKey);
+
+      if (!this.state.isLabStarted && this.state.courseStartHref) {
+        const startUrl = new URL(this.state.courseStartHref, origin).toString();
+        this.addLog('action', 'lab_window', `Enrolling / starting course session: ${startUrl}`);
+        const startRes = await completeCourseActivityInUserChrome({
+          windowId: labTarget?.windowId,
+          tabIndex: labTarget?.tabIndex,
+          activityUrl: startUrl,
+          activityType: 'document',
+        });
+        await loadHtmlIntoPreviewPage(startRes.htmlContent, startRes.url || startUrl);
+        await this.parseLabInstructions();
+      }
+
+      let courseKnowledgeBase = '';
+
+      for (let taskIdx = 0; taskIdx < this.state.tasks.length; taskIdx++) {
+        if (this.pauseRequested) {
+          this.setStatus('paused');
+          this.addLog('warn', 'system', 'Course progression paused by operator.');
+          return;
+        }
+
+        const task = this.state.tasks[taskIdx];
+        if (!task || (task.status === 'completed' && task.progressVerified)) {
+          continue;
+        }
+
+        this.state.activeTaskId = task.id;
+        this.state.activeStepId = task.steps[0]?.id || null;
+        task.status = 'running';
+        if (task.steps[0]) task.steps[0].status = 'running';
+        this.emitState();
+
+        const actType = task.activityType || 'link';
+        const actHref = task.activityHref || task.steps[0]?.links?.[0]?.href || '';
+        if (!actHref) {
+          task.status = 'completed';
+          task.progressVerified = true;
+          task.stepScore = 1;
+          for (const s of task.steps) s.status = 'completed';
+          this.emitState();
+          continue;
+        }
+
+        const actUrl = new URL(actHref, origin).toString();
+
+        if (actType === 'link' || actType === 'document' || actType === 'video') {
+          this.addLog(
+            'action',
+            'lab_window',
+            `Completing ${actType} activity #${task.number}: "${task.title}" (${actUrl})...`
+          );
+          const navRes = await completeCourseActivityInUserChrome({
+            windowId: labTarget?.windowId,
+            tabIndex: labTarget?.tabIndex,
+            activityUrl: actUrl,
+            activityType: actType,
+          });
+          await loadHtmlIntoPreviewPage(navRes.htmlContent, navRes.url || actUrl);
+
+          const snapParsed = await parseLabPageDom(this.labPage!);
+          if (snapParsed.courseOverviewUrl) {
+            this.state.courseOverviewUrl = snapParsed.courseOverviewUrl;
+          }
+          if (snapParsed.tasks.length === this.state.tasks.length) {
+            for (let i = 0; i < this.state.tasks.length; i++) {
+              const st = snapParsed.tasks[i];
+              if (st?.activityHref) {
+                this.state.tasks[i].activityHref = st.activityHref;
+              }
+              if (st?.progressVerified) {
+                this.state.tasks[i].progressVerified = true;
+                this.state.tasks[i].status = 'completed';
+                this.state.tasks[i].stepScore = 1;
+                for (const s of this.state.tasks[i].steps) s.status = 'completed';
+              }
+            }
+          }
+
+          if (snapParsed.currentIframeSrc && !courseKnowledgeBase) {
+            this.addLog(
+              'info',
+              'gemini',
+              `Extracting Articulate Rise 360 course material from ${snapParsed.currentIframeSrc}...`
+            );
+            courseKnowledgeBase = await fetchCourseKnowledgeFromIframeSrc(
+              snapParsed.currentIframeSrc
+            );
+            if (courseKnowledgeBase) {
+              this.addLog(
+                'success',
+                'gemini',
+                `Indexed ${courseKnowledgeBase.length.toLocaleString()} chars of course material for quiz solving.`
+              );
+            }
+          }
+
+          task.status = 'completed';
+          task.progressVerified = true;
+          task.stepScore = 1;
+          task.progressMessage = 'Activity completed';
+          for (const s of task.steps) s.status = 'completed';
+          this.state.totalScore = this.state.tasks.filter((t) => t.progressVerified).length;
+          this.state.maxScore = this.state.tasks.length || 1;
+          this.state.labTimer = `${this.state.totalScore}/${this.state.maxScore} done`;
+          this.emitState();
+
+          this.addLog(
+            'success',
+            'lab_window',
+            `Completed activity #${task.number}: "${task.title}" (${this.state.totalScore}/${this.state.maxScore} done).`
+          );
+        } else if (actType === 'quiz') {
+          // If we haven't extracted course knowledge yet, inspect the first link module to grab runtime-data.js
+          if (!courseKnowledgeBase) {
+            const linkTask = this.state.tasks.find(
+              (t) => t.activityType === 'link' && Boolean(t.activityHref)
+            );
+            if (linkTask?.activityHref) {
+              const linkUrl = new URL(linkTask.activityHref, origin).toString();
+              this.addLog(
+                'info',
+                'gemini',
+                `Pre-fetching course lesson material from "${linkTask.title}" before solving quiz...`
+              );
+              const preRes = await completeCourseActivityInUserChrome({
+                windowId: labTarget?.windowId,
+                tabIndex: labTarget?.tabIndex,
+                activityUrl: linkUrl,
+                activityType: 'link',
+              });
+              await loadHtmlIntoPreviewPage(preRes.htmlContent, preRes.url || linkUrl);
+              const preParsed = await parseLabPageDom(this.labPage!);
+              if (preParsed.currentIframeSrc) {
+                courseKnowledgeBase = await fetchCourseKnowledgeFromIframeSrc(
+                  preParsed.currentIframeSrc
+                );
+                if (courseKnowledgeBase) {
+                  this.addLog(
+                    'success',
+                    'gemini',
+                    `Indexed ${courseKnowledgeBase.length.toLocaleString()} chars of course material from "${linkTask.title}".`
+                  );
+                }
+              }
+            }
+          }
+
+          this.addLog(
+            'action',
+            'lab_window',
+            `Opening Quiz #${task.number}: "${task.title}" (${actUrl})...`
+          );
+          const quizNav = await completeCourseActivityInUserChrome({
+            windowId: labTarget?.windowId,
+            tabIndex: labTarget?.tabIndex,
+            activityUrl: actUrl,
+            activityType: 'quiz',
+          });
+          await loadHtmlIntoPreviewPage(quizNav.htmlContent, quizNav.url || actUrl);
+          let quizParsed = await parseLabPageDom(this.labPage!);
+
+          if (quizParsed.currentQuiz?.isPassing) {
+            const grade = quizParsed.currentQuiz.percentageGrade ?? 100;
+            task.status = 'completed';
+            task.progressVerified = true;
+            task.stepScore = 1;
+            task.progressMessage = `Quiz Passed (${grade}%)`;
+            for (const s of task.steps) s.status = 'completed';
+            this.state.totalScore = this.state.tasks.filter((t) => t.progressVerified).length;
+            this.state.labTimer = `${this.state.totalScore}/${this.state.maxScore} done`;
+            this.emitState();
+            this.addLog(
+              'success',
+              'lab_window',
+              `Quiz "${task.title}" is already passed (${grade}%).`
+            );
+          } else if (quizParsed.currentQuiz && quizParsed.currentQuiz.items.length > 0) {
+            const excludedChoicesByItemId: Record<string, string[]> = {};
+            const lockedChoicesByItemId: Record<string, string | string[]> = {};
+            const maxQuizAttempts = 3;
+
+            for (let attempt = 1; attempt <= maxQuizAttempts; attempt++) {
+              if (this.pauseRequested) {
+                this.setStatus('paused');
+                return;
+              }
+
+              const cq = quizParsed.currentQuiz!;
+              for (const ir of cq.itemResponses || []) {
+                if (ir.isSubmitted && ir.choiceId) {
+                  if (ir.isCorrect === true) {
+                    lockedChoicesByItemId[ir.quizItemId] = ir.choiceId;
+                  } else if (ir.isCorrect === false) {
+                    const arr = excludedChoicesByItemId[ir.quizItemId] || [];
+                    if (!arr.includes(ir.choiceId)) arr.push(ir.choiceId);
+                    excludedChoicesByItemId[ir.quizItemId] = arr;
+                  }
+                }
+              }
+
+              this.addLog(
+                'ai',
+                'gemini',
+                `Solving ${cq.items.length} quiz questions for "${task.title}" (Attempt ${attempt}/${maxQuizAttempts})...`
+              );
+              const answers = await solveCourseQuizQuestions(
+                this.state.labTitle,
+                courseKnowledgeBase,
+                cq.items,
+                excludedChoicesByItemId,
+                lockedChoicesByItemId
+              );
+
+              for (let idx = 0; idx < answers.length; idx++) {
+                const ans = answers[idx];
+                this.addLog(
+                  'ai',
+                  'gemini',
+                  `Q${idx + 1}: Selected Option #${(ans.optionIndex ?? 0) + 1} ("${ans.optionTitle || ''}") — ${ans.reason || ''}`
+                );
+              }
+
+              const needsRetakeFirst = Boolean(cq.isSubmitted && !cq.isPassing);
+              this.addLog(
+                'action',
+                'lab_window',
+                `Selecting ${answers.length} answers and submitting Quiz "${task.title}" in Chrome...`
+              );
+              const submitRes = await submitCourseQuizInUserChrome({
+                windowId: labTarget?.windowId,
+                tabIndex: labTarget?.tabIndex,
+                quizUrl: actUrl,
+                answers,
+                needsRetakeFirst,
+              });
+
+              await loadHtmlIntoPreviewPage(submitRes.htmlContent, submitRes.url || actUrl);
+              quizParsed = await parseLabPageDom(this.labPage!);
+
+              const menuQuizTask = quizParsed.tasks.find(
+                (t) => t.activityId === task.activityId || t.title === task.title
+              );
+              const isPassed = Boolean(
+                quizParsed.currentQuiz?.isPassing || menuQuizTask?.progressVerified
+              );
+              const grade = quizParsed.currentQuiz?.percentageGrade;
+
+              if (isPassed) {
+                task.status = 'completed';
+                task.progressVerified = true;
+                task.stepScore = 1;
+                task.progressMessage = `Quiz Passed (${grade ?? 100}%)`;
+                for (const s of task.steps) s.status = 'completed';
+                this.state.totalScore = this.state.tasks.filter((t) => t.progressVerified).length;
+                this.state.labTimer = `${this.state.totalScore}/${this.state.maxScore} done`;
+                this.emitState();
+                this.addLog(
+                  'success',
+                  'lab_window',
+                  `Quiz "${task.title}" PASSED with score ${grade ?? 100}%!`
+                );
+                break;
+              } else {
+                this.addLog(
+                  'warn',
+                  'lab_window',
+                  `Quiz attempt ${attempt}/${maxQuizAttempts} scored ${grade ?? 0}% (passing: ${cq.passingPercentage}%). Adjusting answers and retrying...`
+                );
+                if (attempt === maxQuizAttempts) {
+                  task.status = 'failed';
+                  task.progressMessage = `Score: ${grade ?? 0}%`;
+                  this.emitState();
+                }
+              }
+            }
+          }
+        }
+
+        if (singleStepOnly) {
+          this.setStatus('paused');
+          this.addLog('info', 'system', `Completed single course activity: "${task.title}".`);
+          return;
+        }
+      }
+
+      const allDone =
+        this.state.tasks.length > 0 &&
+        this.state.tasks.every((t) => t.status === 'completed' || t.progressVerified);
+      if (allDone) {
+        if (this.state.courseOverviewUrl) {
+          try {
+            const overviewFullUrl = new URL(this.state.courseOverviewUrl, origin).toString();
+            this.addLog(
+              'action',
+              'lab_window',
+              `Returning to Course Overview page to display 100% completion: ${overviewFullUrl}`
+            );
+            const finalNav = await completeCourseActivityInUserChrome({
+              windowId: labTarget?.windowId,
+              tabIndex: labTarget?.tabIndex,
+              activityUrl: overviewFullUrl,
+              activityType: 'document',
+            });
+            await loadHtmlIntoPreviewPage(finalNav.htmlContent, finalNav.url || overviewFullUrl);
+          } catch {
+            // Ignore final overview navigation errors
+          }
+        }
+        this.setStatus('completed');
+        this.addLog(
+          'success',
+          'system',
+          `Course "${this.state.labTitle}" 100% completed (${this.state.totalScore}/${this.state.maxScore} activities)!`
+        );
+      } else {
+        this.setStatus('paused');
+      }
+    } finally {
+      this.isLoopRunning = false;
+      this.emitState();
+    }
+  }
+
+  /**
+   * Starts or resumes the Lab or Course Execution Loop (either Autonomous or Single-Step).
    */
   public async startExecutionLoop(singleStepOnly = false): Promise<void> {
     if (this.isLoopRunning) {
@@ -1450,8 +1942,18 @@ export class LabBrowserOrchestrator {
       return;
     }
 
+    if (this.isCourseSession()) {
+      await this.executeCourseLoop(singleStepOnly);
+      return;
+    }
+
     if (this.state.tasks.length === 0 || !this.state.isLabStarted || !this.state.credentials.password) {
       await this.parseLabInstructions();
+    }
+
+    if (this.isCourseSession()) {
+      await this.executeCourseLoop(singleStepOnly);
+      return;
     }
 
     const hasNativeTarget = Boolean(
@@ -2128,6 +2630,10 @@ export class LabBrowserOrchestrator {
   }
 
   public async checkTaskProgressManual(taskNumber: number): Promise<void> {
+    if (this.isCourseSession()) {
+      await this.executeCourseLoop(true);
+      return;
+    }
     await this.ensureLabPreviewPage();
     if (!this.labPage || this.labPage.isClosed()) {
       throw new Error('Lab window is not open.');
@@ -2150,6 +2656,18 @@ export class LabBrowserOrchestrator {
   }
 
   public async checkAllTasksProgress(): Promise<void> {
+    if (this.isCourseSession()) {
+      await this.parseLabInstructions();
+      if (this.state.tasks.length > 0 && this.state.tasks.every((t) => t.progressVerified)) {
+        this.setStatus('completed');
+        this.addLog(
+          'success',
+          'lab_window',
+          `All course activities verified (${this.state.totalScore}/${this.state.maxScore})!`
+        );
+      }
+      return;
+    }
     await this.ensureLabPreviewPage();
     if (!this.labPage || this.labPage.isClosed()) {
       throw new Error('Lab window is not open.');

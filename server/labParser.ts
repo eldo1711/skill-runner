@@ -1,12 +1,62 @@
 import { Page } from 'playwright';
-import { LabCredentials, LabLink, LabStep, LabTask, TargetSurface } from './types.js';
+import {
+  CourseActivityType,
+  LabCredentials,
+  LabLink,
+  LabStep,
+  LabTask,
+  TargetSurface,
+} from './types.js';
 import { transformAgyLaunchCommand } from './geminiClient.js';
 import {
   clickCheckProgressInUserChrome,
   clickStartLabInUserChrome,
 } from './nativeChromeBridge.js';
 
+export interface CourseQuizOption {
+  id: string;
+  title: string;
+  rawTitle: string;
+}
+
+export interface CourseQuizItem {
+  id: string;
+  itemType: string;
+  stem: string;
+  options: CourseQuizOption[];
+}
+
+export interface CourseQuizItemResponse {
+  id: string;
+  quizItemId: string;
+  isSubmitted: boolean;
+  isCorrect?: boolean;
+  itemType: string;
+  choiceId?: string | null;
+  choiceIds?: string[] | null;
+  choice?: boolean | null;
+}
+
+export interface CourseQuizData {
+  quizResponseId: string;
+  quizVersionId: string;
+  passingPercentage: number;
+  isSubmitted: boolean;
+  isPassing: boolean;
+  percentageGrade: number | null;
+  retakeUnallowedReason?: string | null;
+  items: CourseQuizItem[];
+  itemResponses: CourseQuizItemResponse[];
+}
+
 export interface ParsedLabPage {
+  isCourse?: boolean;
+  courseOverviewUrl?: string;
+  courseStartHref?: string;
+  currentIframeSrc?: string;
+  currentVideoId?: string;
+  currentWatchTimePath?: string;
+  currentQuiz?: CourseQuizData;
   labTitle: string;
   labTimer: string;
   isLabStarted: boolean;
@@ -17,6 +67,7 @@ export interface ParsedLabPage {
   credentials: LabCredentials;
   tasks: LabTask[];
 }
+
 
 /**
  * Extracts credentials, lab timer, and structured tasks/steps from a Google Cloud Skills Boost
@@ -203,7 +254,7 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
       document.querySelector('h1.lab-preamble__title') ||
       document.querySelector('ql-lab-preamble h1') ||
       document.querySelector('h1');
-    const labTitle =
+    let labTitle =
       headerTitle ||
       getDeepText(h1) ||
       document.title.replace(/\s*\|\s*Google.*$/i, '').trim() ||
@@ -221,7 +272,7 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
         }
       }
     }
-    const labTimer =
+    let labTimer =
       liveShadowState === 'stopped'
         ? '00:00:00'
         : liveHhMmSsTimer || headerTimer || '00:00:00';
@@ -390,7 +441,7 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
         : 'https://console.cloud.google.com/';
     }
 
-    const isLabStarted =
+    let isLabStarted =
       liveShadowState === 'stopped'
         ? false
         : Boolean(username || projectId || hasEndLabButton);
@@ -400,7 +451,9 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
     const hasLabContent = Boolean(
       labHeader ||
         isLabStarted ||
-        document.querySelector('.js-lab-content-body, .lab-content__inner')
+        document.querySelector(
+          '.js-lab-content-body, .lab-content__inner, ql-contents-menu, ql-quiz, ql-iframe, ql-youtube-video'
+        )
     );
     const hasSignInLink = allElements.some((el) => {
       const t = (el.textContent || '').trim().toLowerCase();
@@ -966,12 +1019,238 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
       }
     });
 
-    const computedScore = tasks.reduce((sum, t) => sum + (t.stepScore || 0), 0);
-    if (computedScore > totalScore) {
-      totalScore = computedScore;
+    const contentsMenu = document.querySelector('ql-contents-menu');
+    const isCoursePage = Boolean(
+      !labHeader &&
+        !pageLabInstanceId &&
+        (contentsMenu ||
+          document.querySelector('ql-quiz') ||
+          document.querySelector('ql-iframe.document-iframe') ||
+          document.querySelector('ql-youtube-video'))
+    );
+
+    let courseOverviewUrl = '';
+    let courseStartHref = '';
+    let currentIframeSrc = '';
+    let currentVideoId = '';
+    let currentWatchTimePath = '';
+    let currentQuiz: CourseQuizData | undefined;
+
+    if (isCoursePage) {
+      const stripHtml = (s: string) => {
+        const div = document.createElement('div');
+        div.innerHTML = s || '';
+        return (div.textContent || div.innerText || '').replace(/\s+/g, ' ').trim();
+      };
+
+      const bannerBtn = document.querySelector(
+        'ql-button[data-analytics-position="course-banner"], ql-button[data-content-type="course"]'
+      );
+      const bannerCourseTitle = (bannerBtn?.getAttribute('data-content-name') || '').trim();
+      const breadcrumbCourseLink = document.querySelector(
+        '.breadcrumb-item a[href*="/course_templates/"], .breadcrumb-item a[href*="/paths/"]'
+      ) as HTMLAnchorElement | null;
+      const allBreadcrumbCourseLinks = Array.from(
+        document.querySelectorAll('.breadcrumb-item a[href*="/course_templates/"]')
+      ) as HTMLAnchorElement[];
+      const primaryCourseLink = allBreadcrumbCourseLinks[0] || breadcrumbCourseLink;
+
+      if (primaryCourseLink) {
+        courseOverviewUrl = (primaryCourseLink.getAttribute('href') || '').trim();
+      }
+      if (!courseOverviewUrl) {
+        const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute('href') || '';
+        if (canonical.includes('/course_templates/')) {
+          courseOverviewUrl = canonical.trim();
+        }
+      }
+
+      if (bannerBtn) {
+        courseStartHref = (bannerBtn.getAttribute('href') || '').trim();
+      }
+
+      const derivedCourseTitle =
+        bannerCourseTitle ||
+        (allBreadcrumbCourseLinks[0]?.textContent || '').replace(/\s+/g, ' ').trim() ||
+        (document.querySelector('h1')?.textContent || '').replace(/\s+/g, ' ').trim() ||
+        labTitle;
+      if (derivedCourseTitle) {
+        labTitle = derivedCourseTitle;
+      }
+
+      const docIframe = document.querySelector('ql-iframe.document-iframe, ql-iframe[src]');
+      if (docIframe) {
+        currentIframeSrc = (docIframe.getAttribute('src') || '').trim();
+      }
+
+      const ytVideo = document.querySelector('ql-youtube-video');
+      if (ytVideo) {
+        currentVideoId = (ytVideo.getAttribute('videoid') || '').trim();
+        currentWatchTimePath = (ytVideo.getAttribute('watchtimepath') || '').trim();
+      }
+
+      const quizEl = document.querySelector('ql-quiz');
+      if (quizEl) {
+        try {
+          const qvRaw = quizEl.getAttribute('quizversion') || '{}';
+          const qrRaw = quizEl.getAttribute('quizresponse') || '{}';
+          const qv = JSON.parse(qvRaw);
+          const qr = JSON.parse(qrRaw);
+          const quizDeepText = getDeepText(quizEl);
+          const shadowScoreContainer = queryAllDeep(quizEl).find((el) =>
+            el.classList?.contains('score-container')
+          );
+          const shadowPassing = Boolean(shadowScoreContainer?.classList?.contains('passing'));
+          const gradeMatch = quizDeepText.match(/(\d+(?:\.\d+)?)%/);
+
+          const items: CourseQuizItem[] = Array.isArray(qv.quizItems)
+            ? qv.quizItems.map((it: any) => ({
+                id: String(it.id || ''),
+                itemType: String(it.itemType || 'multiple-choice'),
+                stem: stripHtml(String(it.stem || '')),
+                options: Array.isArray(it.options)
+                  ? it.options.map((opt: any) => ({
+                      id: String(opt.id || ''),
+                      title: stripHtml(String(opt.title || '')),
+                      rawTitle: String(opt.title || ''),
+                    }))
+                  : [],
+              }))
+            : [];
+
+          const itemResponses: CourseQuizItemResponse[] = Array.isArray(qr.itemResponses)
+            ? qr.itemResponses.map((ir: any) => ({
+                id: String(ir.id || ''),
+                quizItemId: String(ir.quizItemId || ''),
+                isSubmitted: Boolean(ir.isSubmitted),
+                isCorrect: typeof ir.isCorrect === 'boolean' ? ir.isCorrect : undefined,
+                itemType: String(ir.itemType || 'multiple-choice'),
+                choiceId: ir.choiceId != null ? String(ir.choiceId) : null,
+                choiceIds: Array.isArray(ir.choiceIds) ? ir.choiceIds.map(String) : null,
+                choice: typeof ir.choice === 'boolean' ? ir.choice : null,
+              }))
+            : [];
+
+          const isPassing = Boolean(qr.isPassing === true || shadowPassing);
+          const isSubmitted = Boolean(qr.isSubmitted === true || shadowPassing);
+          const percentageGrade =
+            typeof qr.percentageGrade === 'number'
+              ? qr.percentageGrade
+              : shadowPassing && gradeMatch
+                ? parseFloat(gradeMatch[1])
+                : null;
+
+          currentQuiz = {
+            quizResponseId: String(qr.id || ''),
+            quizVersionId: String(qv.id || ''),
+            passingPercentage: typeof qv.passingPercentage === 'number' ? qv.passingPercentage : 80,
+            isSubmitted,
+            isPassing,
+            percentageGrade,
+            retakeUnallowedReason: qr.retakeUnallowedReason || null,
+            items,
+            itemResponses,
+          };
+        } catch {
+          // Ignore malformed quiz JSON
+        }
+      }
+
+      if (contentsMenu) {
+        try {
+          const modulesRaw = contentsMenu.getAttribute('modules') || '[]';
+          const modules = JSON.parse(modulesRaw);
+          if (Array.isArray(modules)) {
+            tasks.length = 0;
+            let actIdx = 0;
+            for (const mod of modules) {
+              const modTitle = stripHtml(String(mod?.title || ''));
+              const modSteps = Array.isArray(mod?.steps) ? mod.steps : [];
+              for (const st of modSteps) {
+                const activities = Array.isArray(st?.activities) ? st.activities : [];
+                for (const act of activities) {
+                  const actType = String(act?.type || 'link').toLowerCase() as CourseActivityType;
+                  if (actType === 'credential' || actType === 'survey') {
+                    continue;
+                  }
+                  actIdx++;
+                  const actTitle = stripHtml(String(act?.title || `Activity ${actIdx}`));
+                  const actHref = String(act?.href || '').trim();
+                  const actComplete = Boolean(act?.isComplete === true);
+                  const typeLabel =
+                    actType === 'quiz'
+                      ? 'Quiz / Assessment'
+                      : actType === 'video'
+                        ? 'Video Lesson'
+                        : actType === 'lab'
+                          ? 'Hands-on Lab'
+                          : 'Interactive Lesson / Multimedia';
+                  const stepInstruction =
+                    actType === 'quiz'
+                      ? `Complete quiz "${actTitle}" by analyzing all questions against the course material, selecting the answers, and submitting.`
+                      : actType === 'video'
+                        ? `Navigate to video lesson "${actTitle}" and complete playback.`
+                        : `Navigate to interactive module "${actTitle}", process multimedia content, and record activity completion.`;
+
+                  tasks.push({
+                    id: `course-act-${act?.id || actIdx}`,
+                    number: actIdx,
+                    title: actTitle,
+                    description: `${modTitle ? modTitle + ' • ' : ''}${typeLabel}`,
+                    steps: [
+                      {
+                        id: `step-${actIdx}-1`,
+                        index: 1,
+                        instruction: stepInstruction,
+                        commands: [],
+                        links: actHref ? [{ text: actTitle, href: actHref }] : [],
+                        targetSurface: 'general',
+                        status: actComplete ? 'completed' : 'pending',
+                      },
+                    ],
+                    hasCheckProgress: true,
+                    stepScore: actComplete ? 1 : 0,
+                    stepMaxScore: 1,
+                    progressVerified: actComplete,
+                    progressMessage: actComplete
+                      ? 'Activity completed'
+                      : act?.inProgress
+                        ? 'In progress'
+                        : 'Pending completion',
+                    status: actComplete ? 'completed' : 'pending',
+                    activityId: String(act?.id || actIdx),
+                    activityType: actType,
+                    activityHref: actHref,
+                    moduleTitle: modTitle,
+                  });
+                }
+              }
+            }
+          }
+        } catch {
+          // Ignore malformed modules JSON
+        }
+      }
+
+      totalScore = tasks.filter((t) => t.progressVerified).length;
+      maxScore = tasks.length || 1;
+      isLabStarted = tasks.some((t) => Boolean(t.activityHref && t.activityHref.includes('/course_sessions/')));
+      labTimer = `${totalScore}/${maxScore} done`;
+    } else {
+      const computedScore = tasks.reduce((sum, t) => sum + (t.stepScore || 0), 0);
+      if (computedScore > totalScore) {
+        totalScore = computedScore;
+      }
     }
 
     return {
+      isCourse: isCoursePage,
+      courseOverviewUrl: courseOverviewUrl || undefined,
+      courseStartHref: courseStartHref || undefined,
+      currentIframeSrc: currentIframeSrc || undefined,
+      currentVideoId: currentVideoId || undefined,
+      currentWatchTimePath: currentWatchTimePath || undefined,
+      currentQuiz,
       labTitle,
       labTimer,
       isLabStarted,
