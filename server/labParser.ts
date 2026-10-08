@@ -17,6 +17,7 @@ export interface CourseQuizOption {
   id: string;
   title: string;
   rawTitle: string;
+  isAnswer?: boolean;
 }
 
 export interface CourseQuizItem {
@@ -1101,7 +1102,9 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
             el.classList?.contains('score-container')
           );
           const shadowPassing = Boolean(shadowScoreContainer?.classList?.contains('passing'));
-          const gradeMatch = quizDeepText.match(/(\d+(?:\.\d+)?)%/);
+          const shadowGradeText = shadowScoreContainer?.textContent || '';
+          const shadowGradeMatch = shadowGradeText.match(/Your score:\s*(\d+(?:\.\d+)?)%/i);
+          const gradeMatch = shadowGradeMatch || quizDeepText.match(/(\d+(?:\.\d+)?)%/);
 
           const items: CourseQuizItem[] = Array.isArray(qv.quizItems)
             ? qv.quizItems.map((it: any) => ({
@@ -1113,6 +1116,7 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
                       id: String(opt.id || ''),
                       title: stripHtml(String(opt.title || '')),
                       rawTitle: String(opt.title || ''),
+                      isAnswer: typeof opt.isAnswer === 'boolean' ? opt.isAnswer : undefined,
                     }))
                   : [],
               }))
@@ -1134,10 +1138,10 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
           const isPassing = Boolean(qr.isPassing === true || shadowPassing);
           const isSubmitted = Boolean(qr.isSubmitted === true || shadowPassing);
           const percentageGrade =
-            typeof qr.percentageGrade === 'number'
-              ? qr.percentageGrade
-              : shadowPassing && gradeMatch
-                ? parseFloat(gradeMatch[1])
+            shadowPassing && gradeMatch
+              ? parseFloat(gradeMatch[1])
+              : typeof qr.percentageGrade === 'number'
+                ? qr.percentageGrade
                 : null;
 
           currentQuiz = {

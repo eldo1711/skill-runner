@@ -1885,6 +1885,16 @@ export class LabBrowserOrchestrator {
               }
             }
           }
+        } else if (actType === 'lab') {
+          task.status = 'skipped';
+          task.progressMessage = 'Hands-on Lab (run in Lab mode)';
+          for (const s of task.steps) s.status = 'skipped';
+          this.emitState();
+          this.addLog(
+            'info',
+            'lab_window',
+            `Course contains hands-on lab #${task.number}: "${task.title}" (${actUrl}) — switch to Lab mode to execute hands-on lab tasks.`
+          );
         }
 
         if (singleStepOnly) {
@@ -1896,7 +1906,9 @@ export class LabBrowserOrchestrator {
 
       const allDone =
         this.state.tasks.length > 0 &&
-        this.state.tasks.every((t) => t.status === 'completed' || t.progressVerified);
+        this.state.tasks.every(
+          (t) => t.status === 'completed' || t.progressVerified || t.activityType === 'lab'
+        );
       if (allDone) {
         if (this.state.courseOverviewUrl) {
           try {

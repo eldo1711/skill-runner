@@ -1147,22 +1147,42 @@ return "done"
   };
 }
 
+async function resolveCourseTabTarget(windowId, tabIndex) {
+  const tabs = await listUserChromeTabs();
+  const reqWin = Number(windowId) || 0;
+  const reqTab = Number(tabIndex) || 0;
+
+  if (reqWin && reqTab) {
+    const exact = tabs.find((t) => t.windowId === reqWin && t.tabIndex === reqTab);
+    if (exact && isLabPageUrl(exact.url)) {
+      return { windowId: exact.windowId, tabIndex: exact.tabIndex };
+    }
+    const sameWinCourse =
+      tabs.find((t) => t.windowId === reqWin && t.contentKind === 'course') ||
+      tabs.find((t) => t.windowId === reqWin && t.suggestedRole === 'lab');
+    if (sameWinCourse) {
+      return { windowId: sameWinCourse.windowId, tabIndex: sameWinCourse.tabIndex };
+    }
+  }
+
+  const anyCourse =
+    tabs.find((t) => t.contentKind === 'course') ||
+    tabs.find((t) => t.suggestedRole === 'lab');
+  if (anyCourse) {
+    return { windowId: anyCourse.windowId, tabIndex: anyCourse.tabIndex };
+  }
+  return { windowId: reqWin, tabIndex: reqTab || 1 };
+}
+
 async function completeCourseActivityInUserChrome(
   windowId,
   tabIndex,
   activityUrl,
   activityType = 'link'
 ) {
-  let targetWindowId = Number(windowId) || 0;
-  let targetTabIndex = Number(tabIndex) || 1;
-  if (!targetWindowId) {
-    const tabs = await listUserChromeTabs();
-    const labTab = tabs.find((t) => t.suggestedRole === 'lab');
-    if (labTab) {
-      targetWindowId = labTab.windowId;
-      targetTabIndex = labTab.tabIndex;
-    }
-  }
+  const resolved = await resolveCourseTabTarget(windowId, tabIndex);
+  const targetWindowId = resolved.windowId;
+  const targetTabIndex = resolved.tabIndex;
   if (!targetWindowId) {
     return { ok: false, message: 'No Course tab found in Google Chrome.' };
   }
@@ -1223,6 +1243,23 @@ end tell
 
   if (!jsRes.ok && activityType === 'video') {
     const videoAxScript = `
+on findWebArea(node, depth)
+  if depth > 10 then return missing value
+  tell application "System Events"
+    try
+      set r to (role of node) as string
+      if r is "AXWebArea" then return node
+      if r is "AXTabGroup" or r is "AXToolbar" then return missing value
+      set ch to UI elements of node
+      repeat with c in ch
+        set res to my findWebArea(c, depth + 1)
+        if res is not missing value then return res
+      end repeat
+    end try
+  end tell
+  return missing value
+end findWebArea
+
 tell application "Google Chrome" to activate
 delay 0.3
 tell application "System Events"
@@ -1231,25 +1268,34 @@ tell application "System Events"
       set value of attribute "AXEnhancedUserInterface" to true
     end try
     delay 0.4
-    if (count of windows) > 0 then
-      set w to front window
-      set allElems to entire contents of w
-      set lastTimeLink to missing value
-      repeat with el in allElems
-        try
-          if (role of el) is "AXLink" then
-            set nm to (name of el) as string
-            if nm contains ":" then
-              set lastTimeLink to el
-            end if
+    repeat with wIdx from 1 to count of windows
+      set w to window wIdx
+      set wName to ""
+      try
+        set wName to (name of w) as string
+      end try
+      if wName is not "Recent Download History" and (wName contains "Google Skills" or wName contains "Cloud Skills") then
+        set wa to my findWebArea(w, 0)
+        if wa is not missing value then
+          set allElems to entire contents of wa
+          set lastTimeLink to missing value
+          repeat with el in allElems
+            try
+              if (role of el) is "AXLink" then
+                set nm to (name of el) as string
+                if nm contains ":" then
+                  set lastTimeLink to el
+                end if
+              end if
+            end try
+          end repeat
+          if lastTimeLink is not missing value then
+            click lastTimeLink
+            return "clicked_timecode"
           end if
-        end try
-      end repeat
-      if lastTimeLink is not missing value then
-        click lastTimeLink
-        return "clicked_timecode"
+        end if
       end if
-    end if
+    end repeat
   end tell
 end tell
 return "done"
@@ -1280,40 +1326,36 @@ async function submitCourseQuizInUserChrome(
   answers = [],
   needsRetakeFirst = false
 ) {
-  let targetWindowId = Number(windowId) || 0;
-  let targetTabIndex = Number(tabIndex) || 1;
-  if (!targetWindowId) {
-    const tabs = await listUserChromeTabs();
-    const labTab = tabs.find((t) => t.suggestedRole === 'lab');
-    if (labTab) {
-      targetWindowId = labTab.windowId;
-      targetTabIndex = labTab.tabIndex;
-    }
-  }
+  const resolved = await resolveCourseTabTarget(windowId, tabIndex);
+  const targetWindowId = resolved.windowId;
+  const targetTabIndex = resolved.tabIndex;
   if (!targetWindowId) {
     return { ok: false, message: 'No Course tab found in Google Chrome.' };
   }
 
   if (quizUrl) {
     const escapedUrl = String(quizUrl).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const quizIdMatch = String(quizUrl).match(/\/quizzes\/(\d+)/i);
+    const quizPathSuffix = quizIdMatch ? `/quizzes/${quizIdMatch[1]}` : escapedUrl;
     const navScript = `
 tell application "Google Chrome"
   repeat with w in windows
     if ((id of w) as string) is "${targetWindowId}" then
       if ${targetTabIndex} <= (count of tabs of w) then
         set t to tab ${targetTabIndex} of w
-        if (URL of t) is not "${escapedUrl}" then
+        set currU to (URL of t) as string
+        if currU does not contain "${quizPathSuffix}" then
           set URL of t to "${escapedUrl}"
+          delay 0.8
+          repeat 40 times
+            if (loading of t) is false then exit repeat
+            delay 0.25
+          end repeat
+          delay 1.5
         end if
         set active tab index of w to ${targetTabIndex}
         set index of w to 1
         activate
-        delay 0.8
-        repeat 40 times
-          if (loading of t) is false then exit repeat
-          delay 0.25
-        end repeat
-        delay 1.5
         return "ok"
       end if
     end if
@@ -1379,7 +1421,7 @@ end tell
 
   const jsRes = await executeJsInUserChromeTab(targetWindowId, targetTabIndex, quizJs);
   if (jsRes.ok && jsRes.value === 'retake_clicked') {
-    await new Promise((r) => setTimeout(r, 2200));
+    await new Promise((r) => setTimeout(r, 1800));
     await executeJsInUserChromeTab(
       targetWindowId,
       targetTabIndex,
@@ -1388,233 +1430,234 @@ end tell
   }
 
   if (!jsRes.ok) {
-    // Accessibility / System Events path when "Allow JavaScript from Apple Events" is off
-    if (needsRetakeFirst) {
-      const retakeAxScript = `
-tell application "Google Chrome" to activate
-delay 0.3
+    // Accessibility / System Events path when "Allow JavaScript from Apple Events" is off.
+    // Note: <ql-quiz> shuffles the order of questions and options in the DOM at runtime,
+    // and exposes each option's exact title as the AXRadioButton / AXCheckBox `name` and `description`.
+    const escapeAppleStr = (s) =>
+      String(s || '')
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/\r?\n/g, ' ')
+        .trim();
+
+    const targetRadioTitles = [];
+    const targetCheckTitles = [];
+    for (const ans of answers || []) {
+      if (ans?.itemType === 'multiple-select' && Array.isArray(ans?.optionTitles)) {
+        for (const t of ans.optionTitles) {
+          const clean = escapeAppleStr(t);
+          if (clean) targetCheckTitles.push(`"${clean}"`);
+        }
+      } else if (ans?.optionTitle) {
+        const clean = escapeAppleStr(ans.optionTitle);
+        if (clean) targetRadioTitles.push(`"${clean}"`);
+      }
+    }
+
+    const radioTitlesAppleList = `{${targetRadioTitles.join(', ')}}`;
+    const checkTitlesAppleList = `{${targetCheckTitles.join(', ')}}`;
+
+    const selectAndSubmitAxScript = `
+on findWebArea(node, depth)
+  if depth > 10 then return missing value
+  tell application "System Events"
+    try
+      set r to (role of node) as string
+      if r is "AXWebArea" then return node
+      if r is "AXTabGroup" or r is "AXToolbar" then return missing value
+      set ch to UI elements of node
+      repeat with c in ch
+        set res to my findWebArea(c, depth + 1)
+        if res is not missing value then return res
+      end repeat
+    end try
+  end tell
+  return missing value
+end findWebArea
+
+tell application "Google Chrome"
+  repeat with w in windows
+    if ((id of w) as string) is "${targetWindowId}" then
+      if ${targetTabIndex} <= (count of tabs of w) then
+        set active tab index of w to ${targetTabIndex}
+        set index of w to 1
+        activate
+      end if
+      exit repeat
+    end if
+  end repeat
+end tell
+delay 0.4
+
 tell application "System Events"
   tell process "Google Chrome"
     try
       set value of attribute "AXEnhancedUserInterface" to true
     end try
     delay 0.5
-    if (count of windows) > 0 then
-      set w to front window
-      set allElems to entire contents of w
-      repeat with el in allElems
-        try
-          if (role of el) is "AXButton" then
-            set nm to ""
-            try
-              set nm to (name of el) as string
-            end try
-            if nm is "" then
-              try
-                set nm to (description of el) as string
-              end try
-            end if
-            if nm is "Retake" or nm starts with "Retake" then
-              click el
-              return "retake_clicked"
-            end if
-          end if
-        end try
-      end repeat
-    end if
-  end tell
-end tell
-return "no_retake"
-`;
-      const rOut = await runAppleScript(retakeAxScript).catch(() => '');
-      if (rOut === 'retake_clicked') {
-        await new Promise((r) => setTimeout(r, 2500));
-        const reloadAfterRetake = `
-tell application "Google Chrome"
-  repeat with w in windows
-    if ((id of w) as string) is "${targetWindowId}" then
-      if ${targetTabIndex} <= (count of tabs of w) then
-        set t to tab ${targetTabIndex} of w
-        set URL of t to (URL of t)
-        delay 0.8
-        repeat 40 times
-          if (loading of t) is false then exit repeat
-          delay 0.25
-        end repeat
-        delay 1.2
-      end if
-      exit repeat
-    end if
-  end repeat
-end tell
-`;
-        await runAppleScript(reloadAfterRetake).catch(() => '');
-      }
-    }
-
-    // Read fresh snapshot to compute exact 1-based AXRadioButton ordinals across quizItems
-    const preSnap = await snapshotUserChromeTabByTarget(targetWindowId, targetTabIndex);
-    const targetRadioOrdinals = [];
-    const targetCheckboxOrdinals = [];
-    if (preSnap && preSnap.htmlPath && fs.existsSync(preSnap.htmlPath)) {
-      try {
-        const html = fs.readFileSync(preSnap.htmlPath, 'utf8');
-        const qvMatch = html.match(/quizversion="([^"]+)"/i);
-        if (qvMatch && qvMatch[1]) {
-          const unescaped = qvMatch[1]
-            .replace(/&quot;/g, '"')
-            .replace(/&amp;/g, '&')
-            .replace(/&lt;/g, '<')
-            .replace(/&gt;/g, '>')
-            .replace(/&#39;/g, "'");
-          const qv = JSON.parse(unescaped);
-          const quizItems = Array.isArray(qv.quizItems) ? qv.quizItems : [];
-          let radioOffset = 0;
-          let checkboxOffset = 0;
-          for (let qIdx = 0; qIdx < quizItems.length; qIdx++) {
-            const item = quizItems[qIdx];
-            const opts = Array.isArray(item.options) ? item.options : [];
-            const ans =
-              (answers || []).find((a) => String(a.quizItemId) === String(item.id)) ||
-              (answers || [])[qIdx];
-            if (item.itemType === 'multiple-select') {
-              const chosenIds = new Set(
-                Array.isArray(ans?.choiceIds) ? ans.choiceIds.map(String) : []
-              );
-              for (let oIdx = 0; oIdx < opts.length; oIdx++) {
-                if (chosenIds.has(String(opts[oIdx].id))) {
-                  targetCheckboxOrdinals.push(checkboxOffset + oIdx + 1);
-                }
-              }
-              checkboxOffset += opts.length;
-            } else {
-              const numOpts = item.itemType === 'true-false' ? 2 : opts.length;
-              let chosenOptIdx =
-                typeof ans?.optionIndex === 'number' && ans.optionIndex >= 0
-                  ? ans.optionIndex
-                  : 0;
-              if (ans?.choiceId && opts.length > 0) {
-                const foundIdx = opts.findIndex((o) => String(o.id) === String(ans.choiceId));
-                if (foundIdx >= 0) chosenOptIdx = foundIdx;
-              }
-              targetRadioOrdinals.push(radioOffset + chosenOptIdx + 1);
-              radioOffset += numOpts;
-            }
-          }
-        }
-      } catch {
-        // Fallback below
-      }
-    }
-
-    const radioIndicesAppleList = `{${targetRadioOrdinals.join(', ')}}`;
-    const checkboxIndicesAppleList = `{${targetCheckboxOrdinals.join(', ')}}`;
-
-    const selectAndSubmitAxScript = `
-tell application "Google Chrome" to activate
-delay 0.4
-tell application "System Events"
-  tell process "Google Chrome"
-    try
-      set value of attribute "AXEnhancedUserInterface" to true
-    end try
-    delay 0.6
-    if (count of windows) > 0 then
-      set w to front window
-      set radioList to {}
-      set checkList to {}
-      set submitBtn to missing value
-      repeat 3 times
-        set radioList to {}
-        set checkList to {}
-        set submitBtn to missing value
-        set allElems to entire contents of w
-        repeat with el in allElems
-          try
-            set r to (role of el) as string
-            if r is "AXRadioButton" then
-              set end of radioList to el
-            else if r is "AXCheckBox" then
-              set end of checkList to el
-            else if r is "AXButton" then
-              set nm to ""
-              try
-                set nm to (name of el) as string
-              end try
-              if nm is "" then
-                try
-                  set nm to (description of el) as string
-                end try
-              end if
-              if nm is "Submit" then
-                set submitBtn to el
-              end if
-            end if
-          end try
-        end repeat
-        if (count of radioList) > 0 or (count of checkList) > 0 then
+    set targetWa to missing value
+    repeat with wIdx from 1 to count of windows
+      set w to window wIdx
+      set wName to ""
+      try
+        set wName to (name of w) as string
+      end try
+      if wName is not "Recent Download History" and (wName contains "Quiz" or wName contains "quiz" or wName contains "Google Skills" or wName contains "Cloud Skills") then
+        set candWa to my findWebArea(w, 0)
+        if candWa is not missing value then
+          set targetWa to candWa
           exit repeat
         end if
-        delay 0.8
-      end repeat
+      end if
+    end repeat
 
-      set targetRadios to ${radioIndicesAppleList}
-      repeat with idx in targetRadios
-        set iVal to idx as integer
-        if iVal >= 1 and iVal <= (count of radioList) then
-          set rEl to item iVal of radioList
+    if targetWa is missing value then return "ax_no_web_area"
+
+    set radioList to {}
+    set checkList to {}
+    set retakeBtn to missing value
+
+    set allElems to entire contents of targetWa
+    repeat with el in allElems
+      set r to ""
+      try
+        set r to (role of el) as string
+      end try
+      if r is "AXRadioButton" then
+        set end of radioList to el
+      else if r is "AXCheckBox" then
+        set end of checkList to el
+      else if r is "AXButton" then
+        set bnm to ""
+        try
+          set bnm to (name of el) as string
+        end try
+        if bnm is "" then
           try
-            click rEl
+            set bnm to (description of el) as string
+          end try
+        end if
+        if bnm is "Retake" or bnm starts with "Retake" then
+          set retakeBtn to el
+        end if
+      end if
+    end repeat
+
+    if (${needsRetakeFirst ? 'true' : 'false'} or ((count of radioList) is 0 and (count of checkList) is 0)) and retakeBtn is not missing value then
+      try
+        click retakeBtn
+      end try
+      delay 1.5
+      set radioList to {}
+      set checkList to {}
+      set allElems to entire contents of targetWa
+      repeat with el in allElems
+        set r to ""
+        try
+          set r to (role of el) as string
+        end try
+        if r is "AXRadioButton" then
+          set end of radioList to el
+        else if r is "AXCheckBox" then
+          set end of checkList to el
+        end if
+      end repeat
+    end if
+
+    set targetRadioTitles to ${radioTitlesAppleList}
+    set usedRadioIndices to {}
+    set clickedRadios to 0
+    repeat with tTitle in targetRadioTitles
+      set tStr to tTitle as string
+      repeat with rIdx from 1 to count of radioList
+        if usedRadioIndices does not contain rIdx then
+          set rEl to item rIdx of radioList
+          set rName to ""
+          try
+            set rName to (name of rEl) as string
+          end try
+          if rName is "" then
+            try
+              set rName to (description of rEl) as string
+            end try
+          end if
+          if rName is not "" and (rName is tStr or rName contains tStr or tStr contains rName) then
+            set end of usedRadioIndices to rIdx
+            try
+              click rEl
+              set clickedRadios to clickedRadios + 1
+            end try
+            delay 0.25
+            exit repeat
+          end if
+        end if
+      end repeat
+    end repeat
+
+    set targetCheckTitles to ${checkTitlesAppleList}
+    set usedCheckIndices to {}
+    set clickedChecks to 0
+    repeat with cTitle in targetCheckTitles
+      set cStr to cTitle as string
+      repeat with cIdx from 1 to count of checkList
+        if usedCheckIndices does not contain cIdx then
+          set cEl to item cIdx of checkList
+          set cName to ""
+          try
+            set cName to (name of cEl) as string
+          end try
+          if cName is "" then
+            try
+              set cName to (description of cEl) as string
+            end try
+          end if
+          if cName is not "" and (cName is cStr or cName contains cStr or cStr contains cName) then
+            set end of usedCheckIndices to cIdx
+            try
+              click cEl
+              set clickedChecks to clickedChecks + 1
+            end try
+            delay 0.25
+            exit repeat
+          end if
+        end if
+      end repeat
+    end repeat
+
+    delay 0.7
+    set postElems to entire contents of targetWa
+    repeat with el in postElems
+      set r to ""
+      try
+        set r to (role of el) as string
+      end try
+      if r is "AXButton" then
+        set bnm to ""
+        try
+          set bnm to (name of el) as string
+        end try
+        if bnm is "" then
+          try
+            set bnm to (description of el) as string
+          end try
+        end if
+        if bnm is "Submit" then
+          try
+            click el
           end try
           delay 0.25
-          try
-            set vStr to (value of rEl) as string
-            if vStr is not "1" and vStr is not "true" then
-              set focused of rEl to true
-              delay 0.15
-              keystroke space
-              delay 0.2
-            end if
-          end try
-          delay 0.35
+          return "ax_submitted:" & clickedRadios & ":" & clickedChecks
         end if
-      end repeat
-
-      set targetChecks to ${checkboxIndicesAppleList}
-      repeat with cIdx in targetChecks
-        set cVal to cIdx as integer
-        if cVal >= 1 and cVal <= (count of checkList) then
-          set cEl to item cVal of checkList
-          try
-            click cEl
-          end try
-          delay 0.35
-        end if
-      end repeat
-
-      delay 0.9
-      if submitBtn is not missing value then
-        try
-          click submitBtn
-        end try
-        delay 0.3
-        try
-          set focused of submitBtn to true
-          delay 0.15
-          key code 36
-        end try
-        return "ax_submitted:" & (count of radioList)
       end if
-      return "ax_no_submit_btn:" & (count of radioList)
-    end if
+    end repeat
+    return "ax_no_submit_btn:" & clickedRadios & ":" & clickedChecks
   end tell
 end tell
-return "ax_no_window"
 `;
     await runAppleScript(selectAndSubmitAxScript, 60000).catch(() => '');
   }
 
-  await new Promise((r) => setTimeout(r, 2500));
+  await new Promise((r) => setTimeout(r, 3000));
 
   // Reload the quiz tab so the server-rendered quizresponse and contents-menu update
   const reloadScript = `

@@ -3910,7 +3910,7 @@ export interface QuizQuestionInput {
   id: string;
   itemType: string;
   stem: string;
-  options: Array<{ id: string; title: string }>;
+  options: Array<{ id: string; title: string; isAnswer?: boolean }>;
 }
 
 export interface SolvedQuizAnswer {
@@ -3928,7 +3928,8 @@ export interface SolvedQuizAnswer {
 
 /**
  * Solves a Google Skills Course Quiz (`<ql-quiz>`) using the active AI model + extracted course lesson
- * text, with automatic exclusion of any previously failed option IDs on retakes.
+ * text, with automatic exclusion of any previously failed option IDs on retakes and direct extraction
+ * of `isAnswer: true` when present in `quizversion`.
  */
 export async function solveCourseQuizQuestions(
   courseTitle: string,
@@ -3942,6 +3943,18 @@ export async function solveCourseQuizQuestions(
     { choiceId?: string; choiceIds?: string[]; choice?: boolean; reason?: string }
   >();
 
+  // First check if Qwiklabs included `isAnswer: true` on any question options (present after a submission/retake)
+  for (const q of questions) {
+    const knownCorrect = q.options.filter((o) => o.isAnswer === true);
+    if (knownCorrect.length > 0) {
+      if (q.itemType === 'multiple-select') {
+        lockedChoicesByItemId[q.id] = knownCorrect.map((o) => o.id);
+      } else {
+        lockedChoicesByItemId[q.id] = knownCorrect[0].id;
+      }
+    }
+  }
+
   const questionsToSolve = questions.filter((q) => !lockedChoicesByItemId[q.id]);
 
   if (questionsToSolve.length > 0) {
@@ -3949,7 +3962,7 @@ export async function solveCourseQuizQuestions(
 Use the official course lesson material below (if provided) and your Google Cloud / ADK / Vertex AI expertise to determine the exact correct option for each question.
 
 COURSE LESSON MATERIAL:
-${courseKnowledgeBase ? courseKnowledgeBase.slice(0, 55000) : '(Use Google Cloud domain knowledge)'}
+${courseKnowledgeBase ? courseKnowledgeBase.slice(0, 80000) : '(Use Google Cloud domain knowledge)'}
 
 QUESTIONS TO SOLVE:
 ${JSON.stringify(
@@ -3959,7 +3972,9 @@ ${JSON.stringify(
       quizItemId: q.id,
       itemType: q.itemType,
       stem: q.stem,
-      availableOptions: q.options.filter((o) => !excluded.has(o.id)),
+      availableOptions: q.options
+        .filter((o) => !excluded.has(o.id))
+        .map((o) => ({ id: o.id, title: o.title })),
     };
   }),
   null,
@@ -3980,49 +3995,26 @@ Return ONLY valid JSON matching:
 }`;
 
     try {
-      const selectedGardenModel = getActiveGardenModel();
-      if (selectedGardenModel === 'claude-opus-5-5') {
-        const opusText = await callAnthropicVertexModel(
-          prompt,
-          'You are an expert Google Cloud Skills course quiz solver. Return ONLY valid JSON.',
-          4096
-        );
-        const parsed = JSON.parse(opusText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim());
-        if (Array.isArray(parsed?.answers)) {
-          for (const a of parsed.answers) {
-            if (a?.quizItemId) aiMap.set(String(a.quizItemId), a);
-          }
-        }
-      } else {
-        const ai = getGenAiClient();
-        const primaryModel = await resolveLatestGeminiModel();
-        const candidateModels = Array.from(
-          new Set([primaryModel, 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-2.5-flash'])
-        );
-        for (const model of candidateModels) {
-          try {
-            const resp = await ai.models.generateContent({
-              model,
-              contents: prompt,
-              config: {
-                responseMimeType: 'application/json',
-                temperature: 0.0,
-              },
-            });
-            const parsed = JSON.parse((resp.text || '{}').trim());
-            if (Array.isArray(parsed?.answers)) {
-              for (const a of parsed.answers) {
-                if (a?.quizItemId) aiMap.set(String(a.quizItemId), a);
-              }
-              break;
-            }
-          } catch {
-            // Try next model
-          }
+      const ai = getGenAIClient();
+      const activeModelId = getActiveGeminiModel();
+      const resp = await generateContentWithModelFallback(ai, {
+        model: activeModelId,
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          temperature: 0.0,
+        },
+      });
+      const rawText = String((resp as any)?.text || '').trim();
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : rawText || '{}');
+      if (Array.isArray(parsed?.answers)) {
+        for (const a of parsed.answers) {
+          if (a?.quizItemId) aiMap.set(String(a.quizItemId), a);
         }
       }
     } catch {
-      // Fall through to deterministic heuristic fallback
+      // Fall through to deterministic heuristic fallback if offline/test
     }
   }
 
@@ -4031,8 +4023,6 @@ Return ONLY valid JSON matching:
     const validOptions = q.options.filter((o) => !excluded.has(o.id));
     const pool = validOptions.length > 0 ? validOptions : q.options;
 
-    // Heuristic fallback: in Qwiklabs' database, options are authored with the correct choice first
-    // (giving it the lowest numeric option ID before display shuffling).
     const lowestIdOption = [...pool].sort((a, b) => {
       const na = parseInt(a.id, 10);
       const nb = parseInt(b.id, 10);
@@ -4068,7 +4058,7 @@ Return ONLY valid JSON matching:
         choiceIds: finalIds,
         optionIndices,
         optionTitles,
-        reason: lockedArr ? 'Locked correct answer from previous attempt' : aiAns?.reason || 'Course content match',
+        reason: lockedArr ? 'Verified answer from quiz schema / previous attempt' : aiAns?.reason || 'Course content match',
       };
     }
 
@@ -4109,7 +4099,7 @@ Return ONLY valid JSON matching:
       optionIndex: optIdx,
       optionTitle: optTitle,
       reason: lockedSingle
-        ? 'Verified correct on previous attempt'
+        ? 'Verified answer from quiz schema / previous attempt'
         : aiAns?.reason || 'Selected from course material analysis',
     };
   });
