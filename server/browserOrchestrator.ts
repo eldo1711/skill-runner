@@ -60,12 +60,23 @@ import {
   synthesizeTaskShellScript,
   transformAgyLaunchCommand,
 } from './geminiClient.js';
-import { macBridgeHub } from './macBridgeHub.js';
+import {
+  MacBridgeHub,
+  SessionExecutionContext,
+  macBridgeHub,
+  sessionAsyncStorage,
+  tryClaimUnclaimedBridge,
+} from './macBridgeHub.js';
 
 const LOCAL_STATE_DIR = path.join(os.homedir(), '.cloud-skills-lab-runner');
 const LOCAL_STATE_FILE = path.join(LOCAL_STATE_DIR, 'runner_state.json');
 
 export class LabBrowserOrchestrator {
+  public readonly sessionId: string;
+  private readonly hub: MacBridgeHub;
+  private readonly sessionContext: SessionExecutionContext;
+  private sessionModel: string = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+
   private labPreviewBrowser: Browser | null = null;
   private labContext: BrowserContext | null = null;
   private labPage: Page | null = null;
@@ -82,8 +93,25 @@ export class LabBrowserOrchestrator {
   private pauseRequested = false;
   private pendingOverrideInstruction: string = '';
 
-  constructor() {
+  constructor(sessionId = 'default') {
+    this.sessionId = sessionId || 'default';
+    this.hub = new MacBridgeHub(this.sessionId);
+    this.sessionContext = {
+      sessionId: this.sessionId,
+      hub: this.hub,
+      getActiveModel: () => this.sessionModel,
+      setActiveModel: (modelId: string) => {
+        const validIds = ['gemini-3.8-flash', 'gemini-3.1-pro-preview', 'claude-opus-5-5'];
+        const normalized = String(modelId || '').trim();
+        if (validIds.includes(normalized)) {
+          this.sessionModel = normalized;
+        }
+        return this.sessionModel;
+      },
+    };
+
     this.state = {
+      sessionId: this.sessionId,
       status: 'idle',
       executionMode: 'autonomous',
       labUrl: '',
@@ -116,48 +144,75 @@ export class LabBrowserOrchestrator {
       selectedLabTabKey: null,
       selectedConsoleTabKey: null,
       selectedCloudShellTabKey: null,
-      activeModel: getActiveGeminiModel(),
+      activeModel: this.sessionModel,
       modelGarden: getModelGardenEntries(),
-      macBridgeConnected: macBridgeHub.isConnected(),
+      macBridgeConnected: this.hub.isConnected(),
     };
 
     // Always start on the clean initial screen (do not auto-restore stale runner_state.json)
     try {
-      if (fs.existsSync(LOCAL_STATE_FILE)) {
-        fs.unlinkSync(LOCAL_STATE_FILE);
+      const stateFilePath = this.getLocalStateFilePath();
+      if (fs.existsSync(stateFilePath)) {
+        fs.unlinkSync(stateFilePath);
       }
     } catch {
       // Ignore cleanup error
     }
 
-    macBridgeHub.onConnectionChange((connected) => {
-      this.state.macBridgeConnected = connected;
-      if (connected) {
-        if (this.state.status === 'idle' && this.state.tasks.length === 0) {
-          clearSavedStateOnMacBridge().catch(() => {});
+    this.hub.onConnectionChange((connected) => {
+      this.runInContext(() => {
+        this.state.macBridgeConnected = connected;
+        if (connected) {
+          if (this.state.status === 'idle' && this.state.tasks.length === 0) {
+            clearSavedStateOnMacBridge().catch(() => {});
+          }
+          this.scanOpenChromeWindows(false).catch(() => {});
+        } else {
+          this.state.availableChromeTabs = [];
+          this.emitState();
         }
-        this.scanOpenChromeWindows(false).catch(() => {});
-      } else {
-        this.state.availableChromeTabs = [];
-        this.emitState();
-      }
+      });
     });
 
-    macBridgeHub.onTabsPush((tabs) => {
-      if (Array.isArray(tabs)) {
-        this.applyScannedTabs(tabs);
-        this.emitState();
-      }
+    this.hub.onTabsPush((tabs) => {
+      this.runInContext(() => {
+        if (Array.isArray(tabs)) {
+          this.applyScannedTabs(tabs);
+          this.emitState();
+        }
+      });
     });
+
+    tryClaimUnclaimedBridge(this.sessionId, this.hub);
 
     // Resolve the latest available model and probe Model Garden on startup
-    resolveLatestGeminiModel()
-      .then((model) => {
-        this.state.activeModel = model;
-        this.emitState();
-      })
-      .catch(() => {});
-    this.checkModels().catch(() => {});
+    this.runInContext(() => {
+      resolveLatestGeminiModel()
+        .then((model) => {
+          this.sessionModel = model;
+          this.state.activeModel = model;
+          this.emitState();
+        })
+        .catch(() => {});
+      this.checkModels().catch(() => {});
+    });
+  }
+
+  public getBridgeHub(): MacBridgeHub {
+    return this.hub;
+  }
+
+  public runInContext<T>(fn: () => T): T {
+    if (sessionAsyncStorage.getStore()?.sessionId === this.sessionId) {
+      return fn();
+    }
+    return sessionAsyncStorage.run(this.sessionContext, fn);
+  }
+
+  private getLocalStateFilePath(): string {
+    const safeId = this.sessionId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const suffix = safeId && safeId !== 'default' ? `_${safeId}` : '';
+    return path.join(LOCAL_STATE_DIR, `runner_state${suffix}.json`);
   }
 
   public async checkModels(): Promise<ModelGardenEntry[]> {
@@ -182,11 +237,12 @@ export class LabBrowserOrchestrator {
   }
 
   private isUserChromeBridgeAvailable(): boolean {
-    return macBridgeHub.isConnected();
+    return this.hub.isConnected();
   }
 
   private getSerializableState(): Partial<RunnerState> {
     return {
+      sessionId: this.sessionId,
       status: this.state.status === 'running_autonomous' ? 'paused' : this.state.status,
       executionMode: this.state.executionMode,
       labUrl: this.state.labUrl,
@@ -216,7 +272,9 @@ export class LabBrowserOrchestrator {
     if (!this.state.labUrl && this.state.tasks.length === 0) return;
     if (this.persistTimer) clearTimeout(this.persistTimer);
     this.persistTimer = setTimeout(() => {
-      this.saveStateManual(true).catch(() => {});
+      this.runInContext(() => {
+        this.saveStateManual(true).catch(() => {});
+      });
     }, 1200);
   }
 
@@ -227,12 +285,12 @@ export class LabBrowserOrchestrator {
   }> {
     const savedAt = new Date().toISOString();
     const serializable = this.getSerializableState();
-    let targetPath = LOCAL_STATE_FILE;
+    let targetPath = this.getLocalStateFilePath();
 
     try {
       fs.mkdirSync(LOCAL_STATE_DIR, { recursive: true });
       fs.writeFileSync(
-        LOCAL_STATE_FILE,
+        targetPath,
         JSON.stringify({ savedAt, state: serializable }, null, 2),
         'utf8'
       );
@@ -240,9 +298,9 @@ export class LabBrowserOrchestrator {
       // Ignore local write error in read-only environments
     }
 
-    if (macBridgeHub.isConnected()) {
+    if (this.hub.isConnected()) {
       try {
-        const res = await macBridgeHub.invoke<any>(
+        const res = await this.hub.invoke<any>(
           'save_state',
           { state: serializable },
           10000
@@ -270,17 +328,18 @@ export class LabBrowserOrchestrator {
     }
 
     let loadedPayload: any = null;
-    if (macBridgeHub.isConnected()) {
+    if (this.hub.isConnected()) {
       try {
-        loadedPayload = await macBridgeHub.invoke<any>('load_state', {}, 8000);
+        loadedPayload = await this.hub.invoke<any>('load_state', {}, 8000);
       } catch {
         // Fall through to local file
       }
     }
 
-    if (!loadedPayload && fs.existsSync(LOCAL_STATE_FILE)) {
+    const stateFilePath = this.getLocalStateFilePath();
+    if (!loadedPayload && fs.existsSync(stateFilePath)) {
       try {
-        loadedPayload = JSON.parse(fs.readFileSync(LOCAL_STATE_FILE, 'utf8'));
+        loadedPayload = JSON.parse(fs.readFileSync(stateFilePath, 'utf8'));
       } catch {
         // Ignore corrupt state file
       }
@@ -291,10 +350,11 @@ export class LabBrowserOrchestrator {
       return false;
     }
 
-    const connected = macBridgeHub.isConnected();
+    const connected = this.hub.isConnected();
     this.state = {
       ...this.state,
       ...saved,
+      sessionId: this.sessionId,
       availableChromeTabs: connected ? this.state.availableChromeTabs : [],
       activeModel: getActiveGeminiModel(),
       macBridgeConnected: connected,
@@ -1192,7 +1252,11 @@ export class LabBrowserOrchestrator {
     }
 
     try {
-      if (fs.existsSync(LOCAL_STATE_FILE)) {
+      const stateFilePath = this.getLocalStateFilePath();
+      if (fs.existsSync(stateFilePath)) {
+        fs.unlinkSync(stateFilePath);
+      }
+      if (fs.existsSync(LOCAL_STATE_FILE) && this.sessionId === 'default') {
         fs.unlinkSync(LOCAL_STATE_FILE);
       }
     } catch {
@@ -1202,6 +1266,7 @@ export class LabBrowserOrchestrator {
 
     this.state = {
       ...this.state,
+      sessionId: this.sessionId,
       status: 'idle',
       labUrl: '',
       labTitle: '',
@@ -2204,5 +2269,69 @@ export class LabBrowserOrchestrator {
   }
 }
 
-export const orchestrator = new LabBrowserOrchestrator();
+const sessionOrchestrators = new Map<string, LabBrowserOrchestrator>();
 
+function wrapOrchestratorInSessionContext(
+  instance: LabBrowserOrchestrator
+): LabBrowserOrchestrator {
+  return new Proxy(instance, {
+    get(target, prop, receiver) {
+      const val = Reflect.get(target, prop, receiver);
+      if (typeof val === 'function') {
+        return (...args: any[]) => target.runInContext(() => val.apply(target, args));
+      }
+      return val;
+    },
+  });
+}
+
+export function sanitizeSessionId(raw?: string | null): string {
+  const cleaned = String(raw || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, '')
+    .slice(0, 64);
+  return cleaned || 'default';
+}
+
+export function getSessionOrchestrator(rawSessionId?: string | null): LabBrowserOrchestrator {
+  const sessionId = sanitizeSessionId(rawSessionId);
+  let orch = sessionOrchestrators.get(sessionId);
+  if (!orch) {
+    const rawInstance = new LabBrowserOrchestrator(sessionId);
+    orch = wrapOrchestratorInSessionContext(rawInstance);
+    sessionOrchestrators.set(sessionId, orch);
+  } else {
+    tryClaimUnclaimedBridge(sessionId, orch.getBridgeHub());
+  }
+  return orch;
+}
+
+export function getSessionBridgeHub(rawSessionId?: string | null): MacBridgeHub {
+  return getSessionOrchestrator(rawSessionId).getBridgeHub();
+}
+
+export function listActiveSessions(): Array<{
+  sessionId: string;
+  status: RunnerStatus;
+  labTitle: string;
+  macBridgeConnected: boolean;
+}> {
+  const out: Array<{
+    sessionId: string;
+    status: RunnerStatus;
+    labTitle: string;
+    macBridgeConnected: boolean;
+  }> = [];
+  for (const [sessionId, orch] of sessionOrchestrators.entries()) {
+    const st = orch.getState();
+    out.push({
+      sessionId,
+      status: st.status,
+      labTitle: st.labTitle,
+      macBridgeConnected: Boolean(st.macBridgeConnected),
+    });
+  }
+  return out;
+}
+
+export const orchestrator = getSessionOrchestrator('default');

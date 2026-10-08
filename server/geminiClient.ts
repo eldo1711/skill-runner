@@ -12,6 +12,7 @@ import {
   LabTask,
   ModelGardenEntry,
 } from './types.js';
+import { sessionAsyncStorage } from './macBridgeHub.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -43,12 +44,20 @@ let cachedModelGarden: ModelGardenEntry[] = [
 ];
 
 export function getActiveGeminiModel(): string {
+  const ctx = sessionAsyncStorage.getStore();
+  if (ctx) {
+    return ctx.getActiveModel();
+  }
   return activeModel;
 }
 
 export function setActiveGeminiModel(modelId: string): string {
   const validIds = ['gemini-3.8-flash', 'gemini-3.1-pro-preview', 'claude-opus-5-5'];
   const normalized = String(modelId || '').trim();
+  const ctx = sessionAsyncStorage.getStore();
+  if (ctx) {
+    return ctx.setActiveModel(normalized);
+  }
   if (validIds.includes(normalized)) {
     activeModel = normalized;
   }

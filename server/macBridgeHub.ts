@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { WebSocket } from 'ws';
 
 interface PendingRpc {
@@ -7,15 +8,33 @@ interface PendingRpc {
   payload: string;
 }
 
-class MacBridgeHub {
+export interface SessionExecutionContext {
+  sessionId: string;
+  hub: MacBridgeHub;
+  getActiveModel: () => string;
+  setActiveModel: (modelId: string) => string;
+}
+
+export const sessionAsyncStorage = new AsyncLocalStorage<SessionExecutionContext>();
+
+export function getCurrentSessionId(): string {
+  return sessionAsyncStorage.getStore()?.sessionId || 'default';
+}
+
+export class MacBridgeHub {
+  public readonly sessionId: string;
   private client: WebSocket | null = null;
   private pending = new Map<string, PendingRpc>();
   private onTabsPushCallback: ((tabs: any[]) => void) | null = null;
   private onConnectionChangeCallback: ((connected: boolean) => void) | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
 
+  constructor(sessionId = 'default') {
+    this.sessionId = sessionId;
+  }
+
   public registerClient(ws: WebSocket) {
-    if (this.client && this.client.readyState === WebSocket.OPEN) {
+    if (this.client && this.client !== ws && this.client.readyState === WebSocket.OPEN) {
       try {
         this.client.send(JSON.stringify({ type: 'superseded' }));
         this.client.close(4001, 'Superseded by a newer Mac Bridge connection');
@@ -24,6 +43,15 @@ class MacBridgeHub {
       }
     }
     this.client = ws;
+
+    if (this.sessionId && this.sessionId !== 'default' && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({ type: 'assign_session', sessionId: this.sessionId }));
+      } catch {
+        // Ignore
+      }
+    }
+
     if (this.onConnectionChangeCallback) {
       this.onConnectionChangeCallback(true);
     }
@@ -137,7 +165,7 @@ class MacBridgeHub {
       }
     }
     if (!this.client || this.client.readyState !== WebSocket.OPEN) {
-      throw new Error('Mac Chrome Bridge is not connected.');
+      throw new Error('Mac Chrome Bridge is not connected for this session.');
     }
 
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -152,6 +180,113 @@ class MacBridgeHub {
       this.client!.send(payload);
     });
   }
+
+  public async call<T = any>(
+    method: string,
+    params: Record<string, any> = {},
+    timeoutMs = 25000
+  ): Promise<T> {
+    return this.invoke<T>(method, params, timeoutMs);
+  }
 }
 
-export const macBridgeHub = new MacBridgeHub();
+const defaultHub = new MacBridgeHub('default');
+let unclaimedBridgeSocket: WebSocket | null = null;
+let primaryClaimedSessionId: string | null = null;
+
+/**
+ * Holds or routes an incoming Mac Bridge WebSocket connection.
+ * - If the bridge specifies a `sessionId`, it binds directly to that session's `MacBridgeHub`.
+ * - If the bridge connects without a `sessionId` (e.g. a pre-existing local daemon), it binds to
+ *   `primaryClaimedSessionId` if already claimed, or waits in `unclaimedBridgeSocket` for the first
+ *   browser session to claim it. Once claimed, no other browser session can access it.
+ */
+export function routeIncomingBridgeSocket(
+  requestedSessionId: string | null,
+  ws: WebSocket,
+  getHubForSession: (sessionId: string) => MacBridgeHub
+) {
+  const cleanSessionId = (requestedSessionId || '').trim();
+  if (cleanSessionId && cleanSessionId !== 'default') {
+    if (!primaryClaimedSessionId) {
+      primaryClaimedSessionId = cleanSessionId;
+    }
+    const hub = getHubForSession(cleanSessionId);
+    hub.registerClient(ws);
+    return;
+  }
+
+  if (primaryClaimedSessionId) {
+    const hub = getHubForSession(primaryClaimedSessionId);
+    hub.registerClient(ws);
+    return;
+  }
+
+  if (unclaimedBridgeSocket && unclaimedBridgeSocket.readyState === WebSocket.OPEN) {
+    try {
+      unclaimedBridgeSocket.send(JSON.stringify({ type: 'superseded' }));
+      unclaimedBridgeSocket.close(4001, 'Superseded by newer unclaimed bridge');
+    } catch {
+      // Ignore
+    }
+  }
+  unclaimedBridgeSocket = ws;
+  ws.on('close', () => {
+    if (unclaimedBridgeSocket === ws) {
+      unclaimedBridgeSocket = null;
+    }
+  });
+}
+
+/**
+ * Allows the first active browser session to claim an unclaimed local Mac Bridge connection.
+ * Subsequent browser sessions opened by other users will NOT be able to claim or share that bridge.
+ */
+export function tryClaimUnclaimedBridge(sessionId: string, hub: MacBridgeHub): boolean {
+  if (!sessionId || sessionId === 'default') return false;
+  if (hub.isConnected()) return true;
+
+  if (!primaryClaimedSessionId) {
+    primaryClaimedSessionId = sessionId;
+  }
+
+  if (
+    primaryClaimedSessionId === sessionId &&
+    unclaimedBridgeSocket &&
+    unclaimedBridgeSocket.readyState === WebSocket.OPEN
+  ) {
+    const ws = unclaimedBridgeSocket;
+    unclaimedBridgeSocket = null;
+    hub.registerClient(ws);
+    return true;
+  }
+  return false;
+}
+
+function getActiveHub(): MacBridgeHub {
+  return sessionAsyncStorage.getStore()?.hub || defaultHub;
+}
+
+export const macBridgeHub = {
+  registerClient(ws: WebSocket) {
+    return getActiveHub().registerClient(ws);
+  },
+  onTabsPush(cb: (tabs: any[]) => void) {
+    return getActiveHub().onTabsPush(cb);
+  },
+  onConnectionChange(cb: (connected: boolean) => void) {
+    return getActiveHub().onConnectionChange(cb);
+  },
+  isConnected(): boolean {
+    return getActiveHub().isConnected();
+  },
+  shutdownClient(): boolean {
+    return getActiveHub().shutdownClient();
+  },
+  invoke<T = any>(method: string, params: Record<string, any> = {}, timeoutMs = 25000): Promise<T> {
+    return getActiveHub().invoke<T>(method, params, timeoutMs);
+  },
+  call<T = any>(method: string, params: Record<string, any> = {}, timeoutMs = 25000): Promise<T> {
+    return getActiveHub().call<T>(method, params, timeoutMs);
+  },
+};

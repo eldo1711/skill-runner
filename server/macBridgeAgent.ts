@@ -29,6 +29,11 @@ const cliUrlArg = process.argv
   .replace(/^http/i, 'ws')
   .replace(/\/$/, '');
 
+const cliSessionArg = process.argv
+  .find((a) => a.startsWith('--session='))
+  ?.slice('--session='.length)
+  .trim();
+
 const CLOUD_RUN_WS_URL =
   process.env.CLOUD_RUN_WS_URL ||
   (cliUrlArg ? (cliUrlArg.endsWith('/ws-bridge') ? cliUrlArg : `${cliUrlArg}/ws-bridge`) : '') ||
@@ -38,6 +43,7 @@ const SNAPSHOT_DIR = path.join(os.homedir(), '.cloud-skills-lab-runner');
 const SNAPSHOT_HTML_PATH = path.join(SNAPSHOT_DIR, 'live_lab_snapshot.html');
 const SNAPSHOT_FILES_DIR = path.join(SNAPSHOT_DIR, 'live_lab_snapshot_files');
 const STATE_FILE_PATH = path.join(SNAPSHOT_DIR, 'runner_state.json');
+const SESSION_ID_FILE = path.join(SNAPSHOT_DIR, 'session_id');
 
 const SSH_BIN_DIR = path.join(SNAPSHOT_DIR, 'ssh-bin');
 
@@ -1856,9 +1862,30 @@ async function pushTabsOnce() {
   }
 }
 
+function resolveEffectiveBridgeUrl() {
+  let savedSession = '';
+  try {
+    if (fs.existsSync(SESSION_ID_FILE)) {
+      savedSession = fs.readFileSync(SESSION_ID_FILE, 'utf8').trim();
+    }
+  } catch {}
+  const activeSession = (
+    cliSessionArg ||
+    process.env.SKILLS_RUNNER_SESSION_ID ||
+    savedSession ||
+    ''
+  ).trim();
+  if (activeSession && !CLOUD_RUN_WS_URL.includes('session=')) {
+    const sep = CLOUD_RUN_WS_URL.includes('?') ? '&' : '?';
+    return `${CLOUD_RUN_WS_URL}${sep}session=${encodeURIComponent(activeSession)}`;
+  }
+  return CLOUD_RUN_WS_URL;
+}
+
 async function connectBridge() {
   if (shuttingDown) return;
-  console.log(`🔗 Connecting On-Demand Mac Chrome Bridge to ${CLOUD_RUN_WS_URL}...`);
+  const targetWsUrl = resolveEffectiveBridgeUrl();
+  console.log(`🔗 Connecting On-Demand Mac Chrome Bridge to ${targetWsUrl}...`);
   console.log(
     `ℹ️  Passive Mode: Zero background polling (only runs when you click an action in the Skills Runner UI).`
   );
@@ -1866,7 +1893,7 @@ async function connectBridge() {
 
   const WSImpl =
     globalThis.WebSocket || (await import('ws').then((m) => m.default || m.WebSocket));
-  ws = new WSImpl(CLOUD_RUN_WS_URL);
+  ws = new WSImpl(targetWsUrl);
 
   const onOpen = async () => {
     console.log('✅ Mac Chrome Bridge connected to Cloud Run!');
@@ -1900,6 +1927,13 @@ async function connectBridge() {
         return;
       }
       if (msg.type === 'pong') {
+        return;
+      }
+      if (msg.type === 'assign_session' && msg.sessionId) {
+        try {
+          fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
+          fs.writeFileSync(SESSION_ID_FILE, String(msg.sessionId).trim(), 'utf8');
+        } catch {}
         return;
       }
 

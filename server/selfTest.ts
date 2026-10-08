@@ -13,6 +13,7 @@ import {
   inspectInteractiveElements,
   sendPromptToAntigravity,
 } from './pageInspector.js';
+import { getSessionOrchestrator, listActiveSessions } from './browserOrchestrator.js';
 
 async function runVerificationTests() {
   console.log('🧪 Running Skills Runner Verification Suite...');
@@ -622,6 +623,71 @@ async function runVerificationTests() {
     throw new Error('CEPF L300 Fine-Tune Open-Source Models fast-path synthesis failed.');
   }
   console.log('✓ Multi-checkpoint <ql-activity-tracking> parsing & CEPF L300 OSS Tuning fast-path verified.');
+
+  // 7. Verify Multi-Instance / Multi-Session Isolation
+  const sessAlpha = getSessionOrchestrator('test-session-alpha');
+  const sessBeta = getSessionOrchestrator('test-session-beta');
+
+  await sessAlpha.resetForNewLab({ endLabInChrome: false, closeIncognito: false });
+  await sessBeta.resetForNewLab({ endLabInChrome: false, closeIncognito: false });
+
+  sessAlpha.updateManualCredentials({
+    username: 'student-alpha@qwiklabs.net',
+    projectId: 'qwiklabs-gcp-alpha-111',
+  });
+  sessAlpha.setExecutionMode('step_by_step');
+  sessAlpha.selectModel('claude-opus-5-5');
+
+  sessBeta.updateManualCredentials({
+    username: 'student-beta@qwiklabs.net',
+    projectId: 'qwiklabs-gcp-beta-222',
+  });
+  sessBeta.setExecutionMode('autonomous');
+  sessBeta.selectModel('gemini-3.8-flash');
+
+  const alphaState = sessAlpha.getState();
+  const betaState = sessBeta.getState();
+
+  if (alphaState.sessionId !== 'test-session-alpha' || betaState.sessionId !== 'test-session-beta') {
+    throw new Error(
+      `Session IDs not isolated: alpha=${alphaState.sessionId}, beta=${betaState.sessionId}`
+    );
+  }
+  if (
+    alphaState.credentials.username !== 'student-alpha@qwiklabs.net' ||
+    betaState.credentials.username !== 'student-beta@qwiklabs.net' ||
+    alphaState.credentials.projectId !== 'qwiklabs-gcp-alpha-111' ||
+    betaState.credentials.projectId !== 'qwiklabs-gcp-beta-222'
+  ) {
+    throw new Error('Credentials leaked across concurrent sessions!');
+  }
+  if (alphaState.executionMode !== 'step_by_step' || betaState.executionMode !== 'autonomous') {
+    throw new Error('Execution mode leaked across concurrent sessions!');
+  }
+  if (alphaState.activeModel !== 'claude-opus-5-5' || betaState.activeModel !== 'gemini-3.8-flash') {
+    throw new Error(
+      `Model selection leaked across concurrent sessions: alpha=${alphaState.activeModel}, beta=${betaState.activeModel}`
+    );
+  }
+
+  // Resetting alpha must not affect beta
+  await sessAlpha.resetForNewLab({ endLabInChrome: false, closeIncognito: false });
+  if (
+    sessAlpha.getState().credentials.projectId !== '' ||
+    sessBeta.getState().credentials.projectId !== 'qwiklabs-gcp-beta-222'
+  ) {
+    throw new Error('Resetting session alpha unexpectedly mutated session beta!');
+  }
+  await sessBeta.resetForNewLab({ endLabInChrome: false, closeIncognito: false });
+
+  const activeList = listActiveSessions();
+  if (
+    !activeList.some((s) => s.sessionId === 'test-session-alpha') ||
+    !activeList.some((s) => s.sessionId === 'test-session-beta')
+  ) {
+    throw new Error('Expected listActiveSessions() to include both test sessions.');
+  }
+  console.log('✓ Multi-instance session isolation verified (independent state, credentials, models, and reset).');
 
   await browser.close();
   console.log('✅ All verification tests passed!');

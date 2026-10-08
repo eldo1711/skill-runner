@@ -152,6 +152,7 @@ export interface ModelGardenEntry {
 }
 
 export interface RunnerState {
+  sessionId?: string;
   status: RunnerStatus;
   executionMode: ExecutionMode;
   labUrl: string;

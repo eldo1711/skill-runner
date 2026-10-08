@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { ChromeTabDescriptor } from './types.js';
-import { macBridgeHub } from './macBridgeHub.js';
+import { getCurrentSessionId, macBridgeHub } from './macBridgeHub.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -17,9 +17,16 @@ export interface UserChromeTabInfo {
 }
 
 const SNAPSHOT_DIR = path.join(os.homedir(), '.cloud-skills-lab-runner');
-const SNAPSHOT_HTML_PATH = path.join(SNAPSHOT_DIR, 'live_lab_snapshot.html');
-const SNAPSHOT_FILES_DIR = path.join(SNAPSHOT_DIR, 'live_lab_snapshot_files');
 const SSH_BIN_DIR = path.join(SNAPSHOT_DIR, 'ssh-bin');
+
+function getSessionSnapshotPaths(): { htmlPath: string; filesDir: string } {
+  const sid = getCurrentSessionId().replace(/[^a-zA-Z0-9_-]/g, '_');
+  const suffix = sid && sid !== 'default' ? `_${sid}` : '';
+  return {
+    htmlPath: path.join(SNAPSHOT_DIR, `live_lab_snapshot${suffix}.html`),
+    filesDir: path.join(SNAPSHOT_DIR, `live_lab_snapshot${suffix}_files`),
+  };
+}
 
 function ensureCleanSshWrapperDir(): string {
   try {
@@ -219,6 +226,7 @@ export async function snapshotUserChromeTabByTarget(
 ): Promise<{ htmlPath: string; url: string; title: string } | null> {
   if (!macBridgeHub.isConnected()) return null;
   fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
+  const { htmlPath: SNAPSHOT_HTML_PATH, filesDir: SNAPSHOT_FILES_DIR } = getSessionSnapshotPaths();
 
   try {
     const remoteSnap = await macBridgeHub.invoke<{
@@ -368,6 +376,7 @@ export async function snapshotUserChromeLabTab(
   }
 
   fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
+  const { htmlPath: SNAPSHOT_HTML_PATH } = getSessionSnapshotPaths();
 
   if (macBridgeHub.isConnected()) {
     try {

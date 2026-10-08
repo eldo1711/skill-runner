@@ -63,7 +63,51 @@ const INITIAL_STATE: RunnerState = {
   macBridgeConnected: false,
 };
 
+function sanitizeClientSessionId(raw?: string | null): string {
+  const cleaned = String(raw || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, '')
+    .slice(0, 64);
+  return cleaned;
+}
+
+function generateClientSessionId(): string {
+  const rand = Math.random().toString(36).slice(2, 8);
+  const ts = Date.now().toString(36).slice(-4);
+  return `sr-${rand}${ts}`;
+}
+
+function getOrInitClientSessionId(): string {
+  if (typeof window === 'undefined') return 'default';
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const fromQuery = sanitizeClientSessionId(params.get('session'));
+    if (fromQuery) {
+      window.sessionStorage.setItem('skills_runner_tab_session_id', fromQuery);
+      return fromQuery;
+    }
+    const fromTab = sanitizeClientSessionId(
+      window.sessionStorage.getItem('skills_runner_tab_session_id')
+    );
+    if (fromTab) {
+      return fromTab;
+    }
+    let fromBrowser = sanitizeClientSessionId(
+      window.localStorage.getItem('skills_runner_session_id')
+    );
+    if (!fromBrowser) {
+      fromBrowser = generateClientSessionId();
+      window.localStorage.setItem('skills_runner_session_id', fromBrowser);
+    }
+    window.sessionStorage.setItem('skills_runner_tab_session_id', fromBrowser);
+    return fromBrowser;
+  } catch {
+    return generateClientSessionId();
+  }
+}
+
 export default function App() {
+  const [sessionId] = useState<string>(() => getOrInitClientSessionId());
   const [state, setState] = useState<RunnerState>(INITIAL_STATE);
   const [urlInput, setUrlInput] = useState<string>('');
   const [sourceMode, setSourceMode] = useState<'tab' | 'url'>('tab');
@@ -86,7 +130,10 @@ export default function App() {
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
 
   useEffect(() => {
-    fetch('/api/state')
+    const q = `session=${encodeURIComponent(sessionId)}`;
+    fetch(`/api/state?${q}`, {
+      headers: { 'X-Session-Id': sessionId },
+    })
       .then((r) => r.json())
       .then((data: RunnerState) => {
         setState(data);
@@ -94,7 +141,9 @@ export default function App() {
       })
       .catch(() => {});
 
-    fetch('/api/bridge/status')
+    fetch(`/api/bridge/status?${q}`, {
+      headers: { 'X-Session-Id': sessionId },
+    })
       .then((r) => r.json())
       .then((data) => {
         if (data && typeof data.canStartLocally === 'boolean') {
@@ -104,7 +153,7 @@ export default function App() {
       .catch(() => {});
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    const wsUrl = `${protocol}//${window.location.host}/ws?${q}`;
     let ws: WebSocket | null = null;
     let reconnectTimer: any = null;
 
@@ -130,7 +179,7 @@ export default function App() {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (ws) ws.close();
     };
-  }, []);
+  }, [sessionId]);
 
   useEffect(() => {
     if (!editingCreds) {
@@ -156,10 +205,15 @@ export default function App() {
   }, [state.activeTaskId, state.tasks.length]);
 
   const apiPost = async (path: string, body?: Record<string, any>) => {
-    const res = await fetch(path, {
+    const sep = path.includes('?') ? '&' : '?';
+    const url = `${path}${sep}session=${encodeURIComponent(sessionId)}`;
+    const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body || {}),
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Session-Id': sessionId,
+      },
+      body: JSON.stringify({ ...(body || {}), sessionId }),
     });
     try {
       const data = await res.json();
@@ -186,7 +240,10 @@ export default function App() {
       return;
     }
     try {
-      const res = await fetch('/api/bridge/status');
+      const res = await fetch(
+        `/api/bridge/status?session=${encodeURIComponent(sessionId)}`,
+        { headers: { 'X-Session-Id': sessionId } }
+      );
       const data = await res.json();
       if (data && typeof data.canStartLocally === 'boolean') {
         setCanStartLocally(data.canStartLocally);
@@ -209,12 +266,19 @@ export default function App() {
     await action();
   };
 
+  const bridgeStartScriptUrl = `${window.location.origin}/api/bridge/start.sh?session=${encodeURIComponent(
+    sessionId
+  )}`;
+  const bridgeDownloadUrl = `/api/bridge/Start-Mac-Chrome-Bridge.command?session=${encodeURIComponent(
+    sessionId
+  )}&download=1`;
+
   const handleStartMacBridge = async () => {
     setStartingBridge(true);
     try {
       const data = await apiPost('/api/bridge/start');
       if (!data?.started && !data?.state?.macBridgeConnected) {
-        const cmd = `curl -fsSL ${window.location.origin}/api/bridge/start.sh | sh`;
+        const cmd = `curl -fsSL "${bridgeStartScriptUrl}" | sh`;
         try {
           await navigator.clipboard.writeText(cmd);
           setCopiedField('bridge-oneliner');
@@ -224,7 +288,7 @@ export default function App() {
         }
       }
     } catch {
-      const cmd = `curl -fsSL ${window.location.origin}/api/bridge/start.sh | sh`;
+      const cmd = `curl -fsSL "${bridgeStartScriptUrl}" | sh`;
       try {
         await navigator.clipboard.writeText(cmd);
         setCopiedField('bridge-oneliner');
@@ -235,6 +299,11 @@ export default function App() {
     } finally {
       setStartingBridge(false);
     }
+  };
+
+  const handleOpenNewInstance = () => {
+    const newId = generateClientSessionId();
+    window.open(`${window.location.pathname}?session=${encodeURIComponent(newId)}`, '_blank');
   };
 
   const handleStopMacBridge = async () => {
@@ -596,6 +665,12 @@ export default function App() {
                   {state.activeModel || 'gemini-3.8-flash'}
                 </span>
                 <span
+                  className="px-2 py-0.5 text-[10px] font-mono rounded-full bg-slate-800/90 text-slate-300 border border-slate-700"
+                  title={`Isolated browser session ID: ${sessionId}`}
+                >
+                  Instance: {sessionId.slice(0, 11)}
+                </span>
+                <span
                   className={`px-2.5 py-0.5 text-[11px] font-mono font-semibold rounded-full border ${
                     state.status === 'completed'
                       ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
@@ -660,6 +735,16 @@ export default function App() {
                 {endingLab ? 'Resetting...' : 'New Lab / Reset'}
               </button>
             )}
+
+            <button
+              type="button"
+              onClick={handleOpenNewInstance}
+              className="px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition"
+              title="Open a separate isolated Skills Runner session in a new tab"
+            >
+              <ExternalLink className="w-3.5 h-3.5 text-cyan-400" />
+              New Instance
+            </button>
           </div>
         </div>
 
@@ -758,10 +843,10 @@ export default function App() {
                     )}
                   </button>
                   <a
-                    href="/api/bridge/Start-Mac-Chrome-Bridge.command?download=1"
+                    href={bridgeDownloadUrl}
                     download="Start-Mac-Chrome-Bridge.command"
                     className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium flex items-center gap-1 cursor-pointer transition"
-                    title="Download Start-Mac-Chrome-Bridge.command launcher"
+                    title="Download Start-Mac-Chrome-Bridge.command launcher bound to this session"
                   >
                     <Download className="w-3.5 h-3.5 text-cyan-400" />
                   </a>
