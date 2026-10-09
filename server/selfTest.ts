@@ -893,6 +893,23 @@ async function runVerificationTests() {
   ) {
     throw new Error('GENAI162 Task 5 fast-path synthesis missing expected verification commands');
   }
+  const genai162Task6Plan = await synthesizeTaskShellScript({
+    labTitle: parsedGenai162.labTitle,
+    task: parsedGenai162.tasks[3],
+    credentials: {
+      ...parsedGenai162.credentials,
+      projectId: 'qwiklabs-gcp-03-ac29abdc8fe1',
+      region: 'us-central1',
+    },
+  });
+  if (
+    !genai162Task6Plan?.script.includes('a2a-sdk[http-server]') ||
+    !genai162Task6Plan?.script.includes('import support_agent.fast_api_app') ||
+    !genai162Task6Plan?.script.includes('.deployment_metadata.lock') ||
+    genai162Task6Plan?.script.includes('uv init --bare')
+  ) {
+    throw new Error('GENAI162 Task 6 fast-path synthesis missing container dependency verification');
+  }
   await genai162Page.close();
   console.log('✓ GENAI162 task parsing, variable extraction, and deterministic fast-path verified.');
 

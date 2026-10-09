@@ -3593,7 +3593,15 @@ base_dir = os.path.expanduser("~/multiagent_systems")
 for target in [os.path.join(base_dir, ".env"), os.path.join(base_dir, "support_agent", ".env")]:
     with open(target, "w") as f:
         f.write(env_content)
-print(f"Configured .env with DATASTORE_ID={ds_id} MCP_SERVER_NAME={mcp_short}")
+
+agent_py = os.path.join(base_dir, "support_agent", "agent.py")
+if os.path.exists(agent_py):
+    with open(agent_py, "r") as f:
+        code = f.read()
+    code = code.replace("__DISCOVERED_MCP_SERVER_NAME__", mcp_short).replace("__DISCOVERED_DATASTORE_ID__", ds_id)
+    with open(agent_py, "w") as f:
+        f.write(code)
+print(f"Configured .env and agent.py with DATASTORE_ID={ds_id} MCP_SERVER_NAME={mcp_short}")
 PYEOF
 python3 /tmp/discover_ma_env.py
 
@@ -3769,13 +3777,13 @@ from .tools import find_similar_bugs, validate_tool_params
 
 # --- Config & Registry Initialization ---
 MODEL = os.environ.get("MODEL", "${maModelId}")
-MCP_SERVER_NAME = os.environ["MCP_SERVER_NAME"].split("/")[-1]
+MCP_SERVER_NAME = os.environ.get("MCP_SERVER_NAME", "__DISCOVERED_MCP_SERVER_NAME__").split("/")[-1]
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "${proj}")
 LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
 
 DATASTORE_LOCATION = os.environ.get("DATASTORE_LOCATION", "us")
 MCP_SERVER_LOCATION = os.environ.get("MCP_SERVER_LOCATION", "global")
-DATASTORE_ID = os.environ["DATASTORE_ID"].split("/")[-1]
+DATASTORE_ID = os.environ.get("DATASTORE_ID", "__DISCOVERED_DATASTORE_ID__").split("/")[-1]
 
 if not MCP_SERVER_NAME or "your-mcp" in MCP_SERVER_NAME.lower() or MCP_SERVER_NAME == "None":
     raise ValueError(
@@ -3879,9 +3887,19 @@ web_search_agent = Agent(
 
 
 # --- External MCP Knowledge Base Agent ---
-developer_kb_mcp = registry.get_mcp_toolset(
-    f"projects/{PROJECT_ID}/locations/{MCP_SERVER_LOCATION}/mcpServers/{MCP_SERVER_NAME}"
-)
+try:
+    developer_kb_mcp = registry.get_mcp_toolset(
+        f"projects/{PROJECT_ID}/locations/{MCP_SERVER_LOCATION}/mcpServers/{MCP_SERVER_NAME}"
+    )
+except Exception as _mcp_err:
+    print(f"[WARN] AgentRegistry lookup deferred ({_mcp_err}); using direct StreamableHTTPConnectionParams fallback.")
+    from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
+    from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
+    developer_kb_mcp = McpToolset(
+        connection_params=StreamableHTTPConnectionParams(
+            url="https://developerknowledge.googleapis.com/mcp"
+        )
+    )
 
 mcp_kb_agent = Agent(
     name="mcp_kb_agent",
@@ -3959,6 +3977,7 @@ app = App(
     root_agent=root_agent,
 )
 PYEOF
+python3 /tmp/discover_ma_env.py
 python3 -m py_compile "$HOME/multiagent_systems/support_agent/tools.py" "$HOME/multiagent_systems/support_agent/agent.py"`;
 
     if (
@@ -4261,14 +4280,23 @@ export PROJECT_ID="${proj}"
 export PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)")
 
 gcloud beta services identity create --service=aiplatform.googleapis.com --project="$PROJECT_ID" --quiet || true
-RE_SA="service-\${PROJECT_NUMBER}@gcp-sa-aiplatform-re.iam.gserviceaccount.com"
-DE_SA="service-\${PROJECT_NUMBER}@gcp-sa-discoveryengine.iam.gserviceaccount.com"
 
-for ROLE in "roles/agentregistry.viewer" "roles/discoveryengine.viewer" "roles/discoveryengine.user" "roles/bigquery.admin" "roles/aiplatform.user" "roles/serviceusage.serviceUsageConsumer"; do
-  gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:\${RE_SA}" --role="$ROLE" --condition=None --quiet >/dev/null 2>&1 || \\
-    gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:\${RE_SA}" --role="$ROLE" --quiet >/dev/null 2>&1 || true
-done
-gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:\${DE_SA}" --role="roles/aiplatform.user" --condition=None --quiet >/dev/null 2>&1 || true
+grant_re_iam_roles() {
+  local RE_SA="service-\${PROJECT_NUMBER}@gcp-sa-aiplatform-re.iam.gserviceaccount.com"
+  local AI_SA="service-\${PROJECT_NUMBER}@gcp-sa-aiplatform.iam.gserviceaccount.com"
+  local DE_SA="service-\${PROJECT_NUMBER}@gcp-sa-discoveryengine.iam.gserviceaccount.com"
+  local OK=0
+  for ROLE in "roles/agentregistry.viewer" "roles/discoveryengine.viewer" "roles/discoveryengine.user" "roles/bigquery.admin" "roles/aiplatform.user" "roles/serviceusage.serviceUsageConsumer"; do
+    if gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:\${RE_SA}" --role="$ROLE" --condition=None --quiet >/dev/null 2>&1 || \\
+       gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:\${RE_SA}" --role="$ROLE" --quiet >/dev/null 2>&1; then
+      OK=1
+    fi
+    gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:\${AI_SA}" --role="$ROLE" --condition=None --quiet >/dev/null 2>&1 || true
+  done
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:\${DE_SA}" --role="roles/aiplatform.user" --condition=None --quiet >/dev/null 2>&1 || true
+  return $((1 - OK))
+}
+grant_re_iam_roles || true
 
 cd "$HOME/multiagent_systems"
 uvx google-agents-cli setup < /dev/null || true
@@ -4278,25 +4306,53 @@ if [ -n "$AGENTS_BIN" ] && [ ! -f "$HOME/.local/bin/agents-cli" ]; then
   ln -sf "$AGENTS_BIN" "$HOME/.local/bin/agents-cli"
 fi
 
+run_agents_cli() {
+  if command -v agents-cli >/dev/null 2>&1; then
+    agents-cli "$@"
+  else
+    uvx --from google-agents-cli agents-cli "$@"
+  fi
+}
+
 # Back up our verified tools.py and agent.py before scaffolding so scaffold enhance never overwrites them
 cp "$HOME/multiagent_systems/support_agent/tools.py" /tmp/backup_support_tools.py
 cp "$HOME/multiagent_systems/support_agent/agent.py" /tmp/backup_support_agent.py
 
-if [ ! -d "$HOME/multiagent_systems/support_agent/app_utils" ]; then
-  agents-cli scaffold enhance support_agent --deployment-target agent_runtime < /dev/null || \\
-    uvx --from google-agents-cli agents-cli scaffold enhance support_agent --deployment-target agent_runtime < /dev/null
+if [ ! -f "$HOME/multiagent_systems/Dockerfile" ] || [ ! -f "$HOME/multiagent_systems/support_agent/fast_api_app.py" ]; then
+  if [ -f "$HOME/multiagent_systems/agents-cli-manifest.yaml" ]; then
+    sed -i "s/base_template: .*/base_template: 'adk'/" "$HOME/multiagent_systems/agents-cli-manifest.yaml" || true
+  fi
+  run_agents_cli scaffold enhance support_agent --deployment-target agent_runtime < /dev/null
+fi
+if [ -f "$HOME/multiagent_systems/agents-cli-manifest.yaml" ]; then
+  sed -i "s/base_template: .*/base_template: 'adk'/" "$HOME/multiagent_systems/agents-cli-manifest.yaml" || true
 fi
 
 cp /tmp/backup_support_tools.py "$HOME/multiagent_systems/support_agent/tools.py"
 cp /tmp/backup_support_agent.py "$HOME/multiagent_systems/support_agent/agent.py"
+python3 /tmp/discover_ma_env.py
 python3 -m py_compile "$HOME/multiagent_systems/support_agent/tools.py" "$HOME/multiagent_systems/support_agent/agent.py"
 
-rm -f pyproject.toml && uv init --bare && uv add -r support_agent/requirements.txt
-python3 /tmp/discover_ma_env.py
+# Keep all scaffold enhance container server dependencies (a2a-sdk, fast_api_app, etc.) and ensure agent dependencies are present
+uv add \\
+  "google-adk[bigquery-analytics,gcp,otel-gcp]>=2.9.2,<3.0.0" \\
+  "a2a-sdk[http-server]>=1.0,<2" \\
+  "opentelemetry-resourcedetector-gcp<=1.12.0a0" \\
+  "gcsfs>=2024.11.0" \\
+  "aiohttp>=3.13.4" \\
+  "google-cloud-logging>=3.12.0,<4.0.0" \\
+  "google-cloud-aiplatform[evaluation,agent-engines]>=1.156.0,<2.0.0" \\
+  "protobuf>=6.31.1,<7.0.0" \\
+  "google-cloud-bigquery" \\
+  "python-dotenv" \\
+  "google-genai"
 
-# Check if a healthy ReasoningEngine is already deployed (and clean up any failed ones)
+# Pre-flight verify that support_agent.fast_api_app:app imports cleanly inside the uv environment
+uv run python -c "import support_agent.fast_api_app; print('Verified container FastAPI app:', support_agent.fast_api_app.app)"
+
+# Check if a healthy ReasoningEngine is already deployed (wait for any in-progress one, and delete any failed ones)
 RE_ID=$(python3 - << 'PYEOF'
-import json, subprocess, time, urllib.request, urllib.error
+import json, os, subprocess, time, urllib.request, urllib.error
 
 proj = "${proj}"
 reg = "${maRegion}"
@@ -4319,25 +4375,59 @@ _, data = call("GET", f"{base}/reasoningEngines?pageSize=50")
 ready_name = ""
 for eng in data.get("reasoningEngines", []):
     name = eng.get("name", "")
-    _, ops_data = call("GET", f"{host}/{name}/operations")
-    failed = False
-    for op in ops_data.get("operations", []):
-        if op.get("done") and op.get("error"):
-            failed = True
+    for _ in range(24):
+        _, ops_data = call("GET", f"{host}/{name}/operations")
+        ops = ops_data.get("operations", [])
+        in_prog = [op for op in ops if not op.get("done")]
+        if not in_prog:
             break
+        time.sleep(15)
+    _, ops_data = call("GET", f"{host}/{name}/operations")
+    failed = any(op.get("done") and op.get("error") for op in ops_data.get("operations", []))
     if failed:
         call("DELETE", f"{host}/{name}?force=true")
     elif not ready_name:
         ready_name = name
+
+if not ready_name:
+    for lock_file in [".deployment_metadata.lock", "deployment_metadata.json"]:
+        p = os.path.expanduser(f"~/multiagent_systems/{lock_file}")
+        if os.path.exists(p):
+            try:
+                if lock_file.endswith(".json"):
+                    with open(p, "w") as f:
+                        f.write("{}")
+                else:
+                    os.remove(p)
+            except Exception:
+                pass
+
 print(ready_name)
 PYEOF
 )
 
 if [ -z "$RE_ID" ]; then
+  # Background IAM binder so service-PROJECT_NUMBER@gcp-sa-aiplatform-re receives roles immediately upon creation during CreateReasoningEngine
+  (
+    for _ in $(seq 1 36); do
+      if grant_re_iam_roles; then
+        break
+      fi
+      sleep 8
+    done
+  ) &
+  IAM_BG_PID=$!
   ENV_VARS=$(grep -v '^#' .env | grep -v '^$' | grep -v '^GOOGLE_CLOUD_PROJECT' | paste -sd, -)
-  agents-cli deploy --project="$PROJECT_ID" --region="${maRegion}" --update-env-vars "$ENV_VARS" < /dev/null || \\
-    uvx --from google-agents-cli agents-cli deploy --project="$PROJECT_ID" --region="${maRegion}" --update-env-vars "$ENV_VARS" < /dev/null
+  run_agents_cli deploy --project="$PROJECT_ID" --region="${maRegion}" --update-env-vars "$ENV_VARS" < /dev/null
+  kill "$IAM_BG_PID" >/dev/null 2>&1 || true
 fi
+
+for _ in $(seq 1 6); do
+  if grant_re_iam_roles; then
+    break
+  fi
+  sleep 3
+done
 
 cat << 'PYEOF' > /tmp/task6_publish_and_share.py
 import json, subprocess, time, urllib.request, urllib.error
@@ -4369,12 +4459,18 @@ def call(method, url, body=None):
         except Exception:
             return e.code, {}
 
-# 1. Discover the deployed ReasoningEngine resource path
-_, re_data = call("GET", f"https://{reg}-aiplatform.googleapis.com/v1beta1/projects/{proj}/locations/{reg}/reasoningEngines?pageSize=50")
-re_list = re_data.get("reasoningEngines", [])
-if not re_list:
-    raise SystemExit("ERROR: No deployed ReasoningEngine found in " + reg)
-re_name = re_list[0]["name"]
+# 1. Discover the deployed healthy ReasoningEngine resource path
+host = f"https://{reg}-aiplatform.googleapis.com/v1beta1"
+_, re_data = call("GET", f"{host}/projects/{proj}/locations/{reg}/reasoningEngines?pageSize=50")
+re_name = ""
+for eng in re_data.get("reasoningEngines", []):
+    cand = eng.get("name", "")
+    _, ops_data = call("GET", f"{host}/{cand}/operations")
+    if not any(op.get("done") and op.get("error") for op in ops_data.get("operations", [])):
+        re_name = cand
+        break
+if not re_name:
+    raise SystemExit("ERROR: No healthy deployed ReasoningEngine found in " + reg)
 if re_name.startswith(f"projects/{proj}/"):
     re_name = re_name.replace(f"projects/{proj}/", f"projects/{proj_num}/", 1)
 print("Discovered ReasoningEngine:", re_name)
@@ -4434,7 +4530,7 @@ python3 /tmp/task6_publish_and_share.py`;
       return {
         script,
         summary:
-          'Grant IAM roles to ReasoningEngine service agent, scaffold and deploy support_agent to Agent Runtime without overwriting agent.py/tools.py, publish DevSecOps Incident Triage System to Gemini Enterprise, and share with ALL_USERS.',
+          'Grant IAM roles to ReasoningEngine service agent, scaffold and deploy support_agent to Agent Runtime while preserving container FastAPI dependencies, publish DevSecOps Incident Triage System to Gemini Enterprise, and share with ALL_USERS.',
       };
     }
   }
@@ -4521,13 +4617,15 @@ ${combinedText}
     - Use regional endpoint \`https://modelarmor.<loc>.rep.googleapis.com/v1/projects/<project>/locations/<loc>/templates?templateId=<id>\` (e.g. \`us\`).
     - Attach templates to Gemini Enterprise Assistant via \`PATCH .../engines/<app_id>/assistants/default_assistant?updateMask=customerPolicy\` with \`customerPolicy.modelArmorConfig\` (\`userPromptTemplate\`, \`responseTemplate\`, \`failureMode: "FAIL_OPEN"\`).
 11. **Vertex AI Agent Runtime, ADK 2.0 Workflows & Agent Identity (\`vertexai.Client\` / \`agent_engines\` / \`agents-cli\`)**:
-    - **CRITICAL \`.env\` Loading & Python 3.12 \`find_dotenv()\` Crash Trap**:
+    - **CRITICAL \`.env\` Loading, \`agents-cli scaffold enhance\` Dependencies & Python 3.12 \`find_dotenv()\` Crash Trap**:
       1. NEVER call bare \`dotenv.load_dotenv()\` without an explicit path argument (in Cloud Shell's Python 3.12, bare \`dotenv.load_dotenv()\` calls \`find_dotenv()\`, which executes \`assert frame.f_back is not None\` and crashes with \`AssertionError\` when run from \`<stdin>\`). Always pass an explicit path: \`dotenv.load_dotenv(pathlib.Path(__file__).resolve().parent / ".env")\` and run verification scripts from a file (\`/tmp/verify_workflow.py\`) rather than \`<stdin>\`.
       2. When discovering \`MCP_SERVER_NAME\` from Agent Registry for \`developer_kb_mcp\` (\`developerknowledge.googleapis.com\`), filter specifically for \`displayName="developerknowledge.googleapis.com"\` (NEVER \`head -n 1\`, which returns \`agentregistry.googleapis.com\`), and strip the resource path to just the short ID (\`agentregistry-...\`) because \`agent.py\` already prepends \`projects/{PROJECT_ID}/locations/{MCP_SERVER_LOCATION}/mcpServers/\`.
       3. Never pipe to \`/dev/tty\` in non-interactive SSH (\`tee: /dev/tty: No such device or address\`).
-      4. Before running \`agents-cli scaffold enhance <pkg>\`, save backups of \`<pkg>/agent.py\` and \`<pkg>/tools.py\` and restore them immediately afterward so \`scaffold enhance\` never overwrites custom code.
-      5. When modifying \`# TODO\` comments in Python files, replace the ENTIRE comment line (e.g. \`# TODO Task 5: Define the Workflow Graph Edges.\`) rather than a prefix substring so trailing comment text never corrupts Python syntax.
-      6. When verifying an ADK 2.0 \`Workflow\` (e.g. Task 5 "Orchestrate and Verify the System"), ALWAYS call \`find_similar_bugs("<diagnostic_query>")\` directly first, run \`InMemoryRunner(agent=root_agent, app_name="support_agent")\` from a file \`/tmp/verify_workflow.py\`, AND launch \`adk web --port 8000\` in the background and submit the test queries via \`http://127.0.0.1:8000/run_sse\`.
+      4. Before running \`agents-cli scaffold enhance <pkg>\`, save backups of \`<pkg>/agent.py\` and \`<pkg>/tools.py\` and restore them immediately afterward so \`scaffold enhance\` never overwrites custom code. NEVER delete the \`pyproject.toml\` generated by \`agents-cli scaffold enhance\` with \`rm -f pyproject.toml && uv init --bare\` — the generated \`Dockerfile\` runs \`uv run uvicorn <pkg>.fast_api_app:app\`, which requires \`a2a-sdk[http-server]>=1.0,<2\`, \`google-adk[bigquery-analytics,gcp,otel-gcp]>=2.9.2,<3.0.0\`, and \`google-cloud-aiplatform[evaluation,agent-engines]>=1.156.0,<2.0.0\`. Instead, keep the scaffolded \`pyproject.toml\` and run \`uv add "google-cloud-bigquery" "python-dotenv" "google-genai"\`.
+      5. Never chain \`agents-cli deploy ... || uvx --from google-agents-cli agents-cli deploy ...\` with \`||\` (which triggers a duplicate 7-minute deployment if the first fails and leaves a locked \`deployment_metadata.json\`). Before calling \`agents-cli deploy\`, remove any stale \`.deployment_metadata.lock\` and reset \`deployment_metadata.json\` if no ReasoningEngine deployment LRO is currently running.
+      6. Because \`service-<project_number>@gcp-sa-aiplatform-re.iam.gserviceaccount.com\` is provisioned by Vertex AI when \`CreateReasoningEngine\` is first called, grant its IAM roles (\`roles/agentregistry.viewer\`, \`roles/discoveryengine.viewer\`, \`roles/bigquery.admin\`, \`roles/aiplatform.user\`, \`roles/serviceusage.serviceUsageConsumer\`) in a background loop during \`agents-cli deploy\` AND again after \`agents-cli deploy\` completes.
+      7. When modifying \`# TODO\` comments in Python files, replace the ENTIRE comment line (e.g. \`# TODO Task 5: Define the Workflow Graph Edges.\`) rather than a prefix substring so trailing comment text never corrupts Python syntax.
+      8. When verifying an ADK 2.0 \`Workflow\` (e.g. Task 5 "Orchestrate and Verify the System"), ALWAYS call \`find_similar_bugs("<diagnostic_query>")\` directly first, run \`InMemoryRunner(agent=root_agent, app_name="support_agent")\` from a file \`/tmp/verify_workflow.py\`, AND launch \`adk web --port 8000\` in the background and submit the test queries via \`http://127.0.0.1:8000/run_sse\`.
     - **CRITICAL Dependency Version Compatibility for \`AdkApp\` on Agent Runtime**: Google Cloud Shell pre-installs \`google-cloud-aiplatform==1.165.1\` alongside an older \`google-adk==1.14.1\`. Because \`google-cloud-aiplatform>=1.165.1\` passes \`auto_create_session=True\` to \`google.adk.runners.Runner()\`, deploying with \`google-adk<1.30.0\` causes the ReasoningEngine container to crash at startup with \`TypeError: Runner.__init__() got an unexpected keyword argument 'auto_create_session'\`. Always upgrade BOTH packages (\`pip install --upgrade "google-cloud-aiplatform[agent_engines,adk]" "google-adk>=1.30.0" cloudpickle pydantic\`) before calling \`agent_engines.create(...)\` and pin the exact upgraded versions in \`requirements=[...]\`.
     - In \`config\` passed to \`client.agent_engines.create(agent=..., config=config)\`, \`"identity_type"\` MUST be the enum \`types.IdentityType.AGENT_IDENTITY\` (NEVER a list \`[types.IdentityType.AGENT_IDENTITY]\`). Many starter \`deploy.py\` files use bracketed placeholders like \`"identity_type": [IDENTITY_TYPE]\` — always replace the entire \`[IDENTITY_TYPE]\` including its brackets with \`types.IdentityType.AGENT_IDENTITY\`.
     - \`ae.api_resource\` returned by \`client.agent_engines.list()\` is a Pydantic v2 \`BaseModel\` (\`ae.api_resource.model_dump()\`), NOT a protobuf message (never call \`google.protobuf.json_format.MessageToDict(ae.api_resource)\`).
