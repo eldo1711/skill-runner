@@ -820,6 +820,82 @@ async function runVerificationTests() {
   await coursePage.close();
   console.log('✓ Course DOM parsing (<ql-contents-menu>, <ql-quiz>) and Quiz solver verified.');
 
+  // 14. Verify GENAI162 pre-Task-1 overview filtering, code-block variable extraction, and fast-path synthesis
+  console.log(
+    '[14/14] Verifying GENAI162 pre-Task-1 overview filtering and deterministic multi-agent synthesis...'
+  );
+  const genai162Page = await browser.newPage();
+  await genai162Page.setContent(`
+    <!DOCTYPE html>
+    <html>
+      <body>
+        <ql-lab-control-panel></ql-lab-control-panel>
+        <div class="js-lab-content-body">
+          <h1>Build and Deploy Multi-Agent ADK Systems to Gemini Enterprise</h1>
+          <h2>ADK 2.0 Graph Workflows and Orchestration</h2>
+          <ul>
+            <li><strong>Workflows:</strong> Graph-based orchestration in ADK 2.0.</li>
+          </ul>
+          <h2>Task 1. Install ADK and set up your environment</h2>
+          <ol>
+            <li>Download starter code: <ql-code-block language="bash"><pre>gcloud storage cp -r gs://qwiklabs-gcp-03-ac29abdc8fe1-bucket/multiagent_systems ~/</pre></ql-code-block></li>
+          </ol>
+          <h2>Task 2. Scaffold Prerequisite Cloud Resources</h2>
+          <ol>
+            <li>Create datastore: <ql-code-block language="bash"><pre>curl "https://us-discoveryengine.googleapis.com/v1/projects/qwiklabs-gcp-03-ac29abdc8fe1/locations/us/collections/default_collection/dataStores?dataStoreId=cymbal-search-ds_ohwx9wh4tlbtp"</pre></ql-code-block></li>
+            <li>Create app: <ql-code-block language="bash"><pre>curl "https://us-discoveryengine.googleapis.com/v1/projects/qwiklabs-gcp-03-ac29abdc8fe1/locations/us/collections/default_collection/engines?engineId=cymbal-enterprise-app_7icr2i6jiuept"</pre></ql-code-block></li>
+          </ol>
+          <ql-activity-tracking step="1" labinstanceid="175115534"></ql-activity-tracking>
+          <h2>Task 5. Orchestrate and Verify the System</h2>
+          <ol>
+            <li>Start ADK web: <ql-code-block language="bash"><pre>adk web --allow_origins "regex:https://.*\\.cloudshell\\.dev"</pre></ql-code-block></li>
+          </ol>
+          <ql-activity-tracking step="2" labinstanceid="175115534"></ql-activity-tracking>
+          <h2>Task 6. Deploy and Share in Gemini Enterprise</h2>
+          <ol>
+            <li>Deploy: <ql-code-block language="bash"><pre>agents-cli deploy --project=qwiklabs-gcp-03-ac29abdc8fe1 --region=us-central1</pre></ql-code-block></li>
+          </ol>
+          <ql-activity-tracking step="3" labinstanceid="175115534"></ql-activity-tracking>
+        </div>
+      </body>
+    </html>
+  `);
+  const parsedGenai162 = await parseLabPageDom(genai162Page);
+  if (parsedGenai162.tasks.length !== 4) {
+    throw new Error(
+      `Expected 4 actionable tasks (with pre-Task-1 overview filtered out), got ${parsedGenai162.tasks.length}`
+    );
+  }
+  if (!parsedGenai162.tasks[0].title.startsWith('Task 1.')) {
+    throw new Error(`Expected Task #1 to be Task 1, got "${parsedGenai162.tasks[0].title}"`);
+  }
+  if (
+    parsedGenai162.credentials.extraVars?.['project_0.startup_script.engine_id'] !==
+    'cymbal-enterprise-app_7icr2i6jiuept'
+  ) {
+    throw new Error(
+      `Expected engine_id cymbal-enterprise-app_7icr2i6jiuept, got ${parsedGenai162.credentials.extraVars?.['project_0.startup_script.engine_id']}`
+    );
+  }
+  const genai162Task5Plan = await synthesizeTaskShellScript({
+    labTitle: parsedGenai162.labTitle,
+    task: parsedGenai162.tasks[2],
+    credentials: {
+      ...parsedGenai162.credentials,
+      projectId: 'qwiklabs-gcp-03-ac29abdc8fe1',
+      region: 'us-central1',
+    },
+  });
+  if (
+    !genai162Task5Plan?.script.includes('developerknowledge') ||
+    !genai162Task5Plan?.script.includes('verify_workflow.py') ||
+    genai162Task5Plan?.script.includes('/dev/tty')
+  ) {
+    throw new Error('GENAI162 Task 5 fast-path synthesis missing expected verification commands');
+  }
+  await genai162Page.close();
+  console.log('✓ GENAI162 task parsing, variable extraction, and deterministic fast-path verified.');
+
   await browser.close();
   console.log('✅ All verification tests passed!');
 }

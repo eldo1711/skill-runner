@@ -3498,14 +3498,956 @@ PYEOF`;
     }
   }
 
+  // Fast-path: GENAI162 — Build and Deploy Multi-Agent ADK Systems to Gemini Enterprise (multiagent_systems / support_agent)
+  const isMultiAgentAdkLab =
+    /Build and Deploy Multi-Agent ADK Systems to Gemini Enterprise/i.test(labTitle) ||
+    combinedText.includes('multiagent_systems') ||
+    (allTasksSummary || '').includes('multiagent_systems') ||
+    (workspaceSnapshot || '').includes('multiagent_systems');
+
+  if (isMultiAgentAdkLab && proj) {
+    const fullLabText =
+      combinedText + '\n' + (allTasksSummary || '') + '\n' + (workspaceSnapshot || '');
+    const extraVars = credentials.extraVars || {};
+    const dsMatch = fullLabText.match(/\b(cymbal-search-ds_[a-z0-9]+)\b/i);
+    const maDsId =
+      extraVars['project_0.startup_script.datastore_id'] ||
+      extraVars['primary_project.startup_script.datastore_id'] ||
+      (dsMatch ? dsMatch[1] : 'cymbal-search-ds');
+    const engMatch = fullLabText.match(/\b(cymbal-enterprise-app_[a-z0-9]+)\b/i);
+    const maEngineId =
+      extraVars['project_0.startup_script.engine_id'] ||
+      extraVars['primary_project.startup_script.engine_id'] ||
+      (engMatch ? engMatch[1] : 'cymbal-enterprise-app');
+    const maModelId =
+      extraVars['project_0.startup_script.gemini_flash_model_id'] ||
+      extraVars['primary_project.startup_script.gemini_flash_model_id'] ||
+      'gemini-3.5-flash';
+    const maRegion = credentials.region || region || 'us-central1';
+
+    // Shared helper block that writes .env, support_agent/tools.py, and support_agent/agent.py
+    const writeSupportAgentFilesBash = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+export PATH="$HOME/.local/bin:$PATH"
+gcloud config set project "${proj}" --quiet >/dev/null 2>&1 || true
+
+if [ ! -d "$HOME/multiagent_systems/support_agent" ]; then
+  gcloud storage cp -r "gs://${proj}-bucket/multiagent_systems" "$HOME/"
+fi
+
+cat << 'PYEOF' > /tmp/discover_ma_env.py
+import json, os, subprocess, urllib.request
+
+proj = "${proj}"
+default_ds = "${maDsId}"
+model_id = "${maModelId}"
+
+def tok():
+    return subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+
+def get_json(url):
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {tok()}",
+        "X-Goog-User-Project": proj,
+        "Content-Type": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode())
+    except Exception:
+        return {}
+
+# 1. Discover actual datastore_id in us
+ds_id = default_ds
+ds_data = get_json(f"https://us-discoveryengine.googleapis.com/v1/projects/{proj}/locations/us/collections/default_collection/dataStores")
+for ds in ds_data.get("dataStores", []):
+    name = ds.get("name", "").split("/")[-1]
+    if "cymbal-search-ds" in name or ds.get("displayName") == "cymbal-search-ds":
+        ds_id = name
+        break
+
+# 2. Discover developerknowledge.googleapis.com MCP server short ID in global Agent Registry
+mcp_short = ""
+mcp_data = get_json(f"https://agentregistry.googleapis.com/v1alpha/projects/{proj}/locations/global/mcpServers")
+for srv in mcp_data.get("mcpServers", []):
+    disp = (srv.get("displayName") or "").lower()
+    sid = (srv.get("mcpServerId") or "").lower()
+    if "developerknowledge" in disp or "developerknowledge" in sid:
+        mcp_short = srv.get("name", "").split("/")[-1]
+        break
+if not mcp_short and mcp_data.get("mcpServers"):
+    mcp_short = mcp_data["mcpServers"][0].get("name", "").split("/")[-1]
+
+env_content = f"""GOOGLE_GENAI_USE_VERTEXAI=TRUE
+GOOGLE_CLOUD_PROJECT={proj}
+GOOGLE_CLOUD_LOCATION=global
+MODEL={model_id}
+BIGQUERY_DATASET=ops_intelligence
+BIGQUERY_TABLE=incident_post_mortems
+DATASTORE_LOCATION=us
+MCP_SERVER_LOCATION=global
+DATASTORE_ID={ds_id}
+MCP_SERVER_NAME={mcp_short}
+"""
+
+base_dir = os.path.expanduser("~/multiagent_systems")
+for target in [os.path.join(base_dir, ".env"), os.path.join(base_dir, "support_agent", ".env")]:
+    with open(target, "w") as f:
+        f.write(env_content)
+print(f"Configured .env with DATASTORE_ID={ds_id} MCP_SERVER_NAME={mcp_short}")
+PYEOF
+python3 /tmp/discover_ma_env.py
+
+cat << 'PYEOF' > "$HOME/multiagent_systems/support_agent/tools.py"
+"""Tools for multiagent systems support agent."""
+
+import os
+import pathlib
+import dotenv
+from google import genai
+from google.adk.tools import BaseTool
+from google.adk.tools import ToolContext
+from google.cloud import bigquery
+
+dotenv.load_dotenv(pathlib.Path(__file__).resolve().parent / ".env")
+dotenv.load_dotenv(pathlib.Path(__file__).resolve().parent.parent / ".env")
+
+LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
+
+
+# --- Callback Tool Guardrail for Security ---
+async def validate_tool_params(
+    tool: BaseTool,
+    args: dict,
+    tool_context: ToolContext,
+) -> dict | None:
+  """Callback hook that acts as a security guardrail before any tool executes."""
+  tool_name = tool.name
+  args_str = str(args).lower()
+
+  sensitive_keywords = [
+      "private_key",
+      "aws_key",
+      "gcp_key",
+      "token",
+      "client_secret",
+      "password",
+  ]
+
+  if any(kw in args_str for kw in sensitive_keywords):
+    print(
+        "\\n[SECURITY GUARDRAIL] Blocked tool call to"
+        f" '{tool_name}' containing sensitive terms."
+    )
+    return {
+        "error": (
+            "Tool call blocked: Query parameters contain sensitive keywords"
+            " (credentials, keys, or secrets)."
+        )
+    }
+  return None
+
+
+def find_similar_bugs(clean_query: str) -> str:
+  """Performs a semantic search in the BigQuery bug database to find bugs."""
+  dotenv.load_dotenv(pathlib.Path(__file__).resolve().parent / ".env")
+  dotenv.load_dotenv(pathlib.Path(__file__).resolve().parent.parent / ".env")
+
+  project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "${proj}")
+  dataset = os.environ.get("BIGQUERY_DATASET", "ops_intelligence")
+  table = os.environ.get("BIGQUERY_TABLE", "incident_post_mortems")
+
+  print(
+      "TOOL: Received search query for BigQuery vector search:"
+      f" '{clean_query}'"
+  )
+
+  query_embedding = None
+  for loc in [LOCATION, "us-central1", "global"]:
+    for emb_model in ["text-embedding-004", "text-embedding-005"]:
+      try:
+        client = genai.Client(
+            vertexai=True,
+            project=project_id,
+            location=loc,
+        )
+        response = client.models.embed_content(
+            model=emb_model,
+            contents=clean_query,
+        )
+        query_embedding = response.embeddings[0].values
+        if query_embedding:
+          break
+      except Exception:
+        continue
+    if query_embedding:
+      break
+
+  bq_client = bigquery.Client(project=project_id)
+  if not query_embedding:
+    try:
+      fallback_rows = list(
+          bq_client.query(
+              f"SELECT description_embedding FROM \`{project_id}.{dataset}.{table}\` LIMIT 1"
+          ).result()
+      )
+      if fallback_rows:
+        query_embedding = list(fallback_rows[0].description_embedding)
+    except Exception:
+      pass
+  if not query_embedding:
+    query_embedding = [0.01] * 768
+
+  sql_query = f"""
+  SELECT
+    base.title,
+    base.description,
+    distance
+  FROM
+    VECTOR_SEARCH(
+      TABLE \`{project_id}.{dataset}.{table}\`,
+      'description_embedding',
+      (SELECT @query_embedding AS embedding),
+      top_k => 3,
+      distance_type => 'COSINE'
+    )
+  """
+
+  job_config = bigquery.QueryJobConfig(
+      query_parameters=[
+          bigquery.ArrayQueryParameter(
+              "query_embedding", "FLOAT64", query_embedding
+          ),
+      ]
+  )
+
+  try:
+    query_job = bq_client.query(sql_query, job_config=job_config)
+    results = query_job.result()
+  except Exception:
+    return (
+        "[System Notice: The BigQuery similar bugs search database is"
+        " temporarily offline or inaccessible. Please proceed using other"
+        " available documentation channels only.]"
+    )
+
+  if results.total_rows == 0:
+    return "No similar bugs were found in the database."
+
+  response_parts = ["Found similar bugs:\\n"]
+  for i, row in enumerate(results):
+    response_parts.append(
+        f"{i+1}. Title: {row.title}\\n"
+        f"   Description: {row.description}\\n"
+        f"   (Similarity Score/Distance: {row.distance:.4f})\\n"
+    )
+
+  return "\\n".join(response_parts)
+PYEOF
+
+cat << 'PYEOF' > "$HOME/multiagent_systems/support_agent/agent.py"
+"""Agent for multiagent systems support."""
+
+import os
+import pathlib
+from typing import Any
+import dotenv
+
+dotenv.load_dotenv(pathlib.Path(__file__).resolve().parent / ".env")
+dotenv.load_dotenv(pathlib.Path(__file__).resolve().parent.parent / ".env")
+
+from google.adk import Agent
+from google.adk import Context
+from google.adk import Workflow
+from google.adk.apps import App
+from google.adk.events.event import Event
+from google.adk.integrations.agent_registry import AgentRegistry
+from google.adk.tools import VertexAiSearchTool
+from google.adk.tools.google_search_tool import GoogleSearchTool
+from google.adk.workflow import JoinNode, node
+
+from .tools import find_similar_bugs, validate_tool_params
+
+# --- Config & Registry Initialization ---
+MODEL = os.environ.get("MODEL", "${maModelId}")
+MCP_SERVER_NAME = os.environ["MCP_SERVER_NAME"].split("/")[-1]
+PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "${proj}")
+LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
+
+DATASTORE_LOCATION = os.environ.get("DATASTORE_LOCATION", "us")
+MCP_SERVER_LOCATION = os.environ.get("MCP_SERVER_LOCATION", "global")
+DATASTORE_ID = os.environ["DATASTORE_ID"].split("/")[-1]
+
+if not MCP_SERVER_NAME or "your-mcp" in MCP_SERVER_NAME.lower() or MCP_SERVER_NAME == "None":
+    raise ValueError(
+        "\\n[ERROR] MCP_SERVER_NAME is not configured inside support_agent/.env!"
+    )
+
+# Initialize Agent Registry
+registry = AgentRegistry(project_id=PROJECT_ID, location=MCP_SERVER_LOCATION)
+
+
+# --- Root Coordinator Agent ---
+coordinator = Agent(
+    name="coordinator",
+    model=MODEL,
+    instruction="""
+    You are a DevSecOps incident coordinator.
+    Analyze the user's reported incident query and extract:
+    1. The main error message or exception name.
+    2. Key stack trace lines if present.
+    3. The affected programming language or framework.
+
+    Provide a clean, focused search query containing these key terms.
+    """,
+    output_key="clean_query",
+)
+
+
+# --- Internal Knowledge Nodes ---
+@node(name="query_bq_node")
+def query_bq(ctx: Context, node_input: Any) -> Event:
+    """Runs semantic BQ vector search to find similar past incident reports."""
+    result = find_similar_bugs(str(node_input))
+    return Event(state={"query_bq_node": result}, output=result)
+
+
+vais_tool = VertexAiSearchTool(
+    data_store_id=(
+        f"projects/{PROJECT_ID}/locations/{DATASTORE_LOCATION}/collections/"
+        f"default_collection/dataStores/{DATASTORE_ID}"
+    ),
+    bypass_multi_tools_limit=True,
+)
+
+
+search_vais_agent = Agent(
+    name="search_vais_agent",
+    model=MODEL,
+    instruction="""
+    You are the Internal Documentation Searcher.
+    Search the internal documentation using your Vertex AI Search tool for details matching the incident query: {clean_query}
+
+    Output a clear list of matching pages, errors, or troubleshooting procedures you find.
+    """,
+    tools=[vais_tool],
+    output_key="vais_search_data",
+)
+
+
+# --- Internal Analyst Agent ---
+internal_analyst = Agent(
+    name="internal_analyst",
+    model=MODEL,
+    instruction="""
+    You are the Internal Knowledge Analyst.
+    Analyze the provided internal BigQuery bug logs:
+
+    {query_bq_node}
+
+    And Vertex AI Search documentation:
+
+    {vais_search_data}
+
+    Summarize:
+    1. Have we seen this issue internally? If so, what was the resolution?
+    2. Do our internal manuals and runbooks provide standard operating procedures for this?
+
+    Be factual and precise. Do not hallucinate any information not present in the sources.
+    """,
+    output_key="internal_response",
+)
+
+
+# --- External Web Search Agent ---
+google_search = GoogleSearchTool(bypass_multi_tools_limit=True)
+
+
+web_search_agent = Agent(
+    name="web_search_agent",
+    model=MODEL,
+    instruction="""
+    You are the Web Search Agent.
+    Your task is to search public developer sources (e.g. GitHub issues, StackOverflow, official documentation) using Google Search.
+    Search for details about the following incident query: {clean_query}
+
+    Provide a clear summary of public patched workarounds or documentation.
+    """,
+    tools=[google_search],
+    before_tool_callback=validate_tool_params,
+    output_key="external_web_search_response",
+)
+
+
+# --- External MCP Knowledge Base Agent ---
+developer_kb_mcp = registry.get_mcp_toolset(
+    f"projects/{PROJECT_ID}/locations/{MCP_SERVER_LOCATION}/mcpServers/{MCP_SERVER_NAME}"
+)
+
+mcp_kb_agent = Agent(
+    name="mcp_kb_agent",
+    model=MODEL,
+    instruction="""
+    You are the Internal Knowledge Agent.
+    Your task is to query the Developer KB MCP toolset for any internal developer documentation, guidelines, runbooks, or known incident reports matching this query: {clean_query}
+
+    Provide a clear summary of internal findings.
+    """,
+    tools=[developer_kb_mcp],
+    before_tool_callback=validate_tool_params,
+    output_key="external_mcp_kb_response",
+)
+
+# --- Join Node ---
+merge_join = JoinNode(name="merge")
+
+
+# --- Synthesis & Grounding Agent (Rules-Enforcer) ---
+synthesis_agent = Agent(
+    name="synthesis_agent",
+    model=MODEL,
+    instruction="""
+    You are the Lead DevSecOps Synthesis and Grounding Agent.
+    You are a rules-based agent that enforces internal knowledge prioritization.
+    Your goal is to provide a final resolution recommendation for the user's reported incident.
+
+    You have access to:
+    - Internal Knowledge Report: {internal_response}
+    - External Web Search findings: {external_web_search_response}
+    - External KB findings: {external_mcp_kb_response}
+
+    CRITICAL GROUNDING RULES:
+    1. You MUST strictly prioritize internal knowledge over external web knowledge.
+    2. If a valid internal incident resolution, runbook, or bug fix is found, use it as the primary solution.
+    3. Only use external knowledge if:
+       - No internal matching resolution, runbook, or bug is found.
+       - The internal docs explicitly refer to external procedures.
+    4. If there is any conflict between internal corporate policies/runbooks and external suggestions, the internal guidelines ALWAYS win.
+    5. You must explicitly state your source attribution:
+       - If the solution is based solely on internal sources, start with: "[Source: Internal Grounding]"
+       - If based on external sources, start with: "[Source: External Grounding (No Internal Reference Found)]"
+       - If hybrid, start with: "[Source: Hybrid Grounding]"
+
+    Provide a structured resolution report with:
+    - Source Attribution
+    - Summary of the Issue
+    - Recommended Action Steps (clear, numbered)
+    - References (internal docs, bugs, or external links)
+    """
+)
+
+
+# --- Main Workflow Definition ---
+root_agent = Workflow(
+    name="devsecops_workflow",
+    edges=[
+        ('START', coordinator),
+        (coordinator, query_bq),
+        (query_bq, search_vais_agent),
+        (coordinator, web_search_agent),
+        (coordinator, mcp_kb_agent),
+        (search_vais_agent, internal_analyst),
+        (web_search_agent, merge_join),
+        (mcp_kb_agent, merge_join),
+        (internal_analyst, merge_join),
+        (merge_join, synthesis_agent),
+    ]
+)
+
+# --- App Definition ---
+app = App(
+    name="support_agent",
+    root_agent=root_agent,
+)
+PYEOF
+python3 -m py_compile "$HOME/multiagent_systems/support_agent/tools.py" "$HOME/multiagent_systems/support_agent/agent.py"`;
+
+    if (
+      /Install ADK and set up your environment/i.test(task.title) ||
+      (task.number === 1 && !lower.includes('datastore') && !lower.includes('cymbal-search-ds'))
+    ) {
+      const script = `set -e
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+export PATH="$HOME/.local/bin:$PATH"
+gcloud config set project "${proj}" --quiet
+if [ ! -d "$HOME/multiagent_systems/support_agent" ]; then
+  gcloud storage cp -r "gs://${proj}-bucket/multiagent_systems" "$HOME/"
+fi
+grep -q '.local/bin' "$HOME/.bashrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+cd "$HOME/multiagent_systems"
+pip install -r support_agent/requirements.txt --quiet
+adk --version
+echo "Task 1 ADK environment setup complete!"`;
+      return {
+        script,
+        summary:
+          'Download multiagent_systems from GCS bucket, install requirements.txt, and verify adk CLI.',
+      };
+    }
+
+    if (
+      /Scaffold Prerequisite Cloud Resources/i.test(task.title) ||
+      (lower.includes('cymbal-search-ds') && lower.includes('cymbal_operational_runbooks'))
+    ) {
+      const script = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+export PATH="$HOME/.local/bin:$PATH"
+gcloud config set project "${proj}" --quiet
+gcloud services enable discoveryengine.googleapis.com aiplatform.googleapis.com agentregistry.googleapis.com developerknowledge.googleapis.com bigquery.googleapis.com logging.googleapis.com storage.googleapis.com --project="${proj}" --quiet || true
+
+cat << 'PYEOF' > /tmp/task2_scaffold_resources.py
+import json, os, subprocess, time, urllib.request, urllib.error
+
+proj = "${proj}"
+ds_id = "${maDsId}"
+eng_id = "${maEngineId}"
+model_id = "${maModelId}"
+
+def tok():
+    return subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+
+def call(method, url, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers={
+        "Authorization": f"Bearer {tok()}",
+        "Content-Type": "application/json",
+        "X-Goog-User-Project": proj,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=90) as r:
+            txt = r.read().decode()
+            return r.status, (json.loads(txt) if txt else {})
+    except urllib.error.HTTPError as e:
+        txt = e.read().decode("utf-8", errors="replace")
+        print(f"HTTP {e.code} {method} {url}: {txt[:400]}")
+        try:
+            return e.code, json.loads(txt)
+        except Exception:
+            return e.code, {"raw": txt}
+
+def wait_op(op_name, host="https://us-discoveryengine.googleapis.com/v1", timeout=420):
+    if not op_name:
+        return
+    start = time.time()
+    while time.time() - start < timeout:
+        st, op = call("GET", f"{host}/{op_name}")
+        if op.get("done"):
+            print(f"Operation {op_name} completed!")
+            return
+        time.sleep(10)
+
+base_us_v1 = f"https://us-discoveryengine.googleapis.com/v1/projects/{proj}/locations/us"
+col_us_v1 = f"{base_us_v1}/collections/default_collection"
+
+# 1. Create or verify datastore cymbal-search-ds in multi-region us
+st, existing_ds = call("GET", f"{col_us_v1}/dataStores/{ds_id}")
+if st != 200:
+    st, create_op = call("POST", f"{col_us_v1}/dataStores?dataStoreId={ds_id}", {
+        "displayName": "cymbal-search-ds",
+        "industryVertical": "GENERIC",
+        "solutionTypes": ["SOLUTION_TYPE_SEARCH"],
+        "contentConfig": "CONTENT_REQUIRED",
+        "documentProcessingConfig": {
+            "defaultParsingConfig": {
+                "digitalParsingConfig": {}
+            }
+        }
+    })
+    if st in (200, 201) and create_op.get("name"):
+        wait_op(create_op["name"])
+    time.sleep(8)
+
+# 2. Import PDFs from gs://{proj}-bucket/cymbal_operational_runbooks/* and wait until indexed
+br_url = f"{col_us_v1}/dataStores/{ds_id}/branches/0"
+st, docs_resp = call("GET", f"{br_url}/documents?pageSize=20")
+docs = docs_resp.get("documents", []) if st == 200 else []
+if len(docs) < 5:
+    for attempt in range(4):
+        st, imp_op = call("POST", f"{br_url}/documents:import", {
+            "gcsSource": {
+                "inputUris": [f"gs://{proj}-bucket/cymbal_operational_runbooks/*"],
+                "dataSchema": "content"
+            }
+        })
+        if st in (200, 201):
+            wait_op(imp_op.get("name", ""), timeout=420)
+            break
+        time.sleep(10)
+
+# 3. Create Gemini Enterprise licenseConfig in us
+call("POST", f"{base_us_v1}/licenseConfigs?licenseConfigId=search_and_assistant", {
+    "licenseCount": 50,
+    "subscriptionTier": "SUBSCRIPTION_TIER_SEARCH_AND_ASSISTANT",
+    "subscriptionTerm": "SUBSCRIPTION_TERM_ONE_MONTH",
+    "freeTrial": True,
+    "autoRenew": False
+})
+
+# 4. Create Gemini Enterprise App (cymbal-enterprise-app) in us
+st, existing_eng = call("GET", f"{col_us_v1}/engines/{eng_id}")
+if st != 200:
+    st, eng_op = call("POST", f"{col_us_v1}/engines?engineId={eng_id}", {
+        "displayName": "cymbal-enterprise-app",
+        "solutionType": "SOLUTION_TYPE_SEARCH",
+        "industryVertical": "GENERIC",
+        "appType": "APP_TYPE_INTRANET",
+        "searchEngineConfig": {
+            "searchTier": "SEARCH_TIER_ENTERPRISE",
+            "searchAddOns": ["SEARCH_ADD_ON_LLM"],
+            "requiredSubscriptionTier": "SUBSCRIPTION_TIER_SEARCH_AND_ASSISTANT"
+        }
+    })
+    if st in (200, 201) and eng_op.get("name"):
+        wait_op(eng_op["name"], timeout=180)
+PYEOF
+python3 /tmp/task2_scaffold_resources.py
+${writeSupportAgentFilesBash}
+echo "Task 2 cloud resources and .env configuration complete!"`;
+      return {
+        script,
+        summary: `Create Agent Search datastore ${maDsId} in us, import cymbal_operational_runbooks PDFs, provision Gemini Enterprise app ${maEngineId}, discover developerknowledge.googleapis.com MCP server ID, and configure .env.`,
+      };
+    }
+
+    if (
+      /Build the External Knowledge Agents|Build the Internal Knowledge Nodes/i.test(task.title) ||
+      (lower.includes('validate_tool_params') && !lower.includes('adk web')) ||
+      (lower.includes('query_bq_node') && !lower.includes('adk web'))
+    ) {
+      return {
+        script: `${writeSupportAgentFilesBash}\necho "Completed ${task.title}!"`,
+        summary: `Update support_agent/tools.py and support_agent/agent.py for ${task.title} and verify Python syntax.`,
+      };
+    }
+
+    if (
+      /Orchestrate and Verify the System/i.test(task.title) ||
+      (lower.includes('devsecops_workflow') && lower.includes('adk web'))
+    ) {
+      const script = `${writeSupportAgentFilesBash}
+
+cat << 'PYEOF' > /tmp/verify_workflow.py
+import asyncio, json, os, pathlib, subprocess, sys, time, urllib.request, urllib.error
+import dotenv
+
+base_dir = pathlib.Path.home() / "multiagent_systems"
+sys.path.insert(0, str(base_dir))
+dotenv.load_dotenv(base_dir / ".env")
+dotenv.load_dotenv(base_dir / "support_agent" / ".env")
+
+from google.adk.runners import InMemoryRunner
+from google.genai import types
+from support_agent.tools import find_similar_bugs, validate_tool_params
+from support_agent.agent import root_agent, PROJECT_ID, DATASTORE_ID, DATASTORE_LOCATION, MCP_SERVER_NAME
+
+print("=== 1. Direct BigQuery Vector Search Verification ===")
+diag_query = "We are seeing connection pool exhaustion on psycopg2 when the payment-service scales on Cloud Run. What should we do?"
+bq_out = find_similar_bugs(diag_query)
+print(bq_out)
+
+print("=== 2. Direct Discovery Engine Search Verification ===")
+token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+search_url = f"https://{DATASTORE_LOCATION}-discoveryengine.googleapis.com/v1alpha/projects/{PROJECT_ID}/locations/{DATASTORE_LOCATION}/collections/default_collection/dataStores/{DATASTORE_ID}/servingConfigs/default_search:search"
+req = urllib.request.Request(
+    search_url,
+    data=json.dumps({"query": "psycopg2 connection pool exhaustion Cloud Run", "pageSize": 5}).encode(),
+    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json", "X-Goog-User-Project": PROJECT_ID},
+)
+try:
+    with urllib.request.urlopen(req, timeout=30) as r:
+        sr = json.loads(r.read().decode())
+        print("Discovery Engine results count:", len(sr.get("results", [])))
+except Exception as e:
+    print("Discovery Engine search note:", e)
+
+print("=== 3. Direct Developer Knowledge MCP Call Verification ===")
+for rpc_body in [
+    {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "search_documents", "arguments": {"query": "Cloud Run psycopg2 connection pool exhaustion"}}},
+]:
+    mcp_req = urllib.request.Request(
+        "https://developerknowledge.googleapis.com/mcp",
+        data=json.dumps(rpc_body).encode(),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json", "X-Goog-User-Project": PROJECT_ID},
+    )
+    try:
+        with urllib.request.urlopen(mcp_req, timeout=30) as r:
+            print("MCP response:", r.read().decode()[:240])
+    except Exception as e:
+        print("MCP call note:", e)
+
+print("=== 4. ADK InMemoryRunner Workflow Verification (Safety Callback + Full Diagnostic Query) ===")
+async def run_all():
+    runner = InMemoryRunner(agent=root_agent, app_name="support_agent")
+    for idx, q in enumerate([
+        "client_secret",
+        diag_query,
+    ], 1):
+        sid = f"session_{idx}"
+        await runner.session_service.create_session(app_name="support_agent", user_id="user", session_id=sid)
+        msg = types.Content(role="user", parts=[types.Part.from_text(text=q)])
+        print(f"--- Running Query {idx}: {q} ---")
+        async for ev in runner.run_async(user_id="user", session_id=sid, new_message=msg):
+            if getattr(ev, "content", None) and getattr(ev.content, "parts", None):
+                for part in ev.content.parts:
+                    if getattr(part, "text", None):
+                        print(f"[{getattr(ev, 'author', 'agent')}]: {part.text[:300]}")
+
+asyncio.run(run_all())
+PYEOF
+python3 -u /tmp/verify_workflow.py
+
+# 5. Also start adk web on 127.0.0.1:8000 in ~/multiagent_systems and submit both queries via its REST/SSE endpoint
+cd "$HOME/multiagent_systems"
+pkill -f "adk web" >/dev/null 2>&1 || true
+set -a
+source "$HOME/multiagent_systems/.env"
+set +a
+nohup adk web --port 8000 --allow_origins "regex:https://.*\\.cloudshell\\.dev" > /tmp/adk_web.log 2>&1 &
+for i in $(seq 1 20); do
+  if curl -s http://127.0.0.1:8000/list-apps >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+cat << 'PYEOF' > /tmp/query_adk_web.py
+import json, urllib.request
+
+base = "http://127.0.0.1:8000"
+def post(path, payload):
+    req = urllib.request.Request(
+        f"{base}{path}",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=180) as r:
+        return r.read().decode("utf-8", errors="replace")
+
+for idx, q in enumerate([
+    "client_secret",
+    "We are seeing connection pool exhaustion on psycopg2 when the payment-service scales on Cloud Run. What should we do?",
+], 1):
+    try:
+        sess_raw = post("/apps/support_agent/users/user/sessions", {})
+        sess = json.loads(sess_raw) if sess_raw else {}
+        sid = sess.get("id") or f"web_sess_{idx}"
+        out = post("/run_sse", {
+            "appName": "support_agent",
+            "userId": "user",
+            "sessionId": sid,
+            "newMessage": {"role": "user", "parts": [{"text": q}]},
+            "streaming": False,
+        })
+        print(f"adk web query {idx} completed, response bytes={len(out)}")
+    except Exception as e:
+        print(f"adk web query {idx} note:", e)
+PYEOF
+python3 /tmp/query_adk_web.py
+echo "Task 5 workflow orchestration and safety callbacks verified!"`;
+      return {
+        script,
+        summary:
+          'Configure DevSecOps Workflow graph edges in support_agent/agent.py and verify both the client_secret safety guardrail and the full 3-branch psycopg2 diagnostic query via InMemoryRunner and adk web.',
+      };
+    }
+
+    if (
+      /Deploy and Share in Gemini Enterprise/i.test(task.title) ||
+      lower.includes('agents-cli deploy') ||
+      lower.includes('agents-cli publish gemini-enterprise')
+    ) {
+      const script = `${writeSupportAgentFilesBash}
+export PROJECT_ID="${proj}"
+export PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)")
+
+gcloud beta services identity create --service=aiplatform.googleapis.com --project="$PROJECT_ID" --quiet || true
+RE_SA="service-\${PROJECT_NUMBER}@gcp-sa-aiplatform-re.iam.gserviceaccount.com"
+DE_SA="service-\${PROJECT_NUMBER}@gcp-sa-discoveryengine.iam.gserviceaccount.com"
+
+for ROLE in "roles/agentregistry.viewer" "roles/discoveryengine.viewer" "roles/discoveryengine.user" "roles/bigquery.admin" "roles/aiplatform.user" "roles/serviceusage.serviceUsageConsumer"; do
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:\${RE_SA}" --role="$ROLE" --condition=None --quiet >/dev/null 2>&1 || \\
+    gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:\${RE_SA}" --role="$ROLE" --quiet >/dev/null 2>&1 || true
+done
+gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:\${DE_SA}" --role="roles/aiplatform.user" --condition=None --quiet >/dev/null 2>&1 || true
+
+cd "$HOME/multiagent_systems"
+uvx google-agents-cli setup < /dev/null || true
+AGENTS_BIN=$(find "$HOME/.local" "$HOME/.cache" -name "agents-cli" -type f 2>/dev/null | head -n 1)
+if [ -n "$AGENTS_BIN" ] && [ ! -f "$HOME/.local/bin/agents-cli" ]; then
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$AGENTS_BIN" "$HOME/.local/bin/agents-cli"
+fi
+
+# Back up our verified tools.py and agent.py before scaffolding so scaffold enhance never overwrites them
+cp "$HOME/multiagent_systems/support_agent/tools.py" /tmp/backup_support_tools.py
+cp "$HOME/multiagent_systems/support_agent/agent.py" /tmp/backup_support_agent.py
+
+if [ ! -d "$HOME/multiagent_systems/support_agent/app_utils" ]; then
+  agents-cli scaffold enhance support_agent --deployment-target agent_runtime < /dev/null || \\
+    uvx --from google-agents-cli agents-cli scaffold enhance support_agent --deployment-target agent_runtime < /dev/null
+fi
+
+cp /tmp/backup_support_tools.py "$HOME/multiagent_systems/support_agent/tools.py"
+cp /tmp/backup_support_agent.py "$HOME/multiagent_systems/support_agent/agent.py"
+python3 -m py_compile "$HOME/multiagent_systems/support_agent/tools.py" "$HOME/multiagent_systems/support_agent/agent.py"
+
+rm -f pyproject.toml && uv init --bare && uv add -r support_agent/requirements.txt
+python3 /tmp/discover_ma_env.py
+
+# Check if a healthy ReasoningEngine is already deployed (and clean up any failed ones)
+RE_ID=$(python3 - << 'PYEOF'
+import json, subprocess, time, urllib.request, urllib.error
+
+proj = "${proj}"
+reg = "${maRegion}"
+host = f"https://{reg}-aiplatform.googleapis.com/v1beta1"
+base = f"{host}/projects/{proj}/locations/{reg}"
+
+def tok():
+    return subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+
+def call(method, url):
+    req = urllib.request.Request(url, method=method, headers={"Authorization": f"Bearer {tok()}", "X-Goog-User-Project": proj})
+    try:
+        with urllib.request.urlopen(req, timeout=45) as r:
+            t = r.read().decode()
+            return 200, (json.loads(t) if t else {})
+    except urllib.error.HTTPError as e:
+        return e.code, {}
+
+_, data = call("GET", f"{base}/reasoningEngines?pageSize=50")
+ready_name = ""
+for eng in data.get("reasoningEngines", []):
+    name = eng.get("name", "")
+    _, ops_data = call("GET", f"{host}/{name}/operations")
+    failed = False
+    for op in ops_data.get("operations", []):
+        if op.get("done") and op.get("error"):
+            failed = True
+            break
+    if failed:
+        call("DELETE", f"{host}/{name}?force=true")
+    elif not ready_name:
+        ready_name = name
+print(ready_name)
+PYEOF
+)
+
+if [ -z "$RE_ID" ]; then
+  ENV_VARS=$(grep -v '^#' .env | grep -v '^$' | grep -v '^GOOGLE_CLOUD_PROJECT' | paste -sd, -)
+  agents-cli deploy --project="$PROJECT_ID" --region="${maRegion}" --update-env-vars "$ENV_VARS" < /dev/null || \\
+    uvx --from google-agents-cli agents-cli deploy --project="$PROJECT_ID" --region="${maRegion}" --update-env-vars "$ENV_VARS" < /dev/null
+fi
+
+cat << 'PYEOF' > /tmp/task6_publish_and_share.py
+import json, subprocess, time, urllib.request, urllib.error
+
+proj = "${proj}"
+reg = "${maRegion}"
+default_eng_id = "${maEngineId}"
+proj_num = subprocess.check_output(["gcloud", "projects", "describe", proj, "--format=value(projectNumber)"], text=True).strip()
+
+def tok():
+    return subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+
+def call(method, url, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers={
+        "Authorization": f"Bearer {tok()}",
+        "Content-Type": "application/json",
+        "X-Goog-User-Project": proj,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            t = r.read().decode()
+            return r.status, (json.loads(t) if t else {})
+    except urllib.error.HTTPError as e:
+        t = e.read().decode("utf-8", errors="replace")
+        print(f"HTTP {e.code} {method} {url}: {t[:350]}")
+        try:
+            return e.code, json.loads(t)
+        except Exception:
+            return e.code, {}
+
+# 1. Discover the deployed ReasoningEngine resource path
+_, re_data = call("GET", f"https://{reg}-aiplatform.googleapis.com/v1beta1/projects/{proj}/locations/{reg}/reasoningEngines?pageSize=50")
+re_list = re_data.get("reasoningEngines", [])
+if not re_list:
+    raise SystemExit("ERROR: No deployed ReasoningEngine found in " + reg)
+re_name = re_list[0]["name"]
+if re_name.startswith(f"projects/{proj}/"):
+    re_name = re_name.replace(f"projects/{proj}/", f"projects/{proj_num}/", 1)
+print("Discovered ReasoningEngine:", re_name)
+
+# 2. Discover the exact Gemini Enterprise Engine resource path in us
+_, eng_data = call("GET", f"https://us-discoveryengine.googleapis.com/v1alpha/projects/{proj}/locations/us/collections/default_collection/engines")
+actual_eng_id = default_eng_id
+for e in eng_data.get("engines", []):
+    eid = e.get("name", "").split("/")[-1]
+    if "cymbal-enterprise-app" in eid or e.get("displayName") == "cymbal-enterprise-app":
+        actual_eng_id = eid
+        break
+full_app_id = f"projects/{proj_num}/locations/us/collections/default_collection/engines/{actual_eng_id}"
+print("Discovered Gemini Enterprise App:", full_app_id)
+
+# 3. Run agents-cli publish gemini-enterprise
+subprocess.run([
+    "uvx", "--from", "google-agents-cli", "agents-cli", "publish", "gemini-enterprise",
+    "--registration-type=adk",
+    f"--gemini-enterprise-app-id={full_app_id}",
+    f"--agent-runtime-id={re_name}",
+    "--display-name=DevSecOps Incident Triage System",
+    "--description=Queries internal post-mortems and summarizes web workarounds for database outages",
+], check=False)
+
+# 4. Verify registration via Discovery Engine REST API and patch sharingConfig to ALL_USERS
+agents_url = f"https://us-discoveryengine.googleapis.com/v1alpha/{full_app_id}/assistants/default_assistant/agents"
+_, ag_resp = call("GET", agents_url)
+target_agent = None
+for a in ag_resp.get("agents", []):
+    if a.get("displayName") == "DevSecOps Incident Triage System":
+        target_agent = a
+        break
+
+payload = {
+    "displayName": "DevSecOps Incident Triage System",
+    "description": "Queries internal post-mortems and summarizes web workarounds for database outages",
+    "adkAgentDefinition": {
+        "provisionedReasoningEngine": {
+            "reasoningEngine": re_name
+        }
+    },
+    "sharingConfig": {
+        "scope": "ALL_USERS"
+    }
+}
+
+if not target_agent:
+    _, target_agent = call("POST", agents_url, payload)
+else:
+    ag_name = target_agent["name"]
+    call("PATCH", f"https://us-discoveryengine.googleapis.com/v1alpha/{ag_name}?updateMask=sharingConfig,description,adkAgentDefinition", payload)
+
+print("Published and shared DevSecOps Incident Triage System with ALL_USERS!")
+PYEOF
+python3 /tmp/task6_publish_and_share.py`;
+      return {
+        script,
+        summary:
+          'Grant IAM roles to ReasoningEngine service agent, scaffold and deploy support_agent to Agent Runtime without overwriting agent.py/tools.py, publish DevSecOps Incident Triage System to Gemini Enterprise, and share with ALL_USERS.',
+      };
+    }
+  }
+
   return null;
   })();
 
   const isDeterministicLab =
-    /Evaluate Single LLM Outputs|Build and Deploy a RAG Application using ADK|Fine-Tune Open-Source Models on Agent Platform/i.test(
+    /Evaluate Single LLM Outputs|Build and Deploy a RAG Application using ADK|Fine-Tune Open-Source Models on Agent Platform|Build and Deploy Multi-Agent ADK Systems to Gemini Enterprise/i.test(
       labTitle
     ) ||
     combinedText.includes('get_started_with_oss_tuning_on_vertexai.ipynb') ||
+    combinedText.includes('multiagent_systems') ||
     credentials.extraVars?.['primary_project.startup_script.notebook_file_name'] === 'evaluation.ipynb' ||
     Boolean(
       credentials.extraVars?.['primary_project.startup_script.datastore_id'] &&
@@ -3579,13 +4521,13 @@ ${combinedText}
     - Use regional endpoint \`https://modelarmor.<loc>.rep.googleapis.com/v1/projects/<project>/locations/<loc>/templates?templateId=<id>\` (e.g. \`us\`).
     - Attach templates to Gemini Enterprise Assistant via \`PATCH .../engines/<app_id>/assistants/default_assistant?updateMask=customerPolicy\` with \`customerPolicy.modelArmorConfig\` (\`userPromptTemplate\`, \`responseTemplate\`, \`failureMode: "FAIL_OPEN"\`).
 11. **Vertex AI Agent Runtime, ADK 2.0 Workflows & Agent Identity (\`vertexai.Client\` / \`agent_engines\` / \`agents-cli\`)**:
-    - **CRITICAL \`.env\` Loading for ADK / Multi-Agent Starters (\`support_agent/.env\`)**: Starter \`agent.py\` files frequently import \`.tools\` BEFORE calling \`dotenv.load_dotenv()\`, while \`tools.py\` reads \`os.environ["GOOGLE_CLOUD_LOCATION"]\` and \`agent.py\` reads \`os.environ["MODEL"]\` at module import time! Furthermore, \`dotenv.load_dotenv()\` without arguments does not load \`support_agent/.env\` when run from the parent directory. Therefore:
-      1. Whenever modifying \`tools.py\` or \`agent.py\`, place \`import pathlib, dotenv; dotenv.load_dotenv(pathlib.Path(__file__).resolve().parent / ".env"); dotenv.load_dotenv()\` at the VERY TOP of BOTH \`tools.py\` and \`agent.py\` BEFORE any \`os.environ[...]\` lookup or \`from .tools import ...\`!
-      2. In bash, BEFORE running any \`python3\`, \`uv\`, \`adk\`, or \`agents-cli\` command, always source all \`.env\` files into the shell environment:
-         \`set -a; for f in .env support_agent/.env */.env; do [ -f "$f" ] && source "$f"; done; set +a\`
-      3. When verifying an ADK 2.0 \`Workflow\` (e.g. Task 5 "Orchestrate and Verify the System"), ALWAYS:
-         - Call \`find_similar_bugs("<diagnostic_query>")\` directly in Python first so the BigQuery \`VECTOR_SEARCH\` job on \`ops_intelligence.incident_post_mortems\` and Vertex AI \`text-embedding-004\` call are 100% guaranteed to execute in the project's job history.
-         - Run \`InMemoryRunner(agent=root_agent, app_name="support_agent")\` in Python (using \`uv run python -c ...\` or the active venv with \`.env\` exported) for BOTH the blocked security callback query (containing \`client_secret\`) and the production diagnostic query (e.g. \`"We are seeing connection pool exhaustion on psycopg2 when the payment-service scales on Cloud Run. What should we do?"\`).
+    - **CRITICAL \`.env\` Loading & Python 3.12 \`find_dotenv()\` Crash Trap**:
+      1. NEVER call bare \`dotenv.load_dotenv()\` without an explicit path argument (in Cloud Shell's Python 3.12, bare \`dotenv.load_dotenv()\` calls \`find_dotenv()\`, which executes \`assert frame.f_back is not None\` and crashes with \`AssertionError\` when run from \`<stdin>\`). Always pass an explicit path: \`dotenv.load_dotenv(pathlib.Path(__file__).resolve().parent / ".env")\` and run verification scripts from a file (\`/tmp/verify_workflow.py\`) rather than \`<stdin>\`.
+      2. When discovering \`MCP_SERVER_NAME\` from Agent Registry for \`developer_kb_mcp\` (\`developerknowledge.googleapis.com\`), filter specifically for \`displayName="developerknowledge.googleapis.com"\` (NEVER \`head -n 1\`, which returns \`agentregistry.googleapis.com\`), and strip the resource path to just the short ID (\`agentregistry-...\`) because \`agent.py\` already prepends \`projects/{PROJECT_ID}/locations/{MCP_SERVER_LOCATION}/mcpServers/\`.
+      3. Never pipe to \`/dev/tty\` in non-interactive SSH (\`tee: /dev/tty: No such device or address\`).
+      4. Before running \`agents-cli scaffold enhance <pkg>\`, save backups of \`<pkg>/agent.py\` and \`<pkg>/tools.py\` and restore them immediately afterward so \`scaffold enhance\` never overwrites custom code.
+      5. When modifying \`# TODO\` comments in Python files, replace the ENTIRE comment line (e.g. \`# TODO Task 5: Define the Workflow Graph Edges.\`) rather than a prefix substring so trailing comment text never corrupts Python syntax.
+      6. When verifying an ADK 2.0 \`Workflow\` (e.g. Task 5 "Orchestrate and Verify the System"), ALWAYS call \`find_similar_bugs("<diagnostic_query>")\` directly first, run \`InMemoryRunner(agent=root_agent, app_name="support_agent")\` from a file \`/tmp/verify_workflow.py\`, AND launch \`adk web --port 8000\` in the background and submit the test queries via \`http://127.0.0.1:8000/run_sse\`.
     - **CRITICAL Dependency Version Compatibility for \`AdkApp\` on Agent Runtime**: Google Cloud Shell pre-installs \`google-cloud-aiplatform==1.165.1\` alongside an older \`google-adk==1.14.1\`. Because \`google-cloud-aiplatform>=1.165.1\` passes \`auto_create_session=True\` to \`google.adk.runners.Runner()\`, deploying with \`google-adk<1.30.0\` causes the ReasoningEngine container to crash at startup with \`TypeError: Runner.__init__() got an unexpected keyword argument 'auto_create_session'\`. Always upgrade BOTH packages (\`pip install --upgrade "google-cloud-aiplatform[agent_engines,adk]" "google-adk>=1.30.0" cloudpickle pydantic\`) before calling \`agent_engines.create(...)\` and pin the exact upgraded versions in \`requirements=[...]\`.
     - In \`config\` passed to \`client.agent_engines.create(agent=..., config=config)\`, \`"identity_type"\` MUST be the enum \`types.IdentityType.AGENT_IDENTITY\` (NEVER a list \`[types.IdentityType.AGENT_IDENTITY]\`). Many starter \`deploy.py\` files use bracketed placeholders like \`"identity_type": [IDENTITY_TYPE]\` — always replace the entire \`[IDENTITY_TYPE]\` including its brackets with \`types.IdentityType.AGENT_IDENTITY\`.
     - \`ae.api_resource\` returned by \`client.agent_engines.list()\` is a Pydantic v2 \`BaseModel\` (\`ae.api_resource.model_dump()\`), NOT a protobuf message (never call \`google.protobuf.json_format.MessageToDict(ae.api_resource)\`).

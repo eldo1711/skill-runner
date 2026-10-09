@@ -436,6 +436,31 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
       if (zoneMatch) zone = zoneMatch[1];
     }
 
+    const engineIdMatch = fullDeepText.match(/[?&]engineId=([a-zA-Z0-9_-]{4,80})\b/);
+    if (
+      engineIdMatch &&
+      !isPlaceholderVal(engineIdMatch[1]) &&
+      !extraVars['project_0.startup_script.engine_id']
+    ) {
+      extraVars['project_0.startup_script.engine_id'] = engineIdMatch[1];
+    }
+    const dataStoreIdMatch = fullDeepText.match(/[?&]dataStoreId=([a-zA-Z0-9_-]{4,80})\b/);
+    if (
+      dataStoreIdMatch &&
+      !isPlaceholderVal(dataStoreIdMatch[1]) &&
+      !extraVars['project_0.startup_script.datastore_id']
+    ) {
+      extraVars['project_0.startup_script.datastore_id'] = dataStoreIdMatch[1];
+    }
+    const modelEnvMatch = fullDeepText.match(/^MODEL=(gemini-[a-z0-9.-]+)\s*$/m);
+    if (
+      modelEnvMatch &&
+      !isPlaceholderVal(modelEnvMatch[1]) &&
+      !extraVars['project_0.startup_script.gemini_flash_model_id']
+    ) {
+      extraVars['project_0.startup_script.gemini_flash_model_id'] = modelEnvMatch[1];
+    }
+
     if (!consoleUrl) {
       consoleUrl = projectId
         ? `https://console.cloud.google.com/?project=${projectId}`
@@ -641,6 +666,9 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
     let maxScore = Number.isFinite(headerMaxPts) ? headerMaxPts : 100;
 
     let taskCounter = 0;
+    const taskOneIndex = headings.findIndex((h) =>
+      /^task\s+1\b/i.test((h.textContent || '').replace(/\s+/g, ' ').trim())
+    );
 
     headings.forEach((h2, hIdx) => {
       const title = (h2.textContent || '').replace(/\s+/g, ' ').trim();
@@ -699,7 +727,6 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
         ];
         for (const cb of codeBlocks) {
           if (cb.tagName === 'PRE' && cb.closest('ql-code-block')) continue;
-          if (cb.hasAttribute('output') || cb.classList.contains('output')) continue;
           const tmpl = cb.querySelector('template') as HTMLTemplateElement | null;
           const shadowPreText = (cb as HTMLElement).shadowRoot?.querySelector('pre, code')?.textContent;
           const templatePreText = tmpl?.content?.querySelector('pre, code')?.textContent;
@@ -994,6 +1021,12 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
             status: progressVerified ? 'completed' : 'pending',
           });
         }
+      }
+
+      // Skip pre-Task-1 conceptual overview sections (e.g., "ADK 2.0 Graph Workflows and Orchestration")
+      // when the lab contains an explicit "Task 1" heading and this section has no activity tracker.
+      if (taskOneIndex > 0 && hIdx < taskOneIndex && !hasCheckProgress) {
+        return;
       }
 
       if (steps.length > 0) {
