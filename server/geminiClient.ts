@@ -4974,6 +4974,40 @@ export async function fetchCourseKnowledgeFromIframeSrc(iframeSrc: string): Prom
     }
   }
 
+  // Fallback for Google Skills Studio direct HTML bundle lessons (e.g. cloud-training-lessons/.../*.html)
+  if (/\.html$/i.test(baseNoHash)) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      const resp = await fetch(baseNoHash, { signal: controller.signal });
+      clearTimeout(timer);
+      if (resp.ok) {
+        const html = await resp.text();
+        const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+        const bodyRaw = bodyMatch ? bodyMatch[1] : html;
+        const text = bodyRaw
+          .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+          .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/&nbsp;/gi, ' ')
+          .replace(/&quot;/gi, '"')
+          .replace(/&#39;|&apos;/gi, "'")
+          .replace(/&lt;/gi, '<')
+          .replace(/&gt;/gi, '>')
+          .replace(/&amp;/gi, '&')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 65000);
+        if (text.length > 40) {
+          courseKnowledgeCache.set(baseDir, text);
+          return text;
+        }
+      }
+    } catch {
+      // Ignore direct HTML bundle fetch error
+    }
+  }
+
   return '';
 }
 
@@ -4981,7 +5015,7 @@ export interface QuizQuestionInput {
   id: string;
   itemType: string;
   stem: string;
-  options: Array<{ id: string; title: string; isAnswer?: boolean }>;
+  options: Array<{ id: string; title: string; isAnswer?: boolean; rationale?: string }>;
 }
 
 export interface SolvedQuizAnswer {
@@ -5123,13 +5157,20 @@ Return ONLY valid JSON matching:
       const optionTitles = finalIds
         .map((id) => q.options.find((o) => o.id === id)?.title || '')
         .filter(Boolean);
+      const firstRationale = finalIds
+        .map((id) => q.options.find((o) => o.id === id)?.rationale || '')
+        .find(Boolean);
       return {
         quizItemId: q.id,
         itemType: q.itemType,
         choiceIds: finalIds,
         optionIndices,
         optionTitles,
-        reason: lockedArr ? 'Verified answer from quiz schema / previous attempt' : aiAns?.reason || 'Course content match',
+        reason:
+          firstRationale ||
+          (lockedArr
+            ? 'Verified answer from quiz schema / previous attempt'
+            : aiAns?.reason || 'Course content match'),
       };
     }
 
@@ -5161,7 +5202,8 @@ Return ONLY valid JSON matching:
       0,
       q.options.findIndex((o) => o.id === chosenId)
     );
-    const optTitle = q.options[optIdx]?.title || '';
+    const chosenOpt = q.options[optIdx];
+    const optTitle = chosenOpt?.title || '';
 
     return {
       quizItemId: q.id,
@@ -5169,9 +5211,11 @@ Return ONLY valid JSON matching:
       choiceId: chosenId,
       optionIndex: optIdx,
       optionTitle: optTitle,
-      reason: lockedSingle
-        ? 'Verified answer from quiz schema / previous attempt'
-        : aiAns?.reason || 'Selected from course material analysis',
+      reason:
+        chosenOpt?.rationale ||
+        (lockedSingle
+          ? 'Verified answer from quiz schema / previous attempt'
+          : aiAns?.reason || 'Selected from course material analysis'),
     };
   });
 }

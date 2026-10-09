@@ -10,6 +10,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import {
   getSessionBridgeHub,
   getSessionOrchestrator,
+  inferTargetTypeFromUrl,
   listActiveSessions,
   sanitizeSessionId,
 } from './browserOrchestrator.js';
@@ -144,8 +145,9 @@ app.post('/api/lab/open', async (req, res) => {
       res.status(400).json({ error: 'A valid Lab or Course URL is required.' });
       return;
     }
-    if (targetType === 'course' || targetType === 'lab') {
-      orch.setTargetType(targetType);
+    const effectiveTargetType = inferTargetTypeFromUrl(url) || targetType;
+    if (effectiveTargetType === 'course' || effectiveTargetType === 'lab') {
+      orch.setTargetType(effectiveTargetType);
     }
     // Launch asynchronously and return immediately while streaming via WS
     orch.openLabUrl(url).catch((err) => {
@@ -190,8 +192,12 @@ app.post('/api/lab/start-and-run', async (req, res) => {
   try {
     const orch = getReqOrchestrator(req);
     const { url, labTabKey, targetType } = req.body || {};
-    if (targetType === 'course' || targetType === 'lab') {
-      orch.setTargetType(targetType);
+    const inferredTargetType =
+      inferTargetTypeFromUrl(typeof url === 'string' ? url : '') ||
+      inferTargetTypeFromUrl(orch.getState().labCurrentUrl || orch.getState().labUrl);
+    const effectiveTargetType = inferredTargetType || targetType;
+    if (effectiveTargetType === 'course' || effectiveTargetType === 'lab') {
+      orch.setTargetType(effectiveTargetType);
     }
     orch
       .startAndRunLab({
@@ -259,8 +265,10 @@ app.post('/api/lab/switch-course', async (req, res) => {
   try {
     const orch = getReqOrchestrator(req);
     const { url, labTabKey, endCurrentFirst, autoRun, targetType } = req.body || {};
-    if (targetType === 'course' || targetType === 'lab') {
-      orch.setTargetType(targetType);
+    const effectiveTargetType =
+      inferTargetTypeFromUrl(typeof url === 'string' ? url : '') || targetType;
+    if (effectiveTargetType === 'course' || effectiveTargetType === 'lab') {
+      orch.setTargetType(effectiveTargetType);
     }
     await orch.switchSkillCourse({
       url: typeof url === 'string' ? url : undefined,

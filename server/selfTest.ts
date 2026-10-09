@@ -1,5 +1,5 @@
 import { chromium } from 'playwright';
-import { parseLabPageDom } from './labParser.js';
+import { parseGssKnowledgeCheckHtml, parseLabPageDom } from './labParser.js';
 import {
   formatAutonomousAntigravityPrompt,
   getModelGardenEntries,
@@ -14,7 +14,11 @@ import {
   inspectInteractiveElements,
   sendPromptToAntigravity,
 } from './pageInspector.js';
-import { getSessionOrchestrator, listActiveSessions } from './browserOrchestrator.js';
+import {
+  getSessionOrchestrator,
+  inferTargetTypeFromUrl,
+  listActiveSessions,
+} from './browserOrchestrator.js';
 
 async function runVerificationTests() {
   console.log('🧪 Running Skills Runner Verification Suite...');
@@ -912,6 +916,157 @@ async function runVerificationTests() {
   }
   await genai162Page.close();
   console.log('✓ GENAI162 task parsing, variable extraction, and deterministic fast-path verified.');
+
+  // 15. Verify Google Skills Studio html_bundles course & <gss-knowledge-check> quiz parsing and solving
+  console.log(
+    '[15/15] Verifying Google Skills Studio html_bundles course detection and <gss-knowledge-check> quiz solving...'
+  );
+  if (
+    inferTargetTypeFromUrl(
+      'https://partner.skills.google/paths/4144/course_templates/1746/html_bundles/644267'
+    ) !== 'course'
+  ) {
+    throw new Error('Expected inferTargetTypeFromUrl to classify /html_bundles/644267 as course');
+  }
+  if (
+    inferTargetTypeFromUrl(
+      'https://partner.skills.google/paths/4144/course_templates/1746/labs/644284'
+    ) !== 'lab'
+  ) {
+    throw new Error('Expected inferTargetTypeFromUrl to classify /labs/644284 as lab');
+  }
+
+  const htmlBundlePage = await browser.newPage();
+  const sampleGssConfig = JSON.stringify([
+    'kc-adk-644267',
+    [
+      [
+        'q1',
+        null,
+        null,
+        null,
+        null,
+        [
+          '<p>During a long troubleshooting conversation, your agent starts forgetting constraints mentioned at the beginning. Which context management strategy in ADK directly addresses this while preserving key information?</p>',
+          [
+            [
+              '<p>Hard-code all constraints into the global system instruction.</p>',
+              '<p>User-specific constraints from a live conversation cannot be hard-coded ahead of time.</p>',
+              null,
+              'opt-1a',
+            ],
+            [
+              '<p>Configure context compaction using <code>EventsCompactionConfig</code> to summarize older events.</p>',
+              '<p>Context compaction uses an LLM to summarize older events in the session history once a threshold is reached.</p>',
+              1,
+              'opt-1b',
+            ],
+          ],
+          1,
+          null,
+          1,
+        ],
+      ],
+      [
+        'q2',
+        null,
+        null,
+        null,
+        null,
+        [
+          '<p>Which two statements accurately describe <code>Session</code> and <code>State</code> in ADK?</p>',
+          [
+            [
+              '<p><code>Session</code> tracks the chronological sequence of <code>Events</code> in a single conversation.</p>',
+              '<p>Session represents a single conversation thread and holds its events.</p>',
+              1,
+              'opt-2a',
+            ],
+            [
+              '<p><code>State</code> is a key-value store scoped to the session, user, or app.</p>',
+              '<p>State stores structured key-value pairs with optional prefix scopes.</p>',
+              1,
+              'opt-2b',
+            ],
+            [
+              '<p><code>InMemorySessionService</code> persists sessions to Cloud SQL automatically.</p>',
+              '<p>InMemorySessionService is ephemeral and lost on restart.</p>',
+              null,
+              'opt-2c',
+            ],
+          ],
+          2,
+          null,
+          1,
+        ],
+      ],
+    ],
+    66,
+    1,
+    1,
+  ]).replace(/"/g, '&quot;');
+
+  await htmlBundlePage.setContent(`
+    <!DOCTYPE html>
+    <html>
+      <head><title>Craft ADK Agents with Persistent Memories | Google Skills</title></head>
+      <body>
+        <ql-course-Main>
+          <ql-contents-menu
+            sections='[{"id":"mod1","title":"Module 1","activities":[{"id":"644260","type":"html_bundle","title":"Why Context Matters","href":"/paths/4144/course_sessions/46007713/html_bundles/644260","completed":true,"current":false,"unlocked":true},{"id":"644267","type":"html_bundle","title":"Quiz","href":"/paths/4144/course_sessions/46007713/html_bundles/644267","completed":false,"current":true,"unlocked":true},{"id":"644284","type":"lab","title":"Building an ADK Agent with Session and Memory Services","href":"/paths/4144/course_sessions/46007713/labs/644284","completed":false,"current":false,"unlocked":true}]}]'
+          ></ql-contents-menu>
+          <ql-iframe class="html-bundle-iframe"></ql-iframe>
+          <gss-knowledge-check serialized-config="${sampleGssConfig}"></gss-knowledge-check>
+        </ql-course-Main>
+      </body>
+    </html>
+  `);
+
+  const parsedBundle = await parseLabPageDom(htmlBundlePage);
+  if (!parsedBundle.isCourse) {
+    throw new Error('Expected html_bundle page to be detected as a course (isCourse === true)');
+  }
+  if (parsedBundle.tasks.length !== 3) {
+    throw new Error(`Expected 3 tasks in html_bundle course, got ${parsedBundle.tasks.length}`);
+  }
+  if (parsedBundle.tasks[0].activityType !== 'html_bundle') {
+    throw new Error(
+      `Expected task #1 activityType 'html_bundle', got '${parsedBundle.tasks[0].activityType}'`
+    );
+  }
+  if (parsedBundle.tasks[1].activityType !== 'quiz') {
+    throw new Error(
+      `Expected task #2 ("Quiz") activityType 'quiz', got '${parsedBundle.tasks[1].activityType}'`
+    );
+  }
+  if (!parsedBundle.currentQuiz || parsedBundle.currentQuiz.items.length !== 2) {
+    throw new Error(
+      `Expected currentQuiz with 2 items from <gss-knowledge-check>, got ${JSON.stringify(parsedBundle.currentQuiz)}`
+    );
+  }
+
+  const gssAnswers = await solveCourseQuizQuestions(
+    parsedBundle.labTitle,
+    '',
+    parsedBundle.currentQuiz.items
+  );
+  if (gssAnswers.length !== 2) {
+    throw new Error(`Expected 2 solved answers, got ${gssAnswers.length}`);
+  }
+  if (
+    gssAnswers[0].choiceId !== 'opt-1b' ||
+    !gssAnswers[0].optionTitle?.includes('EventsCompactionConfig')
+  ) {
+    throw new Error(`Unexpected Q1 answer: ${JSON.stringify(gssAnswers[0])}`);
+  }
+  if (
+    gssAnswers[1].itemType !== 'multiple-select' ||
+    JSON.stringify(gssAnswers[1].choiceIds) !== JSON.stringify(['opt-2a', 'opt-2b'])
+  ) {
+    throw new Error(`Unexpected Q2 multiple-select answer: ${JSON.stringify(gssAnswers[1])}`);
+  }
+  await htmlBundlePage.close();
+  console.log('✓ Google Skills Studio html_bundles course & <gss-knowledge-check> quiz verified.');
 
   await browser.close();
   console.log('✅ All verification tests passed!');

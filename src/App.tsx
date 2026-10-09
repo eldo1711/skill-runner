@@ -355,6 +355,23 @@ export default function App() {
     });
   };
 
+  const inferTargetTypeFromUrl = (rawUrl?: string | null): TargetType | null => {
+    const u = String(rawUrl || '').trim().toLowerCase();
+    if (!u) return null;
+    if (
+      /\/(?:html_bundles|quizzes|documents|videos|links)\/\d+/.test(u) ||
+      ((u.includes('/course_templates/') || u.includes('/course_sessions/')) &&
+        !u.includes('/labs/') &&
+        !u.includes('/focuses/'))
+    ) {
+      return 'course';
+    }
+    if (u.includes('/labs/') || u.includes('/focuses/')) {
+      return 'lab';
+    }
+    return null;
+  };
+
   const handleTargetTypeChange = async (nextType: TargetType) => {
     setState((prev) => ({ ...prev, targetType: nextType }));
     await apiPost('/api/lab/target-type', { targetType: nextType });
@@ -364,12 +381,16 @@ export default function App() {
     e.preventDefault();
     if (!urlInput.trim()) return;
     const targetUrl = urlInput.trim();
+    const effectiveType = inferTargetTypeFromUrl(targetUrl) || state.targetType || 'lab';
+    if (effectiveType !== state.targetType) {
+      setState((prev) => ({ ...prev, targetType: effectiveType }));
+    }
     await ensureMacBridgeConnected('Open URL in Chrome', async () => {
       setSyncingLab(true);
       try {
         await apiPost('/api/lab/open', {
           url: targetUrl,
-          targetType: state.targetType || 'lab',
+          targetType: effectiveType,
         });
       } finally {
         setSyncingLab(false);
@@ -405,13 +426,30 @@ export default function App() {
    * and executes all lab tasks or course modules/quizzes autonomously.
    */
   const handleStartAndRunLab = async () => {
+    const selectedTab = (state.availableChromeTabs || []).find(
+      (t) => t.key === state.selectedLabTabKey
+    );
+    const activeUrl =
+      sourceMode === 'url' && urlInput.trim()
+        ? urlInput.trim()
+        : selectedTab?.url || state.labCurrentUrl || state.labUrl;
+    const effectiveType =
+      inferTargetTypeFromUrl(activeUrl) ||
+      (selectedTab?.contentKind === 'course' || selectedTab?.contentKind === 'lab'
+        ? selectedTab.contentKind
+        : null) ||
+      state.targetType ||
+      'lab';
+    if (effectiveType !== state.targetType) {
+      setState((prev) => ({ ...prev, targetType: effectiveType }));
+    }
     await ensureMacBridgeConnected('Start & Run', async () => {
       setStartingAndRunning(true);
       try {
         await apiPost('/api/lab/start-and-run', {
           labTabKey: sourceMode === 'tab' ? state.selectedLabTabKey : undefined,
           url: sourceMode === 'url' && urlInput.trim() ? urlInput.trim() : undefined,
-          targetType: state.targetType || 'lab',
+          targetType: effectiveType,
         });
       } finally {
         setStartingAndRunning(false);
@@ -985,7 +1023,14 @@ export default function App() {
                 <input
                   type="url"
                   value={urlInput}
-                  onChange={(e) => setUrlInput(e.target.value)}
+                  onChange={(e) => {
+                    const nextVal = e.target.value;
+                    setUrlInput(nextVal);
+                    const inferred = inferTargetTypeFromUrl(nextVal);
+                    if (inferred && inferred !== state.targetType) {
+                      handleTargetTypeChange(inferred);
+                    }
+                  }}
                   placeholder={
                     isCourseMode
                       ? 'https://partner.skills.google/paths/.../course_templates/...'
@@ -1043,14 +1088,21 @@ export default function App() {
               </div>
 
               <p className="text-[11px] text-slate-300 leading-snug">
-                Executes interactive Rise 360 lessons, video playback, and graded quizzes directly in your signed-in Chrome tab.
+                Executes interactive Rise 360 & Skills Studio lessons, video playback, and graded quizzes directly in your signed-in Chrome tab.
               </p>
 
               <div className="grid grid-cols-3 gap-1.5 text-[10px]">
                 <div className="px-2 py-1 rounded border bg-slate-950/70 border-slate-800 text-slate-200 flex items-center justify-between">
                   <span>Lessons</span>
                   <span className="font-mono font-bold text-cyan-300">
-                    {state.tasks.filter((t) => t.activityType === 'link' || t.activityType === 'document').length}
+                    {
+                      state.tasks.filter(
+                        (t) =>
+                          t.activityType === 'link' ||
+                          t.activityType === 'document' ||
+                          t.activityType === 'html_bundle'
+                      ).length
+                    }
                   </span>
                 </div>
                 <div className="px-2 py-1 rounded border bg-slate-950/70 border-slate-800 text-slate-200 flex items-center justify-between">

@@ -18,6 +18,7 @@ export interface CourseQuizOption {
   title: string;
   rawTitle: string;
   isAnswer?: boolean;
+  rationale?: string;
 }
 
 export interface CourseQuizItem {
@@ -48,6 +49,121 @@ export interface CourseQuizData {
   retakeUnallowedReason?: string | null;
   items: CourseQuizItem[];
   itemResponses: CourseQuizItemResponse[];
+}
+
+const htmlBundleContentCache = new Map<string, string>();
+
+function decodeHtmlEntitiesAndStripTags(raw: string): string {
+  return String(raw || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&amp;/gi, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function decodeHtmlAttributeEntities(raw: string): string {
+  return String(raw || '')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&amp;/gi, '&');
+}
+
+/**
+ * Parses Google Skills Studio `<gss-knowledge-check serialized-config="...">` elements
+ * embedded inside `/html_bundles/...` lesson and quiz iframes.
+ */
+export function parseGssKnowledgeCheckHtml(
+  html: string,
+  isAlreadyCompleted = false
+): CourseQuizData | undefined {
+  if (!html || !html.includes('gss-knowledge-check')) return undefined;
+  const regex = /<gss-knowledge-check[^>]*\bserialized-config="([^"]+)"/gi;
+  const items: CourseQuizItem[] = [];
+  let quizId = '';
+  let passingPercentage = 66;
+
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(html)) !== null) {
+    try {
+      const jsonStr = decodeHtmlAttributeEntities(match[1]);
+      const parsed = JSON.parse(jsonStr);
+      const kc = Array.isArray(parsed?.[0]) ? parsed[0] : parsed;
+      if (!Array.isArray(kc)) continue;
+
+      if (!quizId && kc[0]) {
+        quizId = String(kc[0]);
+      }
+      if (typeof kc[3] === 'number') {
+        passingPercentage = kc[3];
+      } else if (typeof kc[2] === 'number') {
+        passingPercentage = kc[2];
+      }
+
+      const rawQuestions = Array.isArray(kc[2])
+        ? kc[2]
+        : Array.isArray(kc[1])
+          ? kc[1]
+          : [];
+      for (let qIdx = 0; qIdx < rawQuestions.length; qIdx++) {
+        const q = rawQuestions[qIdx];
+        if (!Array.isArray(q)) continue;
+        const qId = String(q[0] || `kc-q-${items.length + 1}`);
+        const qBody =
+          (Array.isArray(q[1]) && typeof q[1][0] === 'string' && Array.isArray(q[1][1])
+            ? q[1]
+            : null) ||
+          q.find(
+            (el: any) =>
+              Array.isArray(el) && typeof el[0] === 'string' && Array.isArray(el[1])
+          ) ||
+          [];
+        const stem = decodeHtmlEntitiesAndStripTags(String(qBody[0] || ''));
+        const rawOpts = Array.isArray(qBody[1]) ? qBody[1] : [];
+        const options: CourseQuizOption[] = rawOpts
+          .filter(Array.isArray)
+          .map((opt: any[], oIdx: number) => ({
+            id: String(opt[3] || `${qId}-opt-${oIdx + 1}`),
+            title: decodeHtmlEntitiesAndStripTags(String(opt[0] || '')),
+            rawTitle: String(opt[0] || ''),
+            rationale: decodeHtmlEntitiesAndStripTags(String(opt[1] || '')),
+            isAnswer: Boolean(opt[2] === 1 || opt[2] === true),
+          }));
+
+        if (!stem || options.length === 0) continue;
+        const correctCount = options.filter((o) => o.isAnswer).length;
+        const itemType = correctCount >= 2 ? 'multiple-select' : 'multiple-choice';
+        items.push({
+          id: qId,
+          itemType,
+          stem,
+          options,
+        });
+      }
+    } catch {
+      // Ignore malformed serialized-config block
+    }
+  }
+
+  if (items.length === 0) return undefined;
+
+  return {
+    quizResponseId: quizId || 'gss-kc',
+    quizVersionId: quizId || 'gss-kc',
+    passingPercentage,
+    isSubmitted: isAlreadyCompleted,
+    isPassing: isAlreadyCompleted,
+    percentageGrade: isAlreadyCompleted ? 100 : null,
+    retakeUnallowedReason: null,
+    items,
+    itemResponses: [],
+  };
 }
 
 export interface ParsedLabPage {
@@ -1054,13 +1170,32 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
     });
 
     const contentsMenu = document.querySelector('ql-contents-menu');
+    const savedUrlMatch = (document.documentElement.outerHTML.slice(0, 1200) || '').match(
+      /saved from url=\(\d+\)(https?:\/\/[^\s>"'-]+)/i
+    );
+    const effectiveUrl = (savedUrlMatch ? savedUrlMatch[1] : window.location.href || '').toLowerCase();
+    const isCourseUrlPattern =
+      !effectiveUrl.includes('/focuses/') &&
+      !effectiveUrl.includes('/labs/') &&
+      !effectiveUrl.includes('/catalog_lab/') &&
+      (effectiveUrl.includes('/html_bundles/') ||
+        effectiveUrl.includes('/quizzes/') ||
+        effectiveUrl.includes('/documents/') ||
+        effectiveUrl.includes('/videos/') ||
+        effectiveUrl.includes('/course_templates/') ||
+        effectiveUrl.includes('/course_sessions/'));
+
     const isCoursePage = Boolean(
       !labHeader &&
         !pageLabInstanceId &&
         (contentsMenu ||
           document.querySelector('ql-quiz') ||
           document.querySelector('ql-iframe.document-iframe') ||
-          document.querySelector('ql-youtube-video'))
+          document.querySelector('ql-iframe.html-bundle-iframe') ||
+          document.querySelector('ql-youtube-video') ||
+          document.querySelector('gss-knowledge-check') ||
+          document.querySelector('gss-lesson-completion') ||
+          isCourseUrlPattern)
     );
 
     let courseOverviewUrl = '';
@@ -1112,7 +1247,9 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
         labTitle = derivedCourseTitle;
       }
 
-      const docIframe = document.querySelector('ql-iframe.document-iframe, ql-iframe[src]');
+      const docIframe = document.querySelector(
+        'ql-iframe.document-iframe, ql-iframe.html-bundle-iframe, ql-iframe[src]'
+      );
       if (docIframe) {
         currentIframeSrc = (docIframe.getAttribute('src') || '').trim();
       }
@@ -1195,25 +1332,38 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
 
       if (contentsMenu) {
         try {
-          const modulesRaw = contentsMenu.getAttribute('modules') || '[]';
+          const modulesRaw =
+            contentsMenu.getAttribute('modules') ||
+            contentsMenu.getAttribute('sections') ||
+            '[]';
           const modules = JSON.parse(modulesRaw);
           if (Array.isArray(modules)) {
             tasks.length = 0;
             let actIdx = 0;
             for (const mod of modules) {
               const modTitle = stripHtml(String(mod?.title || ''));
-              const modSteps = Array.isArray(mod?.steps) ? mod.steps : [];
+              const modSteps = Array.isArray(mod?.steps)
+                ? mod.steps
+                : Array.isArray(mod?.activities)
+                  ? [{ activities: mod.activities }]
+                  : [];
               for (const st of modSteps) {
                 const activities = Array.isArray(st?.activities) ? st.activities : [];
                 for (const act of activities) {
-                  const actType = String(act?.type || 'link').toLowerCase() as CourseActivityType;
-                  if (actType === 'credential' || actType === 'survey') {
+                  const rawActType = String(act?.type || 'link').toLowerCase();
+                  if (rawActType === 'credential' || rawActType === 'survey') {
                     continue;
                   }
                   actIdx++;
                   const actTitle = stripHtml(String(act?.title || `Activity ${actIdx}`));
+                  const isQuizBundle =
+                    rawActType === 'html_bundle' &&
+                    /\b(?:quiz|knowledge\s+check|assessment)\b/i.test(actTitle);
+                  const actType = (isQuizBundle ? 'quiz' : rawActType) as CourseActivityType;
                   const actHref = String(act?.href || '').trim();
-                  const actComplete = Boolean(act?.isComplete === true);
+                  const actComplete = Boolean(
+                    act?.isComplete === true || act?.completed === true
+                  );
                   const typeLabel =
                     actType === 'quiz'
                       ? 'Quiz / Assessment'
@@ -1307,6 +1457,57 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
       tasks,
     };
   });
+
+  if (rawParsed.isCourse && !rawParsed.currentQuiz) {
+    try {
+      const fullPageHtml = await page.content().catch(() => '');
+      const savedUrlMatch = fullPageHtml.match(
+        /saved from url=\(\d+\)(https?:\/\/[^\s>"'-]+)/i
+      );
+      const effectivePageUrl = savedUrlMatch ? savedUrlMatch[1] : page.url();
+      const matchedTask = rawParsed.tasks.find(
+        (t) =>
+          (t.activityId &&
+            (effectivePageUrl.endsWith(`/${t.activityId}`) ||
+              effectivePageUrl.includes(`/${t.activityId}?`))) ||
+          (t.activityHref && effectivePageUrl.includes(t.activityHref))
+      );
+      const isAlreadyCompleted = Boolean(matchedTask?.progressVerified);
+
+      let gssQuiz = parseGssKnowledgeCheckHtml(fullPageHtml, isAlreadyCompleted);
+      if (!gssQuiz && rawParsed.currentIframeSrc && /^https?:\/\//i.test(rawParsed.currentIframeSrc)) {
+        const srcUrl = rawParsed.currentIframeSrc;
+        let iframeHtml = htmlBundleContentCache.get(srcUrl) || '';
+        if (!iframeHtml) {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 8000);
+          try {
+            const resp = await fetch(srcUrl, { signal: controller.signal });
+            if (resp.ok) {
+              iframeHtml = await resp.text();
+              if (iframeHtml) {
+                htmlBundleContentCache.set(srcUrl, iframeHtml);
+              }
+            }
+          } finally {
+            clearTimeout(timer);
+          }
+        }
+        if (iframeHtml) {
+          gssQuiz = parseGssKnowledgeCheckHtml(iframeHtml, isAlreadyCompleted);
+        }
+      }
+
+      if (gssQuiz) {
+        rawParsed.currentQuiz = gssQuiz;
+        if (matchedTask && matchedTask.activityType === 'html_bundle') {
+          matchedTask.activityType = 'quiz';
+        }
+      }
+    } catch {
+      // Ignore iframe fetch error
+    }
+  }
 
   // Ensure every `agy` / `antigravity` launch command uses `--dangerously-skip-permissions` with fallback to normal launch
   rawParsed.tasks = rawParsed.tasks.map((task) => ({

@@ -139,11 +139,13 @@ end tell
       isSkillsDomain &&
       (lowerUrl.includes('/course_templates/') ||
         lowerUrl.includes('/course_sessions/') ||
+        lowerUrl.includes('/html_bundles/') ||
         lowerUrl.includes('/paths/') ||
         lowerUrl.includes('/quests/') ||
         lowerUrl.includes('/documents/') ||
         lowerUrl.includes('/quizzes/') ||
-        lowerUrl.includes('/videos/'))
+        lowerUrl.includes('/videos/') ||
+        lowerUrl.includes('/links/'))
     ) {
       suggestedRole = 'lab';
       contentKind = 'course';
@@ -282,7 +284,7 @@ export async function snapshotUserChromeTabByTarget(
   );
 
   // First try in-memory DOM + Declarative Shadow DOM serialization via JS (does not trigger Chrome Downloads bar)
-  const inMemoryJs = `(function(){try{function s(r){var h='';var c=r.childNodes;for(var i=0;i<c.length;i++){var n=c[i];if(n.nodeType===1){var t=n.tagName.toLowerCase();h+='<'+t;for(var a=0;a<n.attributes.length;a++){var at=n.attributes[a];h+=' '+at.name+'="'+at.value.replace(/"/g,'&quot;')+'"';}h+='>';if(n.shadowRoot){h+='<template shadowrootmode="open">'+s(n.shadowRoot)+'</template>';}h+=s(n)+'</'+t+'>';}else if(n.nodeType===3){h+=n.nodeValue;}}return h;}return document.documentElement.outerHTML.length>500 && document.querySelector('ql-lab-header') ? '<!DOCTYPE html><html>'+s(document.documentElement)+'</html>' : '';}catch(e){return '';}})()`;
+  const inMemoryJs = `(function(){try{function s(r){var h='';var c=r.childNodes;for(var i=0;i<c.length;i++){var n=c[i];if(n.nodeType===1){var t=n.tagName.toLowerCase();h+='<'+t;for(var a=0;a<n.attributes.length;a++){var at=n.attributes[a];h+=' '+at.name+'="'+at.value.replace(/"/g,'&quot;')+'"';}h+='>';if(n.shadowRoot){h+='<template shadowrootmode="open">'+s(n.shadowRoot)+'</template>';}h+=s(n)+'</'+t+'>';}else if(n.nodeType===3){h+=n.nodeValue;}}return h;}return document.documentElement.outerHTML.length>500 && (document.querySelector('ql-lab-header') || document.querySelector('ql-contents-menu') || document.querySelector('ql-quiz') || document.querySelector('ql-iframe')) ? '<!DOCTYPE html><html>'+s(document.documentElement)+'</html>' : '';}catch(e){return '';}})()`;
   const escapedInMemoryJs = inMemoryJs.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
   const script = `

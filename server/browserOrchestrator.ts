@@ -76,6 +76,23 @@ import {
 const LOCAL_STATE_DIR = path.join(os.homedir(), '.cloud-skills-lab-runner');
 const LOCAL_STATE_FILE = path.join(LOCAL_STATE_DIR, 'runner_state.json');
 
+export function inferTargetTypeFromUrl(url?: string | null): TargetType | null {
+  const u = String(url || '').trim().toLowerCase();
+  if (!u) return null;
+  if (
+    /\/(?:html_bundles|quizzes|documents|videos|links)\/\d+/.test(u) ||
+    ((u.includes('/course_templates/') || u.includes('/course_sessions/')) &&
+      !u.includes('/labs/') &&
+      !u.includes('/focuses/'))
+  ) {
+    return 'course';
+  }
+  if (u.includes('/labs/') || u.includes('/focuses/')) {
+    return 'lab';
+  }
+  return null;
+}
+
 export class LabBrowserOrchestrator {
   public readonly sessionId: string;
   private readonly hub: MacBridgeHub;
@@ -567,6 +584,12 @@ export class LabBrowserOrchestrator {
     if (labTab) {
       this.state.labUrl = labTab.url;
       this.state.labCurrentUrl = labTab.url;
+      const inferred = inferTargetTypeFromUrl(labTab.url);
+      if (inferred) {
+        this.state.targetType = inferred;
+      } else if (labTab.contentKind === 'course' || labTab.contentKind === 'lab') {
+        this.state.targetType = labTab.contentKind;
+      }
     }
 
     const activeTarget = consoleTab || shellTab;
@@ -758,12 +781,19 @@ export class LabBrowserOrchestrator {
    */
   public async openLabUrl(labUrl: string): Promise<void> {
     const trimmedUrl = labUrl.trim();
+    const inferredTarget = inferTargetTypeFromUrl(trimmedUrl);
+    if (inferredTarget) {
+      this.state.targetType = inferredTarget;
+    }
     if (
       (this.state.tasks.length > 0 || this.state.isLabStarted) &&
       this.state.labUrl &&
       this.state.labUrl !== trimmedUrl
     ) {
       await this.resetForNewLab({ endLabInChrome: false, closeIncognito: true });
+      if (inferredTarget) {
+        this.state.targetType = inferredTarget;
+      }
     }
     this.state.labUrl = trimmedUrl;
     this.setStatus('launching_lab');
@@ -873,6 +903,9 @@ export class LabBrowserOrchestrator {
           if (updated.activityHref) {
             this.state.tasks[i].activityHref = updated.activityHref;
           }
+          if (updated.activityType === 'quiz') {
+            this.state.tasks[i].activityType = 'quiz';
+          }
           if (updated.progressVerified) {
             this.state.tasks[i].progressVerified = true;
             this.state.tasks[i].status = 'completed';
@@ -884,8 +917,19 @@ export class LabBrowserOrchestrator {
       }
 
       if (!this.isLoopRunning && this.state.tasks.length > 0) {
+        const currentUrl = this.state.labCurrentUrl || this.state.labUrl || '';
+        const urlIdMatch = currentUrl.match(/\/(html_bundles|quizzes|documents|videos|links)\/(\d+)/i);
+        const matchedByCurrentUrl = urlIdMatch
+          ? this.state.tasks.find(
+              (t) =>
+                t.status !== 'completed' &&
+                Boolean(t.activityHref && t.activityHref.includes(`/${urlIdMatch[1]}/${urlIdMatch[2]}`))
+            )
+          : undefined;
         const nextPendingTask =
-          this.state.tasks.find((t) => t.status !== 'completed') || this.state.tasks[0];
+          matchedByCurrentUrl ||
+          this.state.tasks.find((t) => t.status !== 'completed') ||
+          this.state.tasks[0];
         this.state.activeTaskId = nextPendingTask.id;
         this.state.activeStepId = nextPendingTask.steps[0]?.id || null;
       }
@@ -1152,6 +1196,8 @@ export class LabBrowserOrchestrator {
   }
 
   private isCourseSession(): boolean {
+    const inferred = inferTargetTypeFromUrl(this.state.labCurrentUrl || this.state.labUrl);
+    if (inferred === 'course') return true;
     return (
       this.state.targetType === 'course' ||
       this.state.tasks.some((t) => Boolean(t.activityType))
@@ -1277,10 +1323,31 @@ export class LabBrowserOrchestrator {
     const requestedTabKey = params?.labTabKey?.trim() || null;
     const requestedUrl = params?.url?.trim() || '';
 
+    if (requestedUrl) {
+      const inferredFromUrl = inferTargetTypeFromUrl(requestedUrl);
+      if (inferredFromUrl) {
+        this.state.targetType = inferredFromUrl;
+      }
+    }
+
     if (requestedTabKey) {
+      await this.scanOpenChromeWindows(false);
+      const liveTab = (this.state.availableChromeTabs || []).find((t) => t.key === requestedTabKey);
+      const liveTabUrlChanged = Boolean(
+        liveTab?.url &&
+          liveTab.url !== this.state.labUrl &&
+          liveTab.url !== this.state.labCurrentUrl
+      );
+      const liveTabTargetType = inferTargetTypeFromUrl(liveTab?.url) || liveTab?.contentKind;
+      const targetTypeMismatch = Boolean(
+        (liveTabTargetType === 'course' || liveTabTargetType === 'lab') &&
+          liveTabTargetType !== this.state.targetType
+      );
       if (
         requestedTabKey !== this.state.selectedLabTabKey ||
-        this.state.tasks.length === 0
+        this.state.tasks.length === 0 ||
+        liveTabUrlChanged ||
+        targetTypeMismatch
       ) {
         await this.bindChromeTargets({
           labTabKey: requestedTabKey,
@@ -1565,9 +1632,9 @@ export class LabBrowserOrchestrator {
   /**
    * Executes a Google Cloud Skills Course from start to finish:
    * - Enrolls / starts the course session if not yet started
-   * - Navigates through every interactive lesson (`link` / `document`) and `video` activity, recording completion
-   * - Extracts Articulate Rise 360 (`runtime-data.js`) course material automatically
-   * - Solves and submits every `<ql-quiz>` assessment until passing grade is verified
+   * - Navigates through every interactive lesson (`link` / `document` / `html_bundle`) and `video` activity, recording completion
+   * - Extracts Articulate Rise 360 (`runtime-data.js`) or Skills Studio (`html_bundle`) course material automatically
+   * - Solves and submits every `<ql-quiz>` and `<gss-knowledge-check>` assessment until passing grade is verified
    */
   private async executeCourseLoop(singleStepOnly = false): Promise<void> {
     this.pauseRequested = false;
@@ -1623,7 +1690,34 @@ export class LabBrowserOrchestrator {
 
       let courseKnowledgeBase = '';
 
-      for (let taskIdx = 0; taskIdx < this.state.tasks.length; taskIdx++) {
+      // If the user opened a specific activity URL (e.g. a specific quiz /html_bundles/644267),
+      // prioritize that pending task first so it executes immediately before cycling through remaining tasks.
+      const currentOpenUrl = this.state.labCurrentUrl || this.state.labUrl || '';
+      const openUrlMatch = currentOpenUrl.match(
+        /\/(html_bundles|quizzes|documents|videos|links)\/(\d+)/i
+      );
+      const prioritizedTaskIdx = openUrlMatch
+        ? this.state.tasks.findIndex(
+            (t) =>
+              !(t.status === 'completed' && t.progressVerified) &&
+              Boolean(
+                t.activityHref &&
+                  t.activityHref.includes(`/${openUrlMatch[1]}/${openUrlMatch[2]}`)
+              )
+          )
+        : -1;
+
+      const orderedTaskIndices: number[] = [];
+      if (prioritizedTaskIdx >= 0) {
+        orderedTaskIndices.push(prioritizedTaskIdx);
+      }
+      for (let idx = 0; idx < this.state.tasks.length; idx++) {
+        if (idx !== prioritizedTaskIdx) {
+          orderedTaskIndices.push(idx);
+        }
+      }
+
+      for (const taskIdx of orderedTaskIndices) {
         if (this.pauseRequested) {
           this.setStatus('paused');
           this.addLog('warn', 'system', 'Course progression paused by operator.');
@@ -1641,7 +1735,7 @@ export class LabBrowserOrchestrator {
         if (task.steps[0]) task.steps[0].status = 'running';
         this.emitState();
 
-        const actType = task.activityType || 'link';
+        let actType = task.activityType || 'link';
         const actHref = task.activityHref || task.steps[0]?.links?.[0]?.href || '';
         if (!actHref) {
           task.status = 'completed';
@@ -1653,8 +1747,14 @@ export class LabBrowserOrchestrator {
         }
 
         const actUrl = new URL(actHref, origin).toString();
+        let preloadedQuizParsed: Awaited<ReturnType<typeof parseLabPageDom>> | null = null;
 
-        if (actType === 'link' || actType === 'document' || actType === 'video') {
+        if (
+          actType === 'link' ||
+          actType === 'document' ||
+          actType === 'video' ||
+          actType === 'html_bundle'
+        ) {
           this.addLog(
             'action',
             'lab_window',
@@ -1678,6 +1778,9 @@ export class LabBrowserOrchestrator {
               if (st?.activityHref) {
                 this.state.tasks[i].activityHref = st.activityHref;
               }
+              if (st?.activityType === 'quiz') {
+                this.state.tasks[i].activityType = 'quiz';
+              }
               if (st?.progressVerified) {
                 this.state.tasks[i].progressVerified = true;
                 this.state.tasks[i].status = 'completed';
@@ -1691,7 +1794,7 @@ export class LabBrowserOrchestrator {
             this.addLog(
               'info',
               'gemini',
-              `Extracting Articulate Rise 360 course material from ${snapParsed.currentIframeSrc}...`
+              `Extracting course material from ${snapParsed.currentIframeSrc}...`
             );
             courseKnowledgeBase = await fetchCourseKnowledgeFromIframeSrc(
               snapParsed.currentIframeSrc
@@ -1705,24 +1808,37 @@ export class LabBrowserOrchestrator {
             }
           }
 
-          task.status = 'completed';
-          task.progressVerified = true;
-          task.stepScore = 1;
-          task.progressMessage = 'Activity completed';
-          for (const s of task.steps) s.status = 'completed';
-          this.state.totalScore = this.state.tasks.filter((t) => t.progressVerified).length;
-          this.state.maxScore = this.state.tasks.length || 1;
-          this.state.labTimer = `${this.state.totalScore}/${this.state.maxScore} done`;
-          this.emitState();
+          if (
+            snapParsed.currentQuiz &&
+            snapParsed.currentQuiz.items.length > 0 &&
+            !snapParsed.currentQuiz.isPassing
+          ) {
+            actType = 'quiz';
+            task.activityType = 'quiz';
+            preloadedQuizParsed = snapParsed;
+          } else {
+            task.status = 'completed';
+            task.progressVerified = true;
+            task.stepScore = 1;
+            task.progressMessage = 'Activity completed';
+            for (const s of task.steps) s.status = 'completed';
+            this.state.totalScore = this.state.tasks.filter((t) => t.progressVerified).length;
+            this.state.maxScore = this.state.tasks.length || 1;
+            this.state.labTimer = `${this.state.totalScore}/${this.state.maxScore} done`;
+            this.emitState();
 
-          this.addLog(
-            'success',
-            'lab_window',
-            `Completed activity #${task.number}: "${task.title}" (${this.state.totalScore}/${this.state.maxScore} done).`
-          );
-        } else if (actType === 'quiz') {
-          // If we haven't extracted course knowledge yet, inspect the first link module to grab runtime-data.js
-          if (!courseKnowledgeBase) {
+            this.addLog(
+              'success',
+              'lab_window',
+              `Completed activity #${task.number}: "${task.title}" (${this.state.totalScore}/${this.state.maxScore} done).`
+            );
+          }
+        }
+
+        if (actType === 'quiz') {
+          // If we haven't extracted course knowledge yet and this is not a self-contained html_bundle quiz,
+          // inspect the first link module to grab runtime-data.js
+          if (!courseKnowledgeBase && !actHref.includes('/html_bundles/')) {
             const linkTask = this.state.tasks.find(
               (t) => t.activityType === 'link' && Boolean(t.activityHref)
             );
@@ -1756,19 +1872,24 @@ export class LabBrowserOrchestrator {
             }
           }
 
-          this.addLog(
-            'action',
-            'lab_window',
-            `Opening Quiz #${task.number}: "${task.title}" (${actUrl})...`
-          );
-          const quizNav = await completeCourseActivityInUserChrome({
-            windowId: labTarget?.windowId,
-            tabIndex: labTarget?.tabIndex,
-            activityUrl: actUrl,
-            activityType: 'quiz',
-          });
-          await loadHtmlIntoPreviewPage(quizNav.htmlContent, quizNav.url || actUrl);
-          let quizParsed = await parseLabPageDom(this.labPage!);
+          let quizParsed: Awaited<ReturnType<typeof parseLabPageDom>>;
+          if (preloadedQuizParsed) {
+            quizParsed = preloadedQuizParsed;
+          } else {
+            this.addLog(
+              'action',
+              'lab_window',
+              `Opening Quiz #${task.number}: "${task.title}" (${actUrl})...`
+            );
+            const quizNav = await completeCourseActivityInUserChrome({
+              windowId: labTarget?.windowId,
+              tabIndex: labTarget?.tabIndex,
+              activityUrl: actUrl,
+              activityType: 'quiz',
+            });
+            await loadHtmlIntoPreviewPage(quizNav.htmlContent, quizNav.url || actUrl);
+            quizParsed = await parseLabPageDom(this.labPage!);
+          }
 
           if (quizParsed.currentQuiz?.isPassing) {
             const grade = quizParsed.currentQuiz.percentageGrade ?? 100;
@@ -1849,7 +1970,9 @@ export class LabBrowserOrchestrator {
               quizParsed = await parseLabPageDom(this.labPage!);
 
               const menuQuizTask = quizParsed.tasks.find(
-                (t) => t.activityId === task.activityId || t.title === task.title
+                (t) =>
+                  (task.activityId && t.activityId === task.activityId) ||
+                  (t.number === task.number && t.title === task.title)
               );
               const isPassed = Boolean(
                 quizParsed.currentQuiz?.isPassing || menuQuizTask?.progressVerified

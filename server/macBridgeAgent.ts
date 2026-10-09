@@ -212,11 +212,13 @@ end tell
       isSkillsDomain &&
       (lowerUrl.includes('/course_templates/') ||
         lowerUrl.includes('/course_sessions/') ||
+        lowerUrl.includes('/html_bundles/') ||
         lowerUrl.includes('/paths/') ||
         lowerUrl.includes('/quests/') ||
         lowerUrl.includes('/documents/') ||
         lowerUrl.includes('/quizzes/') ||
-        lowerUrl.includes('/videos/'))
+        lowerUrl.includes('/videos/') ||
+        lowerUrl.includes('/links/'))
     ) {
       suggestedRole = 'lab';
       contentKind = 'course';
@@ -362,7 +364,7 @@ async function snapshotUserChromeTabByTarget(windowId, tabIndex) {
   }
 
   const escapedSnapshotPath = SNAPSHOT_HTML_PATH.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  const inMemoryJs = `(function(){try{function s(r){var h='';var c=r.childNodes;for(var i=0;i<c.length;i++){var n=c[i];if(n.nodeType===1){var t=n.tagName.toLowerCase();h+='<'+t;for(var a=0;a<n.attributes.length;a++){var at=n.attributes[a];h+=' '+at.name+'="'+at.value.replace(/"/g,'&quot;')+'"';}h+='>';if(n.shadowRoot){h+='<template shadowrootmode="open">'+s(n.shadowRoot)+'</template>';}h+=s(n)+'</'+t+'>';}else if(n.nodeType===3){h+=n.nodeValue;}}return h;}return document.documentElement.outerHTML.length>500 && (document.querySelector('ql-lab-header') || document.querySelector('ql-contents-menu') || document.querySelector('ql-quiz')) ? '<!DOCTYPE html><html>'+s(document.documentElement)+'</html>' : '';}catch(e){return '';}})()`;
+  const inMemoryJs = `(function(){try{function s(r){var h='';var c=r.childNodes;for(var i=0;i<c.length;i++){var n=c[i];if(n.nodeType===1){var t=n.tagName.toLowerCase();h+='<'+t;for(var a=0;a<n.attributes.length;a++){var at=n.attributes[a];h+=' '+at.name+'="'+at.value.replace(/"/g,'&quot;')+'"';}h+='>';if(n.shadowRoot){h+='<template shadowrootmode="open">'+s(n.shadowRoot)+'</template>';}h+=s(n)+'</'+t+'>';}else if(n.nodeType===3){h+=n.nodeValue;}}return h;}return document.documentElement.outerHTML.length>500 && (document.querySelector('ql-lab-header') || document.querySelector('ql-contents-menu') || document.querySelector('ql-quiz') || document.querySelector('ql-iframe')) ? '<!DOCTYPE html><html>'+s(document.documentElement)+'</html>' : '';}catch(e){return '';}})()`;
   const escapedInMemoryJs = inMemoryJs.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
   const script = `
@@ -1220,7 +1222,10 @@ end tell
   const completeJs = `(function(){
     try {
       var csrf = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
-      if (csrf && (location.pathname.includes('/videos/') || location.pathname.includes('/documents/'))) {
+      if (csrf && (location.pathname.includes('/videos/') || location.pathname.includes('/documents/') || location.pathname.includes('/html_bundles/') || location.pathname.includes('/links/'))) {
+        if (window.ql && typeof window.ql.postComplete === 'function' && location.pathname.includes('/html_bundles/')) {
+          try { window.ql.postComplete('HTML bundle'); } catch(e) {}
+        }
         fetch(location.pathname + '/complete', {
           method: 'POST',
           headers: { 'X-CSRF-Token': csrf },
@@ -1302,6 +1307,8 @@ return "done"
 `;
     await runAppleScript(videoAxScript).catch(() => '');
     await new Promise((r) => setTimeout(r, 3500));
+  } else if (activityType === 'html_bundle' || String(activityUrl || '').includes('/html_bundles/')) {
+    await new Promise((r) => setTimeout(r, 2200));
   } else {
     await new Promise((r) => setTimeout(r, 1200));
   }
@@ -1335,8 +1342,13 @@ async function submitCourseQuizInUserChrome(
 
   if (quizUrl) {
     const escapedUrl = String(quizUrl).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    const quizIdMatch = String(quizUrl).match(/\/quizzes\/(\d+)/i);
-    const quizPathSuffix = quizIdMatch ? `/quizzes/${quizIdMatch[1]}` : escapedUrl;
+    const sessionQuizMatch = String(quizUrl).match(/\/course_sessions\/\d+\/(?:quizzes|html_bundles)\/\d+/i);
+    const quizIdMatch = String(quizUrl).match(/\/(quizzes|html_bundles)\/(\d+)/i);
+    const quizPathSuffix = sessionQuizMatch
+      ? sessionQuizMatch[0]
+      : quizIdMatch
+        ? `/${quizIdMatch[1]}/${quizIdMatch[2]}`
+        : escapedUrl;
     const navScript = `
 tell application "Google Chrome"
   repeat with w in windows
@@ -1373,7 +1385,26 @@ end tell
   const quizJs = `(function(ansList, doRetake){
     try {
       var q = document.querySelector('ql-quiz');
-      if (!q || !q.shadowRoot) return 'no_quiz';
+      if (!q || !q.shadowRoot) {
+        if (document.querySelector('ql-iframe.html-bundle-iframe') || location.pathname.includes('/html_bundles/')) {
+          try {
+            if (window.ql && typeof window.ql.postComplete === 'function') {
+              window.ql.postComplete('HTML bundle');
+            } else {
+              var csrf = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
+              if (csrf) {
+                fetch(location.pathname + '/complete', {
+                  method: 'POST',
+                  headers: { 'X-CSRF-Token': csrf },
+                  credentials: 'include'
+                }).catch(function(){});
+              }
+            }
+          } catch(e) {}
+          return 'html_bundle_quiz';
+        }
+        return 'no_quiz';
+      }
       function findDeep(root, pred) {
         var out = [];
         var walker = function(n) {
@@ -1429,10 +1460,14 @@ end tell
     );
   }
 
-  if (!jsRes.ok) {
-    // Accessibility / System Events path when "Allow JavaScript from Apple Events" is off.
-    // Note: <ql-quiz> shuffles the order of questions and options in the DOM at runtime,
-    // and exposes each option's exact title as the AXRadioButton / AXCheckBox `name` and `description`.
+  if (
+    !jsRes.ok ||
+    jsRes.value === 'no_quiz' ||
+    jsRes.value === 'html_bundle_quiz' ||
+    String(jsRes.value || '').startsWith('err:')
+  ) {
+    // Accessibility / System Events path when "Allow JavaScript from Apple Events" is off,
+    // or when the quiz is a cross-origin <gss-knowledge-check> inside <ql-iframe class="html-bundle-iframe">.
     const escapeAppleStr = (s) =>
       String(s || '')
         .replace(/\\/g, '\\\\')
@@ -1475,6 +1510,28 @@ on findWebArea(node, depth)
   return missing value
 end findWebArea
 
+on getElemLabel(el)
+  tell application "System Events"
+    set lbl to ""
+    try
+      set nVal to name of el
+      if nVal is not missing value then
+        set lbl to nVal as string
+      end if
+    end try
+    if lbl is "" or lbl is "missing value" then
+      try
+        set dVal to description of el
+        if dVal is not missing value then
+          set lbl to dVal as string
+        end if
+      end try
+    end if
+    if lbl is "missing value" then set lbl to ""
+    return lbl
+  end tell
+end getElemLabel
+
 tell application "Google Chrome"
   repeat with w in windows
     if ((id of w) as string) is "${targetWindowId}" then
@@ -1516,6 +1573,7 @@ tell application "System Events"
     set radioList to {}
     set checkList to {}
     set retakeBtn to missing value
+    set startBtn to missing value
 
     set allElems to entire contents of targetWa
     repeat with el in allElems
@@ -1528,20 +1586,40 @@ tell application "System Events"
       else if r is "AXCheckBox" then
         set end of checkList to el
       else if r is "AXButton" then
-        set bnm to ""
-        try
-          set bnm to (name of el) as string
-        end try
-        if bnm is "" then
-          try
-            set bnm to (description of el) as string
-          end try
-        end if
-        if bnm is "Retake" or bnm starts with "Retake" then
+        set bnm to my getElemLabel(el)
+        if bnm is "Retake" or bnm starts with "Retake" or bnm is "Reset" or bnm starts with "Reset" or bnm ends with " Reset" then
           set retakeBtn to el
+        else if bnm is "Start" or bnm is "play_arrow Start" or bnm ends with " Start" then
+          set startBtn to el
         end if
       end if
     end repeat
+
+    if (count of radioList) is 0 and (count of checkList) is 0 and startBtn is not missing value then
+      try
+        click startBtn
+      end try
+      delay 1.2
+      set radioList to {}
+      set checkList to {}
+      set allElems to entire contents of targetWa
+      repeat with el in allElems
+        set r to ""
+        try
+          set r to (role of el) as string
+        end try
+        if r is "AXRadioButton" then
+          set end of radioList to el
+        else if r is "AXCheckBox" then
+          set end of checkList to el
+        else if r is "AXButton" then
+          set bnm to my getElemLabel(el)
+          if bnm is "Retake" or bnm starts with "Retake" or bnm is "Reset" or bnm starts with "Reset" or bnm ends with " Reset" then
+            set retakeBtn to el
+          end if
+        end if
+      end repeat
+    end if
 
     if (${needsRetakeFirst ? 'true' : 'false'} or ((count of radioList) is 0 and (count of checkList) is 0)) and retakeBtn is not missing value then
       try
@@ -1572,15 +1650,7 @@ tell application "System Events"
       repeat with rIdx from 1 to count of radioList
         if usedRadioIndices does not contain rIdx then
           set rEl to item rIdx of radioList
-          set rName to ""
-          try
-            set rName to (name of rEl) as string
-          end try
-          if rName is "" then
-            try
-              set rName to (description of rEl) as string
-            end try
-          end if
+          set rName to my getElemLabel(rEl)
           if rName is not "" and (rName is tStr or rName contains tStr or tStr contains rName) then
             set end of usedRadioIndices to rIdx
             try
@@ -1602,15 +1672,7 @@ tell application "System Events"
       repeat with cIdx from 1 to count of checkList
         if usedCheckIndices does not contain cIdx then
           set cEl to item cIdx of checkList
-          set cName to ""
-          try
-            set cName to (name of cEl) as string
-          end try
-          if cName is "" then
-            try
-              set cName to (description of cEl) as string
-            end try
-          end if
+          set cName to my getElemLabel(cEl)
           if cName is not "" and (cName is cStr or cName contains cStr or cStr contains cName) then
             set end of usedCheckIndices to cIdx
             try
@@ -1632,16 +1694,8 @@ tell application "System Events"
         set r to (role of el) as string
       end try
       if r is "AXButton" then
-        set bnm to ""
-        try
-          set bnm to (name of el) as string
-        end try
-        if bnm is "" then
-          try
-            set bnm to (description of el) as string
-          end try
-        end if
-        if bnm is "Submit" then
+        set bnm to my getElemLabel(el)
+        if bnm is "Submit" or bnm ends with " Submit" then
           try
             click el
           end try

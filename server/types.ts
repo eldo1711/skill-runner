@@ -40,6 +40,7 @@ export type CourseActivityType =
   | 'document'
   | 'video'
   | 'quiz'
+  | 'html_bundle'
   | 'lab'
   | 'credential'
   | 'survey'
