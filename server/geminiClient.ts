@@ -3569,13 +3569,23 @@ ${combinedText}
      - OAuth Brand & Client: Enable \`iap.googleapis.com\` alone (\`gcloud services enable iap.googleapis.com --project=<project> --quiet\`), then run \`gcloud iap oauth-brands create --application_title="<title>" --support_email="<student_email>" --quiet\` and \`gcloud iap oauth-clients create <brand> --display_name="<name>" --quiet\`.
      - Discovery Engine Authorization: \`POST .../v1alpha/projects/<project>/locations/global/authorizations?authorizationId=<auth_id>\` with \`{"name": "projects/<project_num>/locations/global/authorizations/<auth_id>", "displayName": "<display_name>", "serverSideOauth2": {"clientId": "<id>", "clientSecret": "<secret>", "authorizationUri": "<uri>", "tokenUri": "https://oauth2.googleapis.com/token"}}\`.
      - Low-Code / Agent Designer Agent: \`POST .../v1alpha/projects/<project>/locations/global/collections/default_collection/engines/<app_id>/assistants/default_assistant/agents\` with \`{"displayName": "<name>", "description": "<desc>", "lowCodeAgentDefinition": {"rootAgentId": "root_agent", "draftDisplayName": "<name>", "draftDescription": "<desc>", "nodes": [{"id": "root_agent", "displayName": "<name>", "llmAgentNode": {"description": "<desc>", "instruction": "<instr>", "model": "gemini-2.5-flash"}}]}, "starterPrompts": [{"text": "<starter>"}], "sharingConfig": {"scope": "ALL_USERS"}}\`.
-     - ADK Agent on Agent Engine: \`POST .../v1alpha/projects/<project>/locations/global/collections/default_collection/engines/<app_id>/assistants/default_assistant/agents\` with \`{"displayName": "<name>", "description": "<desc>", "adkAgentDefinition": {"provisionedReasoningEngine": {"reasoningEngine": "projects/<project_num>/locations/<region>/reasoningEngines/<re_id>"}}, "authorizationConfig": {"toolAuthorizations": ["projects/<project_num>/locations/global/authorizations/<auth_id>"]}, "sharingConfig": {"scope": "ALL_USERS"}}\`.
-     - Querying Agents via \`streamAssist\`: \`POST https://discoveryengine.googleapis.com/v1alpha/projects/<project>/locations/global/collections/default_collection/engines/<app_id>/assistants/default_assistant:streamAssist\` with \`{"query": {"text": "<prompt>"}, "session": "<session_name>", "toolsSpec": {"webGroundingSpec": {}}, "agentsSpec": {"agentSpecs": [{"agentId": "<agent_id>"}]}}\`.
+      - ADK Agent on Agent Engine (\`assistants/default_assistant/agents\` & \`agents-cli publish gemini-enterprise\`):
+        - **CRITICAL Multi-Region (\`us\` vs \`global\`) & Engine ID Suffix Discovery**: In labs where the Gemini Enterprise App (e.g., \`cymbal-enterprise-app\`) is created in multi-region \`us\` (or \`global\`), the actual engine ID often has a generated suffix (e.g., \`cymbal-enterprise-app_1773784699527\` or \`cymbal-enterprise-app_usbu2xhmizb5x\`) while \`displayName\` is \`cymbal-enterprise-app\`. Always query BOTH \`https://us-discoveryengine.googleapis.com/v1alpha/projects/<project>/locations/us/collections/default_collection/engines\` and \`https://discoveryengine.googleapis.com/v1alpha/projects/<project>/locations/global/collections/default_collection/engines\` to discover the exact \`engine["name"]\` (\`projects/<project_num>/locations/<loc>/collections/default_collection/engines/<actual_engine_id>\`).
+        - **\`agents-cli publish gemini-enterprise\` Flag Format**: \`--gemini-enterprise-app-id\` MUST be the FULL Discovery Engine resource path (\`projects/<project_num>/locations/<loc>/collections/default_collection/engines/<actual_engine_id>\`), NEVER the short name \`cymbal-enterprise-app\` (passing a short name fails with \`Invalid GEMINI_ENTERPRISE_APP_ID format. Expected: projects/{project_number}/locations/{location}/collections/{collection}/engines/{engine_id}\`).
+        - **Direct REST Registration & Sharing (\`ALL_USERS\`)**: In addition to (or as fallback for) \`agents-cli publish\`, POST/PATCH the agent on \`https://<loc>-discoveryengine.googleapis.com/v1alpha/<engine_full_name>/assistants/default_assistant/agents\` with \`{"displayName": "<name>", "description": "<desc>", "adkAgentDefinition": {"provisionedReasoningEngine": {"reasoningEngine": "projects/<project_num>/locations/<region>/reasoningEngines/<re_id>"}}, "sharingConfig": {"scope": "ALL_USERS"}}\` (include \`authorizationConfig\` only if an OAuth authorization exists). If the agent already exists in \`GET .../<engine_full_name>/assistants/default_assistant/agents\`, PATCH \`<agent_full_name>?updateMask=sharingConfig\` with \`{"sharingConfig": {"scope": "ALL_USERS"}}\` so organization-wide sharing (\`All users\`) is always enabled.
+      - Querying Agents via \`streamAssist\`: \`POST https://<loc>-discoveryengine.googleapis.com/v1alpha/<engine_full_name>/assistants/default_assistant:streamAssist\` with \`{"query": {"text": "<prompt>"}, "session": "<session_name>", "toolsSpec": {"webGroundingSpec": {}}, "agentsSpec": {"agentSpecs": [{"agentId": "<agent_id>"}]}}\`.
 10. **Model Armor (\`modelarmor.<loc>.rep.googleapis.com/v1\`)**:
     - Enable \`modelarmor.googleapis.com\` and \`dlp.googleapis.com\` first.
     - Use regional endpoint \`https://modelarmor.<loc>.rep.googleapis.com/v1/projects/<project>/locations/<loc>/templates?templateId=<id>\` (e.g. \`us\`).
     - Attach templates to Gemini Enterprise Assistant via \`PATCH .../engines/<app_id>/assistants/default_assistant?updateMask=customerPolicy\` with \`customerPolicy.modelArmorConfig\` (\`userPromptTemplate\`, \`responseTemplate\`, \`failureMode: "FAIL_OPEN"\`).
-11. **Vertex AI Agent Runtime & Agent Identity (\`vertexai.Client\` / \`agent_engines\`)**:
+11. **Vertex AI Agent Runtime, ADK 2.0 Workflows & Agent Identity (\`vertexai.Client\` / \`agent_engines\` / \`agents-cli\`)**:
+    - **CRITICAL \`.env\` Loading for ADK / Multi-Agent Starters (\`support_agent/.env\`)**: Starter \`agent.py\` files frequently import \`.tools\` BEFORE calling \`dotenv.load_dotenv()\`, while \`tools.py\` reads \`os.environ["GOOGLE_CLOUD_LOCATION"]\` and \`agent.py\` reads \`os.environ["MODEL"]\` at module import time! Furthermore, \`dotenv.load_dotenv()\` without arguments does not load \`support_agent/.env\` when run from the parent directory. Therefore:
+      1. Whenever modifying \`tools.py\` or \`agent.py\`, place \`import pathlib, dotenv; dotenv.load_dotenv(pathlib.Path(__file__).resolve().parent / ".env"); dotenv.load_dotenv()\` at the VERY TOP of BOTH \`tools.py\` and \`agent.py\` BEFORE any \`os.environ[...]\` lookup or \`from .tools import ...\`!
+      2. In bash, BEFORE running any \`python3\`, \`uv\`, \`adk\`, or \`agents-cli\` command, always source all \`.env\` files into the shell environment:
+         \`set -a; for f in .env support_agent/.env */.env; do [ -f "$f" ] && source "$f"; done; set +a\`
+      3. When verifying an ADK 2.0 \`Workflow\` (e.g. Task 5 "Orchestrate and Verify the System"), ALWAYS:
+         - Call \`find_similar_bugs("<diagnostic_query>")\` directly in Python first so the BigQuery \`VECTOR_SEARCH\` job on \`ops_intelligence.incident_post_mortems\` and Vertex AI \`text-embedding-004\` call are 100% guaranteed to execute in the project's job history.
+         - Run \`InMemoryRunner(agent=root_agent, app_name="support_agent")\` in Python (using \`uv run python -c ...\` or the active venv with \`.env\` exported) for BOTH the blocked security callback query (containing \`client_secret\`) and the production diagnostic query (e.g. \`"We are seeing connection pool exhaustion on psycopg2 when the payment-service scales on Cloud Run. What should we do?"\`).
     - **CRITICAL Dependency Version Compatibility for \`AdkApp\` on Agent Runtime**: Google Cloud Shell pre-installs \`google-cloud-aiplatform==1.165.1\` alongside an older \`google-adk==1.14.1\`. Because \`google-cloud-aiplatform>=1.165.1\` passes \`auto_create_session=True\` to \`google.adk.runners.Runner()\`, deploying with \`google-adk<1.30.0\` causes the ReasoningEngine container to crash at startup with \`TypeError: Runner.__init__() got an unexpected keyword argument 'auto_create_session'\`. Always upgrade BOTH packages (\`pip install --upgrade "google-cloud-aiplatform[agent_engines,adk]" "google-adk>=1.30.0" cloudpickle pydantic\`) before calling \`agent_engines.create(...)\` and pin the exact upgraded versions in \`requirements=[...]\`.
     - In \`config\` passed to \`client.agent_engines.create(agent=..., config=config)\`, \`"identity_type"\` MUST be the enum \`types.IdentityType.AGENT_IDENTITY\` (NEVER a list \`[types.IdentityType.AGENT_IDENTITY]\`). Many starter \`deploy.py\` files use bracketed placeholders like \`"identity_type": [IDENTITY_TYPE]\` — always replace the entire \`[IDENTITY_TYPE]\` including its brackets with \`types.IdentityType.AGENT_IDENTITY\`.
     - \`ae.api_resource\` returned by \`client.agent_engines.list()\` is a Pydantic v2 \`BaseModel\` (\`ae.api_resource.model_dump()\`), NOT a protobuf message (never call \`google.protobuf.json_format.MessageToDict(ae.api_resource)\`).
@@ -3618,9 +3628,24 @@ ${combinedText}
       \`\`\`
     - CRITICAL for Workbench Notebook Labs:
       1. Inspect the exact \`[Cell <N> | code | exec=...]\` indices and surrounding markdown instructions in \`=== VERTEX AI WORKBENCH NOTEBOOK ===\`.
-      2. Remove all \`#[ TODO ... ]\` comments from patched cells, and use the exact variable names and metric names expected by downstream cells in the notebook (for example: in Task 3 Cell 22 use \`metrics=[POINTWISE_METRIC]\` so Cell 26 \`display_explanations(pointwise_result, num=1, metrics=[POINTWISE_METRIC])\` succeeds; in Task 5 Cell 34/36 set \`PAIRWISE_METRIC_NAME = "pairwise_summarization_quality"\` and \`metric_prompt_template=MetricPromptTemplateExamples.get_prompt_template(PAIRWISE_METRIC_NAME)\`; in Task 6 Cell 40 add \`"context": context,\` to \`eval_dataset\`, in Cell 42 add \`"rouge_l_sum", "bleu", "coherence",\` to \`metrics\`, in Cell 44 set \`prompt_template=prompt_template,\`, and set \`run_through_cell=54\` so all evaluation and visualization cells 40..54 execute and save).
+      2. Remove all \`#[ TODO ... ]\` comments from patched cells, and use the exact variable names and metric names expected by downstream cells in the notebook (for example: in Task 3 Cell 22 use \`metrics=[POINTWISE_METRIC]\` so Cell 26 \`display_explanations(pointwise_result, num=1, metrics=[POINTWISE_METRIC])\` succeeds; in Task 5 Cell 34/36 set \`PAIRWISE_METRIC_NAME = "pairwise_summarization_quality"\` and \`metric_prompt_template=MetricPromptTemplateExamples.get_prompt_template(PAIRWISE_METRIC_NAME)\`; in Task 6 Cell 40 add \`"context": context,\` to \`eval_dataset\`, in Cell 42 add \`"rouge_l_sum", "bleu", "coherence",\` to \`metrics\`, in Task 6 Cell 44 set \`prompt_template=prompt_template,\`, and set \`run_through_cell=54\` so all evaluation and visualization cells 40..54 execute and save).
       3. Never write raw unquoted English prose into Python code (if copying multi-line rubric strings, ensure all strings are properly quoted).
       4. \`wb_helper.update_and_run_notebook(...)\` automatically handles \`Cell 5\` kernel restarts, automatically delegates execution to the Workbench VM over \`gcloud compute ssh\` (using \`/opt/micromamba/bin/python3\` as user \`jupyter\`) if the external proxy returns 403, automatically installs a universal NumPy 1.x/2.x + \`scikit-learn\` compatibility shim (\`np.long\` and \`numpy.core.numeric.ComplexWarning\`), reuses the active kernel across tasks, skips already-executed cells from previous tasks, and saves \`/home/jupyter/<filename>\` after each cell. Always call \`wb_helper.update_and_run_notebook(...)\` rather than writing custom raw SSH scripts.`;
+
+  const hasUnclosedHeredoc = (script: string): boolean => {
+    const heredocRegex = /<<-?\s*['"]?([A-Za-z0-9_]+)['"]?/g;
+    let match: RegExpExecArray | null;
+    while ((match = heredocRegex.exec(script)) !== null) {
+      const delim = match[1];
+      const afterIdx = match.index + match[0].length;
+      const rest = script.slice(afterIdx);
+      const closingRegex = new RegExp(`(?:^|\\n)\\s*${delim}\\s*(?:\\n|$)`);
+      if (!closingRegex.test(rest)) {
+        return true;
+      }
+    }
+    return false;
+  };
 
   const extractJsonStringField = (text: string, fieldName: string): string | undefined => {
     const keyIdx = text.indexOf(`"${fieldName}"`);
@@ -3631,19 +3656,21 @@ ${combinedText}
     if (quoteIdx === -1) return undefined;
     let rawChars = '';
     let i = quoteIdx + 1;
+    let closedQuote = false;
     while (i < text.length) {
       const ch = text[i];
       if (ch === '\\') {
         rawChars += text.slice(i, i + 2);
         i += 2;
       } else if (ch === '"') {
+        closedQuote = true;
         break;
       } else {
         rawChars += ch;
         i += 1;
       }
     }
-    if (!rawChars) return undefined;
+    if (!rawChars || !closedQuote) return undefined;
     try {
       return JSON.parse(`"${rawChars}"`);
     } catch {
@@ -3663,11 +3690,15 @@ ${combinedText}
       .trim();
     if (!cleaned) return null;
     try {
-      return JSON.parse(cleaned);
+      const parsed = JSON.parse(cleaned);
+      if (parsed?.script && hasUnclosedHeredoc(parsed.script)) {
+        return null;
+      }
+      return parsed;
     } catch {
       const repairedScript = extractJsonStringField(cleaned, 'script');
       const repairedSummary = extractJsonStringField(cleaned, 'summary');
-      if (repairedScript) {
+      if (repairedScript && !hasUnclosedHeredoc(repairedScript)) {
         return { script: repairedScript, summary: repairedSummary };
       }
       return null;
@@ -3682,7 +3713,7 @@ ${combinedText}
       try {
         const opusText = await callAnthropicVertexRawPredict(
           `${prompt}\n\nReturn ONLY a valid JSON object with keys "script" (complete non-interactive bash script) and "summary" (one-sentence summary). Do not wrap in markdown fences.`,
-          16384
+          32768
         );
         const parsedOpus = parseSynthesisResponse(opusText);
         if (parsedOpus?.script && typeof parsedOpus.script === 'string' && parsedOpus.script.trim()) {
@@ -3720,7 +3751,7 @@ ${combinedText}
             config: {
               responseMimeType: 'application/json',
               temperature: 0.1,
-              maxOutputTokens: 16384,
+              maxOutputTokens: 32768,
               responseSchema: {
                 type: Type.OBJECT,
                 properties: {
