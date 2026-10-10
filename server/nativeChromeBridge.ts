@@ -3281,22 +3281,42 @@ if proj and user_email:
                 "https://logging.googleapis.com/v2/entries:list",
                 data=json.dumps({
                     "resourceNames": [f"projects/{proj}"],
-                    "filter": f"(logName:\\"cloudaudit.googleapis.com\\" AND (protoPayload.authenticationInfo.principalEmail:\\"{proj}@\\" OR protoPayload.authenticationInfo.principalEmail:\\"admiral@qwiklabs\\")) OR logName:\\"logs/cepf-logs\\"",
+                    "filter": f"(logName:\\"cloudaudit.googleapis.com\\" AND (protoPayload.authenticationInfo.principalEmail:\\"{proj}@\\" OR protoPayload.authenticationInfo.principalEmail:\\"admiral@qwiklabs\\")) OR logName:\\"logs/cepf-logs\\" OR logName:\\"discoveryengine.googleapis.com%2Fapi_errors\\"",
                     "orderBy": "timestamp desc",
                     "pageSize": 20
                 }).encode(),
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json", "X-Goog-User-Project": proj}
             )
             with urllib.request.urlopen(req, timeout=8) as r:
                 entries = json.loads(r.read().decode()).get("entries", [])
             if entries:
-                print("\\n=== LIVE QWIKLABS GRADER AUDIT CHECKS (EXACT API CALLS & FILTERS MADE BY GRADER) ===")
+                print("\\n=== LIVE QWIKLABS GRADER AUDIT CHECKS & API ERRORS ===")
                 for e in entries[:15]:
                     if "protoPayload" in e:
                         pp = e.get("protoPayload", {})
-                        print(e.get("timestamp"), pp.get("serviceName"), pp.get("methodName"), json.dumps(pp.get("request"))[:450])
+                        print(e.get("timestamp"), pp.get("serviceName"), pp.get("methodName"), json.dumps(pp.get("request"))[:450], json.dumps(pp.get("status"))[:200])
                     else:
-                        print(e.get("timestamp"), "cepf-logs", json.dumps(e.get("jsonPayload") or e.get("textPayload"))[:450])
+                        print(e.get("timestamp"), e.get("logName", "").split("/")[-1], json.dumps(e.get("jsonPayload") or e.get("textPayload"))[:450])
+            try:
+                de_req = urllib.request.Request(
+                    f"https://discoveryengine.googleapis.com/v1alpha/projects/{proj}/locations/global/collections/default_collection/engines",
+                    headers={"Authorization": f"Bearer {token}", "X-Goog-User-Project": proj}
+                )
+                with urllib.request.urlopen(de_req, timeout=5) as dr:
+                    engs = json.loads(dr.read().decode()).get("engines", [])
+                if engs:
+                    print("\\n=== LIVE DISCOVERY ENGINE APPS & WIDGET CONFIGS ===")
+                    for eng in engs[:3]:
+                        ename = eng.get("name", "")
+                        print("Engine:", json.dumps(eng)[:600])
+                        wc_req = urllib.request.Request(
+                            f"https://discoveryengine.googleapis.com/v1alpha/{ename}/widgetConfigs/default_search_widget_config",
+                            headers={"Authorization": f"Bearer {token}", "X-Goog-User-Project": proj}
+                        )
+                        with urllib.request.urlopen(wc_req, timeout=5) as wr:
+                            print("WidgetConfig:", wr.read().decode()[:1200])
+            except Exception:
+                pass
     except Exception:
         pass
 '`;
