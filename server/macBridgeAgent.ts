@@ -1430,7 +1430,21 @@ end tell
       }
       for (var i = 0; i < ansList.length; i++) {
         var a = ansList[i];
-        if (a.choiceId) {
+        if (a.itemType === 'multiple-select' && Array.isArray(a.optionTitles)) {
+          var wantTitles = a.optionTitles.map(function(t) { return String(t || '').replace(/\s+/g, ' ').trim(); });
+          var cbs = findDeep(q.shadowRoot, function(el) {
+            return el.tagName === 'MD-CHECKBOX';
+          });
+          for (var j = 0; j < cbs.length; j++) {
+            var cb = cbs[j];
+            var lbl = String(cb.getAttribute('data-aria-label') || cb.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+            if (lbl) {
+              var shouldCheck = wantTitles.indexOf(lbl) !== -1;
+              var isChecked = Boolean(cb.checked || cb.hasAttribute('checked'));
+              if (shouldCheck !== isChecked) cb.click();
+            }
+          }
+        } else if (a.choiceId) {
           var radios = findDeep(q.shadowRoot, function(el) {
             return el.id === 'radio-' + a.choiceId;
           });
@@ -1472,7 +1486,7 @@ end tell
       String(s || '')
         .replace(/\\/g, '\\\\')
         .replace(/"/g, '\\"')
-        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
         .trim();
 
     const targetRadioTitles = [];
@@ -1510,6 +1524,26 @@ on findWebArea(node, depth)
   return missing value
 end findWebArea
 
+on normalizeLabel(rawStr)
+  if rawStr is missing value then return ""
+  set s to rawStr as string
+  if s is "" or s is "missing value" then return ""
+  set oldDelims to AppleScript's text item delimiters
+  set AppleScript's text item delimiters to {return, linefeed, tab, " "}
+  set wordItems to text items of s
+  set cleanWords to {}
+  repeat with w in wordItems
+    set wStr to w as string
+    if wStr is not "" then
+      set end of cleanWords to wStr
+    end if
+  end repeat
+  set AppleScript's text item delimiters to " "
+  set res to cleanWords as string
+  set AppleScript's text item delimiters to oldDelims
+  return res
+end normalizeLabel
+
 on getElemLabel(el)
   tell application "System Events"
     set lbl to ""
@@ -1528,7 +1562,7 @@ on getElemLabel(el)
       end try
     end if
     if lbl is "missing value" then set lbl to ""
-    return lbl
+    return my normalizeLabel(lbl)
   end tell
 end getElemLabel
 
@@ -1642,26 +1676,56 @@ tell application "System Events"
       end repeat
     end if
 
+    set radioNames to {}
+    repeat with rEl in radioList
+      set end of radioNames to my getElemLabel(rEl)
+    end repeat
+
     set targetRadioTitles to ${radioTitlesAppleList}
     set usedRadioIndices to {}
     set clickedRadios to 0
     repeat with tTitle in targetRadioTitles
       set tStr to tTitle as string
+      set matchedIdx to 0
+
+      -- Pass 1: Exact label equality
       repeat with rIdx from 1 to count of radioList
         if usedRadioIndices does not contain rIdx then
-          set rEl to item rIdx of radioList
-          set rName to my getElemLabel(rEl)
-          if rName is not "" and (rName is tStr or rName contains tStr or tStr contains rName) then
-            set end of usedRadioIndices to rIdx
-            try
-              click rEl
-              set clickedRadios to clickedRadios + 1
-            end try
-            delay 0.25
+          set rName to (item rIdx of radioNames) as string
+          if rName is not "" and rName is tStr then
+            set matchedIdx to rIdx
             exit repeat
           end if
         end if
       end repeat
+
+      -- Pass 2: Safe substring fallback (only if both strings are >= 12 chars so short labels like "OIDC" never collide)
+      if matchedIdx is 0 and (length of tStr) >= 12 then
+        repeat with rIdx from 1 to count of radioList
+          if usedRadioIndices does not contain rIdx then
+            set rName to (item rIdx of radioNames) as string
+            if (length of rName) >= 12 and (rName contains tStr or tStr contains rName) then
+              set matchedIdx to rIdx
+              exit repeat
+            end if
+          end if
+        end repeat
+      end if
+
+      if matchedIdx > 0 then
+        set end of usedRadioIndices to matchedIdx
+        set rEl to item matchedIdx of radioList
+        try
+          click rEl
+          set clickedRadios to clickedRadios + 1
+        end try
+        delay 0.25
+      end if
+    end repeat
+
+    set checkNames to {}
+    repeat with cEl in checkList
+      set end of checkNames to my getElemLabel(cEl)
     end repeat
 
     set targetCheckTitles to ${checkTitlesAppleList}
@@ -1669,22 +1733,66 @@ tell application "System Events"
     set clickedChecks to 0
     repeat with cTitle in targetCheckTitles
       set cStr to cTitle as string
+      set matchedCheckIdx to 0
+
+      -- Pass 1: Exact label equality
       repeat with cIdx from 1 to count of checkList
         if usedCheckIndices does not contain cIdx then
-          set cEl to item cIdx of checkList
-          set cName to my getElemLabel(cEl)
-          if cName is not "" and (cName is cStr or cName contains cStr or cStr contains cName) then
-            set end of usedCheckIndices to cIdx
-            try
-              click cEl
-              set clickedChecks to clickedChecks + 1
-            end try
-            delay 0.25
+          set cName to (item cIdx of checkNames) as string
+          if cName is not "" and cName is cStr then
+            set matchedCheckIdx to cIdx
             exit repeat
           end if
         end if
       end repeat
+
+      -- Pass 2: Safe substring fallback
+      if matchedCheckIdx is 0 and (length of cStr) >= 12 then
+        repeat with cIdx from 1 to count of checkList
+          if usedCheckIndices does not contain cIdx then
+            set cName to (item cIdx of checkNames) as string
+            if (length of cName) >= 12 and (cName contains cStr or cStr contains cName) then
+              set matchedCheckIdx to cIdx
+              exit repeat
+            end if
+          end if
+        end repeat
+      end if
+
+      if matchedCheckIdx > 0 then
+        set end of usedCheckIndices to matchedCheckIdx
+      end if
     end repeat
+
+    -- Ensure target checkboxes are checked and non-target checkboxes (from earlier drafts) are unchecked
+    if (count of targetCheckTitles) > 0 then
+      repeat with cIdx from 1 to count of checkList
+        set cEl to item cIdx of checkList
+        set isChecked to false
+        try
+          set cVal to value of cEl
+          if cVal is 1 or cVal is "1" or cVal is true then
+            set isChecked to true
+          end if
+        end try
+        if usedCheckIndices contains cIdx then
+          set clickedChecks to clickedChecks + 1
+          if isChecked is false then
+            try
+              click cEl
+            end try
+            delay 0.25
+          end if
+        else
+          if isChecked is true then
+            try
+              click cEl
+            end try
+            delay 0.25
+          end if
+        end if
+      end repeat
+    end if
 
     delay 0.7
     set postElems to entire contents of targetWa

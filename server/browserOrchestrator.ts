@@ -1927,6 +1927,13 @@ export class LabBrowserOrchestrator {
                     if (!arr.includes(ir.choiceId)) arr.push(ir.choiceId);
                     excludedChoicesByItemId[ir.quizItemId] = arr;
                   }
+                } else if (
+                  ir.isSubmitted &&
+                  ir.isCorrect === true &&
+                  Array.isArray(ir.choiceIds) &&
+                  ir.choiceIds.length > 0
+                ) {
+                  lockedChoicesByItemId[ir.quizItemId] = ir.choiceIds;
                 }
               }
 
@@ -1945,11 +1952,20 @@ export class LabBrowserOrchestrator {
 
               for (let idx = 0; idx < answers.length; idx++) {
                 const ans = answers[idx];
-                this.addLog(
-                  'ai',
-                  'gemini',
-                  `Q${idx + 1}: Selected Option #${(ans.optionIndex ?? 0) + 1} ("${ans.optionTitle || ''}") — ${ans.reason || ''}`
-                );
+                if (ans.itemType === 'multiple-select' && Array.isArray(ans.optionTitles)) {
+                  const nums = (ans.optionIndices || []).map((i) => `#${i + 1}`).join(', ');
+                  this.addLog(
+                    'ai',
+                    'gemini',
+                    `Q${idx + 1}: Selected Options ${nums} ("${ans.optionTitles.join(' + ')}") — ${ans.reason || ''}`
+                  );
+                } else {
+                  this.addLog(
+                    'ai',
+                    'gemini',
+                    `Q${idx + 1}: Selected Option #${(ans.optionIndex ?? 0) + 1} ("${ans.optionTitle || ''}") — ${ans.reason || ''}`
+                  );
+                }
               }
 
               const needsRetakeFirst = Boolean(cq.isSubmitted && !cq.isPassing);

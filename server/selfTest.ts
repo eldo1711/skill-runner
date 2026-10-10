@@ -1068,6 +1068,75 @@ async function runVerificationTests() {
   await htmlBundlePage.close();
   console.log('✓ Google Skills Studio html_bundles course & <gss-knowledge-check> quiz verified.');
 
+  // 16. Verify <ql-quiz> multiple-select + short/long option disambiguation & macBridgeAgent AppleScript safeguards
+  console.log(
+    '[16/16] Verifying <ql-quiz> multiple-select solving and macBridgeAgent two-pass AX matching...'
+  );
+  const wifQuizItems = [
+    {
+      id: '3350016',
+      itemType: 'multiple-choice',
+      stem: "An organization's security team wants to set up federation using their older, existing on-premises identity provider that uses XML-based assertions. Which protocol will they be using?",
+      options: [
+        { id: '2953445', title: 'OIDC' },
+        { id: '9654800', title: 'SAML 1.0' },
+        { id: '7022871', title: 'OAuth 2.0' },
+        { id: '1306332', title: 'SAML 2.0' },
+      ],
+    },
+    {
+      id: '8994162',
+      itemType: 'multiple-select',
+      stem: 'A retail company has thousands of store associates who already log into a corporate portal using Okta. They now need access to a new inventory application hosted on Google Cloud. What are the two concepts primarily demonstrated here?',
+      options: [
+        { id: '4493399', title: 'Cloud Identity Free Edition' },
+        { id: '9626647', title: 'Workforce Identity Federation' },
+        { id: '4055913', title: 'Service Account Impersonation' },
+        { id: '9626635', title: 'Single Sign-On (SSO)' },
+      ],
+    },
+    {
+      id: '1690878',
+      itemType: 'multiple-choice',
+      stem: 'From an operational standpoint, why is OIDC generally considered easier to maintain over time compared to SAML?',
+      options: [
+        {
+          id: '1499891',
+          title:
+            'OIDC allows Google to periodically check the IdP\'s "Discovery URL" to find new public keys.',
+        },
+        { id: '5044930', title: 'OIDC eliminates the need for an Identity Provider.' },
+      ],
+    },
+  ];
+  const wifLocked: Record<string, string | string[]> = {
+    '8994162': ['9626647', '9626635'],
+  };
+  const wifSolved = await solveCourseQuizQuestions(
+    'Use a Third-Party Identity Provider with Workforce Identity Federation',
+    'SAML 2.0 uses XML-based assertions. OIDC uses a Discovery URL so Google can automatically fetch rotated public keys.',
+    wifQuizItems,
+    {},
+    wifLocked
+  );
+  if (
+    wifSolved[0].choiceId !== '1306332' ||
+    JSON.stringify(wifSolved[1].choiceIds) !== JSON.stringify(['9626647', '9626635']) ||
+    wifSolved[2].choiceId !== '1499891'
+  ) {
+    throw new Error(`Unexpected WIF quiz answers: ${JSON.stringify(wifSolved)}`);
+  }
+  if (
+    !agentCode.includes('on normalizeLabel(rawStr)') ||
+    !agentCode.includes('if matchedIdx is 0 and (length of tStr) >= 12 then') ||
+    !agentCode.includes('if usedCheckIndices contains cIdx then')
+  ) {
+    throw new Error(
+      'macBridgeAgent.ts is missing normalizeLabel, two-pass length-guarded radio matching, or state-aware checkbox toggling!'
+    );
+  }
+  console.log('✓ <ql-quiz> multiple-select solving & macBridgeAgent two-pass AX matching verified.');
+
   await browser.close();
   console.log('✅ All verification tests passed!');
 }
