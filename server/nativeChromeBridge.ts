@@ -1766,6 +1766,12 @@ export async function execInStudentCloudShellBridge(
             env: {
               ...cleanEnv,
               HOME: localWs,
+              SSL_CERT_FILE:
+                process.env.SSL_CERT_FILE ||
+                (fs.existsSync('/etc/ssl/cert.pem') ? '/etc/ssl/cert.pem' : ''),
+              REQUESTS_CA_BUNDLE:
+                process.env.REQUESTS_CA_BUNDLE ||
+                (fs.existsSync('/etc/ssl/cert.pem') ? '/etc/ssl/cert.pem' : ''),
               GOOGLE_CLOUD_PROJECT: projectId,
               DEVSHELL_PROJECT_ID: projectId,
               DRIVE_ACCESS_TOKEN: hostAccessToken,

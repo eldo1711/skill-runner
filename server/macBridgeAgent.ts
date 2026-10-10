@@ -2462,12 +2462,15 @@ async function execInLocalStudentWorkspace(authStatus, projectId, command, timeo
   const workspaceDir = path.join(SNAPSHOT_DIR, 'workspaces', safeProj);
   fs.mkdirSync(workspaceDir, { recursive: true });
 
+  const defaultCertFile = fs.existsSync('/etc/ssl/cert.pem') ? '/etc/ssl/cert.pem' : '';
   const env = {
     ...process.env,
     HOME: workspaceDir,
     CLOUDSDK_CONFIG: authStatus.configDir,
     CLOUDSDK_CORE_DISABLE_PROMPTS: '1',
     PYTHONUNBUFFERED: '1',
+    SSL_CERT_FILE: process.env.SSL_CERT_FILE || defaultCertFile,
+    REQUESTS_CA_BUNDLE: process.env.REQUESTS_CA_BUNDLE || defaultCertFile,
     GOOGLE_CLOUD_PROJECT: projectId || '',
     DEVSHELL_PROJECT_ID: projectId || '',
     CLOUDSDK_CORE_PROJECT: projectId || '',
