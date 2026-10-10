@@ -873,7 +873,8 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
         const rawNodeText = getCleanInstructionText(node);
         const isPromptStep =
           /\b(?:ask|prompt)\s+the\s+(?:agent|cli)\b/i.test(rawNodeText) ||
-          /\bin\s+the\s+(?:terminal\s+tab\s+running\s+)?`?agy`?\s*(?:session)?\b/i.test(rawNodeText);
+          /\bin\s+the\s+(?:terminal\s+tab\s+running\s+)?`?agy`?\s*(?:session)?\b/i.test(rawNodeText) ||
+          /\b(?:enter|send|sending|type|paste)\s+(?:the\s+following\s+)?(?:prompt|message|query)\b/i.test(rawNodeText);
 
         const codeBlocks = [
           ...(node.matches('ql-code-block, pre') ? [node] : []),

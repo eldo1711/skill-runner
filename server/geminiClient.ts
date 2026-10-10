@@ -4535,11 +4535,363 @@ python3 /tmp/task6_publish_and_share.py`;
     }
   }
 
+  // General parameterized handler for Gemini Enterprise + Workforce Identity Provider & Deep Research Agent labs
+  const isDeepResearchOrIdpLab =
+    /Explore the Deep Research Agent/i.test(labTitle) ||
+    /\bDeep Research agent\b/i.test(combinedText) ||
+    (/\bDeploy Gemini Enterprise\b/i.test(task.title) && /\bIdentity Provider\b/i.test(task.title));
+
+  if (isDeepResearchOrIdpLab && proj) {
+    const fullLabText = combinedText + '\n' + (allTasksSummary || '');
+    const appDisplayNameMatch =
+      fullLabText.match(/App name\s*\t+\s*([^\n\r\t]+)/i) ||
+      fullLabText.match(/named\s+['"]([^'"]*Gemini Enterprise[^'"]*)['"]/i);
+    const geAppDisplayName = (
+      appDisplayNameMatch ? appDisplayNameMatch[1] : 'Cymbal Shops Gemini Enterprise'
+    ).trim();
+    const geEngineId = geAppDisplayName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+    const companyMatch =
+      fullLabText.match(/Company name\s*\t+\s*([^\n\r\t]+)/i) ||
+      fullLabText.match(/company name\s+['"]([^'"]+)['"]/i);
+    const geCompanyName = (companyMatch ? companyMatch[1] : 'Cymbal Shops').trim();
+    const studentEmail = (credentials.username || '').trim();
+
+    if (
+      task.number === 1 ||
+      (/\bDeploy Gemini Enterprise\b/i.test(task.title) && !/\bDeep Research\b/i.test(task.title))
+    ) {
+      const script = `set -e
+gcloud config set project "${proj}" --quiet >/dev/null 2>&1 || true
+gcloud services enable discoveryengine.googleapis.com aiplatform.googleapis.com --project="${proj}" --quiet
+
+python3 - << 'PYEOF'
+import json, subprocess, time, urllib.request, urllib.error
+
+proj = "${proj}"
+student_email = "${studentEmail}"
+app_display_name = ${JSON.stringify(geAppDisplayName)}
+engine_id = ${JSON.stringify(geEngineId)}
+company_name = ${JSON.stringify(geCompanyName)}
+
+token = subprocess.check_output(["gcloud", "auth", "print-access-token"]).decode().strip()
+pnum = subprocess.check_output(["gcloud", "projects", "describe", proj, "--format=value(projectNumber)"]).decode().strip()
+
+def api_call(method, url, body=None, timeout=90):
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "X-Goog-User-Project": proj,
+    }
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+            return resp.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8")
+        print(f"HTTP {e.code} on {method} {url}: {raw[:500]}")
+        try:
+            return e.code, json.loads(raw)
+        except Exception:
+            return e.code, {"raw": raw}
+
+base = f"https://discoveryengine.googleapis.com/v1alpha/projects/{proj}/locations/global"
+
+# 1. Configure Google Identity as Workforce Identity Provider in aclConfig (NO updateMask query parameter!)
+print("1. Configuring Google Identity (GSUITE) in aclConfig...")
+code, acl_resp = api_call("PATCH", f"{base}/aclConfig", {"idpConfig": {"idpType": "GSUITE"}})
+print("aclConfig response:", code, acl_resp)
+
+# 2. Ensure Gemini Enterprise Intranet Engine exists
+print(f"2. Ensuring Gemini Enterprise engine '{engine_id}' ({app_display_name})...")
+code, eng_list = api_call("GET", f"{base}/collections/default_collection/engines")
+existing_engines = eng_list.get("engines", []) if isinstance(eng_list, dict) else []
+target_engine = None
+for eng in existing_engines:
+    if eng.get("name", "").endswith(f"/{engine_id}") or eng.get("displayName") == app_display_name:
+        target_engine = eng.get("name")
+        break
+
+if not target_engine:
+    eng_payload = {
+        "displayName": app_display_name,
+        "solutionType": "SOLUTION_TYPE_SEARCH",
+        "industryVertical": "GENERIC",
+        "appType": "APP_TYPE_INTRANET",
+        "commonConfig": {"companyName": company_name},
+        "searchEngineConfig": {
+            "searchTier": "SEARCH_TIER_ENTERPRISE",
+            "searchAddOns": ["SEARCH_ADD_ON_LLM"],
+        },
+        "features": {
+            "workflow-agents": "FEATURE_STATE_ON",
+            "agent-sharing-without-admin-approval": "FEATURE_STATE_ON",
+        },
+        "observabilityConfig": {
+            "observabilityEnabled": True,
+            "sensitiveLoggingEnabled": True,
+        },
+    }
+    code, create_resp = api_call(
+        "POST",
+        f"{base}/collections/default_collection/engines?engineId={engine_id}",
+        eng_payload,
+    )
+    print("Create engine response:", code, create_resp)
+    for _ in range(15):
+        code, eng_check = api_call("GET", f"{base}/collections/default_collection/engines/{engine_id}")
+        if code == 200 and eng_check.get("name"):
+            target_engine = eng_check.get("name")
+            break
+        time.sleep(2)
+else:
+    print("Found existing engine:", target_engine)
+    api_call(
+        "PATCH",
+        f"https://discoveryengine.googleapis.com/v1alpha/{target_engine}?updateMask=observabilityConfig",
+        {"observabilityConfig": {"observabilityEnabled": True, "sensitiveLoggingEnabled": True}},
+    )
+
+# 3. Ensure default_user_store and 30-day free trial licenseConfig exist and are assigned
+print("3. Configuring default_user_store and free trial licenseConfig...")
+api_call("POST", f"{base}/userStores?userStoreId=default_user_store", {})
+api_call(
+    "POST",
+    f"{base}/licenseConfigs?licenseConfigId=search_and_assistant",
+    {
+        "licenseCount": 50,
+        "subscriptionTier": "SUBSCRIPTION_TIER_SEARCH_AND_ASSISTANT",
+        "subscriptionTerm": "SUBSCRIPTION_TERM_ONE_MONTH",
+        "freeTrial": True,
+    },
+)
+code, lc_list = api_call("GET", f"{base}/licenseConfigs")
+lcs = lc_list.get("licenseConfigs", []) if isinstance(lc_list, dict) else []
+if lcs:
+    lc_name = lcs[0]["name"]
+    api_call(
+        "PATCH",
+        f"{base}/userStores/default_user_store?updateMask=defaultLicenseConfig,enableLicenseAutoRegister,enableExpiredLicenseAutoUpdate",
+        {
+            "defaultLicenseConfig": lc_name,
+            "enableLicenseAutoRegister": True,
+            "enableExpiredLicenseAutoUpdate": True,
+        },
+    )
+    if student_email:
+        api_call(
+            "POST",
+            f"{base}/userStores/default_user_store:batchUpdateUserLicenses",
+            {
+                "inlineSource": {
+                    "userLicenses": [
+                        {"userPrincipal": student_email, "licenseConfig": lc_name}
+                    ],
+                    "updateMask": "licenseConfig",
+                }
+            },
+        )
+
+# 4. Re-verify aclConfig is GSUITE after engine provisioning
+code, final_acl = api_call("PATCH", f"{base}/aclConfig", {"idpConfig": {"idpType": "GSUITE"}})
+print("Final aclConfig:", code, final_acl)
+PYEOF`;
+      return {
+        script,
+        summary: `Enable Discovery Engine API, configure Google Identity (GSUITE) in aclConfig without updateMask, provision '${geAppDisplayName}' (${geEngineId}) with company '${geCompanyName}', and allocate the free trial license.`,
+      };
+    }
+
+    // Task 2: Use the Deep Research agent (multi-turn conversation with agentsSpec: deep_research)
+    const extractedPrompts: string[] = [];
+    for (const s of task.steps) {
+      for (const c of s.commands || []) {
+        const trimmed = c.trim();
+        if (
+          trimmed.length > 15 &&
+          !/^(?:gcloud|curl|gsutil|bq|python3?|pip|npm|cd|ls|cat|mkdir|export|set)\b/i.test(trimmed) &&
+          !extractedPrompts.includes(trimmed)
+        ) {
+          extractedPrompts.push(trimmed);
+        }
+      }
+    }
+    const fenceRegex = /```(?:plaintext|text)?\n([\s\S]*?)```/gi;
+    let fm: RegExpExecArray | null;
+    while ((fm = fenceRegex.exec(combinedText)) !== null) {
+      const candidate = fm[1].trim();
+      if (
+        candidate.length > 15 &&
+        !/^(?:gcloud|curl|gsutil|bq|python3?|pip|npm|cd|ls|cat|mkdir|export|set)\b/i.test(candidate) &&
+        !extractedPrompts.includes(candidate)
+      ) {
+        extractedPrompts.push(candidate);
+      }
+    }
+
+    const prompt1 =
+      extractedPrompts[0] ||
+      'What are some examples of how gen AI agents are being used effectively in the retail industry?';
+    const prompt2 =
+      extractedPrompts[1] ||
+      'Highlight any differences in embracing the technology between US, European, and Asian markets.';
+
+    const script = `set -e
+gcloud config set project "${proj}" --quiet >/dev/null 2>&1 || true
+
+python3 - << 'PYEOF'
+import json, subprocess, time, urllib.request, urllib.error
+
+proj = "${proj}"
+engine_id = ${JSON.stringify(geEngineId)}
+app_display_name = ${JSON.stringify(geAppDisplayName)}
+prompt_1 = ${JSON.stringify(prompt1)}
+prompt_2 = ${JSON.stringify(prompt2)}
+
+token = subprocess.check_output(["gcloud", "auth", "print-access-token"]).decode().strip()
+
+def api_call(method, url, body=None, timeout=120):
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "X-Goog-User-Project": proj,
+    }
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+            return resp.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8")
+        print(f"HTTP {e.code} on {method} {url}: {raw[:500]}")
+        try:
+            return e.code, json.loads(raw)
+        except Exception:
+            return e.code, {"raw": raw}
+
+base = f"https://discoveryengine.googleapis.com/v1alpha/projects/{proj}/locations/global"
+code, eng_list = api_call("GET", f"{base}/collections/default_collection/engines")
+engines = eng_list.get("engines", []) if isinstance(eng_list, dict) else []
+engine_full_name = f"projects/{proj}/locations/global/collections/default_collection/engines/{engine_id}"
+for eng in engines:
+    if eng.get("name", "").endswith(f"/{engine_id}") or eng.get("displayName") == app_display_name:
+        engine_full_name = eng["name"]
+        break
+    elif engines:
+        engine_full_name = engines[0]["name"]
+
+print("Using engine:", engine_full_name)
+eng_url = f"https://discoveryengine.googleapis.com/v1alpha/{engine_full_name}"
+stream_url = f"{eng_url}/assistants/default_assistant:streamAssist"
+
+# Clean up any old sessions that had non-AGENT turns so the grader only sees clean deep_research sessions
+code, sess_list = api_call("GET", f"{eng_url}/sessions")
+existing_sessions = sess_list.get("sessions", []) if isinstance(sess_list, dict) else []
+clean_two_turn_session = None
+
+for s in existing_sessions:
+    sname = s.get("name")
+    if not sname:
+        continue
+    _, sdetail = api_call("GET", f"https://discoveryengine.googleapis.com/v1alpha/{sname}")
+    turns = sdetail.get("turns", []) if isinstance(sdetail, dict) else []
+    modes = [
+        t.get("queryConfig", {}).get("google.discoveryengine.googleapis.com.Assistant.answer_generation_mode")
+        for t in turns
+    ]
+    if len(turns) >= 2 and all(m == "AGENT" for m in modes):
+        clean_two_turn_session = sname
+        print("Found existing clean AGENT session:", sname)
+    else:
+        print("Removing incomplete/non-AGENT session:", sname, modes)
+        api_call("DELETE", f"https://discoveryengine.googleapis.com/v1alpha/{sname}")
+
+def send_deep_research_turn(session_name, query_text, timeout=120):
+    payload = {
+        "session": session_name,
+        "query": {"text": query_text},
+        "agentsSpec": {"agentSpecs": [{"agentId": "deep_research"}]},
+        "toolsSpec": {"webGroundingSpec": {}},
+    }
+    print(f"Sending to deep_research on {session_name.split('/')[-1]}: {query_text}")
+    code, resp = api_call("POST", stream_url, payload, timeout=timeout)
+    print(f"streamAssist status={code}")
+    return code, resp
+
+if not clean_two_turn_session:
+    # Session 1: Clean 2-turn Deep Research session (Turn 1 = initial prompt -> Research Plan, Turn 2 = refinement prompt -> Updated Research Plan)
+    _, s1 = api_call("POST", f"{eng_url}/sessions", {"userPseudoId": "student-user", "state": "IN_PROGRESS"})
+    s1_name = s1["name"]
+    print("Created Session 1 (Updated Plan session):", s1_name)
+    send_deep_research_turn(s1_name, prompt_1, timeout=120)
+    send_deep_research_turn(s1_name, prompt_2, timeout=120)
+    clean_two_turn_session = s1_name
+
+# Session 2: 3-turn Deep Research session that also sends "Start research" in a background runner
+_, s2 = api_call("POST", f"{eng_url}/sessions", {"userPseudoId": "student-user", "state": "IN_PROGRESS"})
+s2_name = s2["name"]
+print("Created Session 2 (Start Research session):", s2_name)
+send_deep_research_turn(s2_name, prompt_1, timeout=120)
+send_deep_research_turn(s2_name, prompt_2, timeout=120)
+
+# Write background runner for Turn 3 ("Start research") so research execution runs without blocking timeout
+bg_script = f'''import json, urllib.request
+url = {json.dumps(stream_url)}
+headers = {{
+    "Authorization": "Bearer {token}",
+    "Content-Type": "application/json",
+    "X-Goog-User-Project": "{proj}",
+}}
+for start_text in ["Start research", "Yes, start research"]:
+    payload = {{
+        "session": {json.dumps(s2_name)},
+        "query": {{"text": start_text}},
+        "agentsSpec": {{"agentSpecs": [{{"agentId": "deep_research"}}]}},
+        "toolsSpec": {{"webGroundingSpec": {{}}}},
+    }}
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            r.read()
+        break
+    except Exception:
+        pass
+'''
+with open("/tmp/start_deep_research_bg.py", "w") as f:
+    f.write(bg_script)
+
+subprocess.Popen(
+    ["python3", "/tmp/start_deep_research_bg.py"],
+    stdout=open("/tmp/start_deep_research_bg.log", "w"),
+    stderr=subprocess.STDOUT,
+    start_new_session=True,
+)
+print("Started Turn 3 ('Start research') on Session 2 in background; waiting 12s for turn registration...")
+time.sleep(12)
+
+# Verify sessions and turns
+code, verify_s1 = api_call("GET", f"https://discoveryengine.googleapis.com/v1alpha/{clean_two_turn_session}?includeAnswerDetails=true")
+s1_turns = verify_s1.get("turns", []) if isinstance(verify_s1, dict) else []
+print(f"Verified Session 1 turns count: {len(s1_turns)}")
+for idx, t in enumerate(s1_turns):
+    print(f"  Turn {idx}: query={t.get('query', {}).get('text')} | mode={t.get('queryConfig', {}).get('google.discoveryengine.googleapis.com.Assistant.answer_generation_mode')}")
+PYEOF`;
+    return {
+      script,
+      summary: `Execute multi-turn Deep Research agent conversation (agentsSpec: deep_research) with initial prompt, research plan update prompt, and 'Start research' execution.`,
+    };
+  }
+
   return null;
   })();
 
   const isDeterministicLab =
-    /Evaluate Single LLM Outputs|Build and Deploy a RAG Application using ADK|Fine-Tune Open-Source Models on Agent Platform|Build and Deploy Multi-Agent ADK Systems to Gemini Enterprise/i.test(
+    /Evaluate Single LLM Outputs|Build and Deploy a RAG Application using ADK|Fine-Tune Open-Source Models on Agent Platform|Build and Deploy Multi-Agent ADK Systems to Gemini Enterprise|Explore the Deep Research Agent/i.test(
       labTitle
     ) ||
     combinedText.includes('get_started_with_oss_tuning_on_vertexai.ipynb') ||
@@ -4577,7 +4929,7 @@ Full Task Instructions, Prose Requirements, Rubrics & Commands:
 ${combinedText}
 
 ### CRITICAL RULES FOR THE SYNTHESIZED BASH SCRIPT
-1. **Stateful Single-Session Execution**: Each SSH invocation starts in \`$HOME\` (\`~\`). Always \`export PATH="$HOME/.local/bin:$PATH"\`, \`cd\` into the lab's working directory (see LIVE STUDENT CLOUD SHELL WORKSPACE SNAPSHOT or earlier tasks), and activate any Python virtual environment (\`if [ -f .venv/bin/activate ]; then source .venv/bin/activate; fi\`). When checking if a GCS starter directory was downloaded, check for a key file inside it (e.g. \`[ ! -f ~/adk_challenge_lab/requirements.txt ]\`) rather than only checking if the directory exists.
+1. **Stateful Single-Session Execution & Project ID Resolution**: Each SSH invocation starts in \`$HOME\` (\`~\`) with \`GOOGLE_CLOUD_PROJECT\`, \`DEVSHELL_PROJECT_ID\`, and \`CLOUDSDK_CORE_PROJECT\` pre-exported. Always resolve \`PROJECT_ID="\${GOOGLE_CLOUD_PROJECT:-\$(gcloud config get-value project 2>/dev/null)}"\` (NEVER use \`PROJECT_ID=\$(gcloud config get-value project 2>/dev/null || echo ...)\` because \`gcloud config get-value project\` exits with status \`0\` and empty stdout \`""\` when unset!). Always \`export PATH="$HOME/.local/bin:$PATH"\`, \`cd\` into the lab's working directory (see LIVE STUDENT CLOUD SHELL WORKSPACE SNAPSHOT or earlier tasks), and activate any Python virtual environment (\`if [ -f .venv/bin/activate ]; then source .venv/bin/activate; fi\`). When checking if a GCS starter directory was downloaded, check for a key file inside it (e.g. \`[ ! -f ~/adk_challenge_lab/requirements.txt ]\`) rather than only checking if the directory exists.
 2. **Complete Both Prose Edits AND Explicit Commands in Order**: Many Challenge Labs describe file edits (e.g., adding a JSON rubric to \`eval_config.json\`, implementing \`TODO\` functions in \`agent.py\`, updating agent \`tools\` and \`instruction\`, running \`adk eval_set create\` / \`adk eval_set add_eval_case\`) in prose BEFORE the final verification/upload commands. You MUST perform all prose file edits and CLI commands BEFORE running the evaluation/deployment/upload commands.
 3. **Use Exact File Contents & CLI Flags from Workspace Snapshot**: Inspect the starter files and CLI \`--help\` output in \`LIVE STUDENT CLOUD SHELL WORKSPACE SNAPSHOT\` above. Preserve all existing helper functions and imports when updating files (use \`cat << 'EOF' > ...\` or \`python3 -c '...'\` to write/modify files cleanly). Never guess CLI flag names when \`--help\` output is shown above.
 4. **100% Non-Interactive**: Never launch interactive editors (\`nano\`, \`vim\`) or blocking foreground servers (\`adk web\`, \`chainlit run\`, \`npm start\`, \`adk run\`). Always pass non-interactive flags (\`--quiet\`, \`-auto-approve\`, \`-y\`, \`< /dev/null\`).
@@ -4587,18 +4939,20 @@ ${combinedText}
 8. **Google Drive Uploads in Cloud Shell**: When a task requires uploading files to the student's Google Drive, use \`os.environ.get("DRIVE_ACCESS_TOKEN")\` (which is pre-exported into the Cloud Shell session with Drive scope) to POST multipart uploads to \`https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart\`.
 9. **Gemini Enterprise & Discovery Engine (\`discoveryengine.googleapis.com/v1alpha\`)**:
    - **Mandatory Header**: Always include \`-H "X-Goog-User-Project: <project_id>"\` on ALL requests to \`discoveryengine.googleapis.com\` (Cloud Shell tokens otherwise bill project \`618104708054\` and fail with 403).
-   - **Identity Provider**: \`PATCH .../locations/global/aclConfig\` with \`{"idpConfig": {"idpType": "GSUITE"}}\`.
-   - **Free Trial License Allocation (REQUIRED before creating any Agent Designer or ADK agents)**:
-     1. \`POST .../locations/global/licenseConfigs?licenseConfigId=search_and_assistant\` with \`{"licenseCount": 50, "subscriptionTier": "SUBSCRIPTION_TIER_SEARCH_AND_ASSISTANT", "subscriptionTerm": "SUBSCRIPTION_TERM_ONE_MONTH", "freeTrial": True}\` (do NOT pass \`startDate\`).
-     2. \`GET .../locations/global/licenseConfigs\` to read \`lc_name = licenseConfigs[0]["name"]\`.
-     3. \`PATCH .../locations/global/userStores/default_user_store?updateMask=defaultLicenseConfig,enableLicenseAutoRegister,enableExpiredLicenseAutoUpdate\` with \`{"defaultLicenseConfig": lc_name, "enableLicenseAutoRegister": True, "enableExpiredLicenseAutoUpdate": True}\`.
-     4. \`POST .../locations/global/userStores/default_user_store:batchUpdateUserLicenses\` with \`{"inlineSource": {"userLicenses": [{"userPrincipal": "<student_email>", "licenseConfig": lc_name}], "updateMask": "licenseConfig"}}\`.
+   - **Identity Provider (\`aclConfig\` — NEVER pass \`updateMask\`)**: \`PATCH https://discoveryengine.googleapis.com/v1alpha/projects/<project>/locations/global/aclConfig\` with \`{"idpConfig": {"idpType": "GSUITE"}}\`. **CRITICAL**: \`discoveryengine.projects.locations.updateAclConfig\` does NOT accept an \`updateMask\` query parameter! Passing \`?updateMask=idpConfig\` returns HTTP 400 \`Invalid JSON payload received. Unknown name "updateMask": Cannot find field.\` — always call \`PATCH .../locations/global/aclConfig\` with NO query parameters.
+   - **Resource Dependency Order (\`engines\` / \`userStores\` BEFORE \`licenseConfigs\`)**: Creating an \`APP_TYPE_INTRANET\` Gemini Enterprise engine automatically initializes \`userStores/default_user_store\` (or you can initialize it explicitly via \`POST .../locations/global/userStores?userStoreId=default_user_store\` with \`{}\`). Always create the engine (or \`default_user_store\`) BEFORE creating \`licenseConfigs\` or patching \`default_user_store\`.
+   - **Free Trial License Allocation (REQUIRED before creating or using any Agent Designer, Deep Research, or ADK agents)**:
+     1. Ensure \`userStores/default_user_store\` exists (\`POST .../locations/global/userStores?userStoreId=default_user_store\` with \`{}\`, ignoring 409).
+     2. \`POST .../locations/global/licenseConfigs?licenseConfigId=search_and_assistant\` with \`{"licenseCount": 50, "subscriptionTier": "SUBSCRIPTION_TIER_SEARCH_AND_ASSISTANT", "subscriptionTerm": "SUBSCRIPTION_TERM_ONE_MONTH", "freeTrial": True}\` (do NOT pass \`startDate\`).
+     3. \`GET .../locations/global/licenseConfigs\` to read \`lc_name = licenseConfigs[0]["name"]\`.
+     4. \`PATCH .../locations/global/userStores/default_user_store?updateMask=defaultLicenseConfig,enableLicenseAutoRegister,enableExpiredLicenseAutoUpdate\` with \`{"defaultLicenseConfig": lc_name, "enableLicenseAutoRegister": True, "enableExpiredLicenseAutoUpdate": True}\`.
+     5. \`POST .../locations/global/userStores/default_user_store:batchUpdateUserLicenses\` with \`{"inlineSource": {"userLicenses": [{"userPrincipal": "<student_email>", "licenseConfig": lc_name}], "updateMask": "licenseConfig"}}\`.
    - **People via Custom Connector**: \`POST .../collections/default_collection/dataStores?dataStoreId=<id>\` with \`{"displayName": "<id>", "industryVertical": "GENERIC", "contentConfig": "THIRD_PARTY_IDENTITY_PEOPLE", "solutionTypes": ["SOLUTION_TYPE_SEARCH"], "aclEnabled": False}\`, then import NDJSON via \`POST .../dataStores/<id>/branches/0/documents:import\` with \`{"gcsSource": {"inputUris": ["gs://..."], "dataSchema": "document"}, "reconciliationMode": "FULL", "autoGenerateIds": False}\`.
    - **Google Workspace Connectors (\`google_drive\`, \`google_mail\`, \`google_calendar\`)**: \`POST .../locations/global:setUpDataConnector\` with \`{"collectionId": "<name>-1", "collectionDisplayName": "<name>", "dataConnector": {"dataSource": "<type>", "entities": [{"entityName": "<type>"}], "bapConfig": {"supportedConnectorModes": ["ACTIONS"], "enabledActions": [...]}}}\`. NEVER set \`actionConfig: {"createBapConnection": True}\` or \`connectorModes\` on first-party Workspace connectors (causes 500 INTERNAL).
      - \`google_drive\` actions: \`["copy_file", "create_file", "download_file_content", "get_file_metadata", "get_file_permissions", "list_recent_files", "list_shared_drives", "read_file_content", "search_files", "share_file", "trash_file", "update_file"]\`
      - \`google_mail\` actions: \`["send_message"]\` (or \`["create_draft", "reply_all_message", "reply_message", "search_messages", "send_draft", "send_message"]\`)
      - \`google_calendar\` actions: \`["create_event", "delete_event", "get_event", "list_calendars", "list_events", "respond_to_event", "search_events", "suggest_time", "update_event"]\`
-   - **Gemini Enterprise App (\`engines\`)**: \`POST .../collections/default_collection/engines?engineId=<app_id>\` with \`solutionType: "SOLUTION_TYPE_SEARCH"\`, \`industryVertical: "GENERIC"\`, \`appType: "APP_TYPE_INTRANET"\`, \`dataStoreIds: [...]\`, \`commonConfig: {"companyName": "Cymbal"}\`, \`searchEngineConfig: {"searchTier": "SEARCH_TIER_ENTERPRISE", "searchAddOns": ["SEARCH_ADD_ON_LLM"]}\`.
+   - **Gemini Enterprise App (\`engines\`)**: \`POST .../collections/default_collection/engines?engineId=<app_id>\` with \`solutionType: "SOLUTION_TYPE_SEARCH"\`, \`industryVertical: "GENERIC"\`, \`appType: "APP_TYPE_INTRANET"\`, \`dataStoreIds: [...]\` (omit \`dataStoreIds\` if the app has no data stores), \`commonConfig: {"companyName": "<company_name>"}\`, \`searchEngineConfig: {"searchTier": "SEARCH_TIER_ENTERPRISE", "searchAddOns": ["SEARCH_ADD_ON_LLM"]}\`.
    - **App Features, Agent Designer, Grounding & Logo**:
      - Features/Models: \`PATCH .../engines/<app_id>?updateMask=features,modelConfigs\` (\`no-code-agent-builder: "FEATURE_STATE_ON"\`, \`workflow-agents: "FEATURE_STATE_ON"\`, \`model-selector: "FEATURE_STATE_ON"\`, \`disable-image-generation: "FEATURE_STATE_OFF"\`, \`disable-video-generation: "FEATURE_STATE_OFF"\`, \`modelConfigs: {"gemini-3.1-pro": "MODEL_ENABLED", "gemini-3.1-flash-image": "MODEL_ENABLED"}\`).
      - Web Grounding: \`PATCH .../engines/<app_id>/assistants/default_assistant?updateMask=webGroundingType\` with \`{"webGroundingType": "WEB_GROUNDING_TYPE_ENTERPRISE_WEB_SEARCH"}\` or \`"WEB_GROUNDING_TYPE_GOOGLE_SEARCH"\`.
@@ -4611,7 +4965,7 @@ ${combinedText}
          \`{"title": {"field": "Name", "displayTemplate": "{value}"}, "url": {"field": "ReferenceURL", "displayTemplate": "{value}"}, "text1": {"field": "Title", "displayTemplate": "{value}"}, "text2": {"field": "Description", "displayTemplate": "{value}"}, "metadata1": {"field": "System", "displayTemplate": "{value}"}, "metadata2": {"field": "GitHubSeverity", "displayTemplate": "Severity: {value}"}}\`.
        - \`PATCH .../collections/default_collection/engines/<app_id>/widgetConfigs/default_search_widget_config?updateMask=uiSettings\` (NEVER include \`dataStoreUiConfigs\` in \`updateMask\` — it is nested inside \`uiSettings\`) with \`{"uiSettings": {"interactionType": "SEARCH_ONLY", "dataStoreUiConfigs": [{"name": ds_comp_name, "fieldsUiComponentsMap": ui_fmap}]}}\`.
      - **Querying Data Stores & Engines (Preview / Test Configuration \`Search\` + \`WriteUserEvent\` + \`Session/Answer\`)**:
-       - When a user queries an app in the GCP Console Preview or Widget Test configuration tab, the Console executes TWO paired calls that Qwiklabs graders inspect in \`discoveryengine.googleapis.com%2Fgemini_enterprise_user_activity\`:
+       - When a user queries an app WITH data stores in the GCP Console Preview or Widget Test configuration tab, the Console executes TWO paired calls that Qwiklabs graders inspect in \`discoveryengine.googleapis.com%2Fgemini_enterprise_user_activity\`:
          1. \`POST https://discoveryengine.googleapis.com/v1alpha/projects/<project_num>/locations/global/collections/default_collection/engines/<app_id>/servingConfigs/default_search:search\` with \`{"query": "<query>", "userInfo": {"userId": "preview-user", "timeZone": "America/New_York"}}\` -> capture \`attr_tok = search_resp.get("attributionToken", "")\` and \`docs = [{"name": r["document"]["name"]} for r in search_resp.get("results", []) if "document" in r]\`.
          2. Immediately call \`POST https://discoveryengine.googleapis.com/v1alpha/projects/<project_num>/locations/global/userEvents:write?writeAsync=true\` (at the \`locations/global\` parent level!) with \`{"eventType": "search", "userPseudoId": "preview-user", "attributionToken": attr_tok, "engine": f"projects/{project_num}/locations/global/collections/default_collection/engines/{app_id}", "searchInfo": {"searchQuery": "<query>", "offset": 0}, "documents": docs}\`, AND also call \`POST .../collections/default_collection/dataStores/<ds_id>/userEvents:write\` with the same payload.
          3. Also execute session-backed \`:search\` (\`"session": "projects/<project_num>/locations/global/collections/default_collection/engines/<app_id>/sessions/-"\`, \`"sessionSpec": {"searchResultPersistenceCount": 5}\`) + \`:answer\` on both the engine and dataStore, plus any filter query from the lab (e.g., \`{"query": "database", "filter": "System: ANY(\\"PYPI\\")", "userInfo": {"timeZone": "America/New_York"}, "contentSearchSpec": {"snippetSpec": {"returnSnippet": True}}}\`).
@@ -4619,11 +4973,18 @@ ${combinedText}
      - OAuth Brand & Client: Enable \`iap.googleapis.com\` alone (\`gcloud services enable iap.googleapis.com --project=<project> --quiet\`), then run \`gcloud iap oauth-brands create --application_title="<title>" --support_email="<student_email>" --quiet\` and \`gcloud iap oauth-clients create <brand> --display_name="<name>" --quiet\`.
      - Discovery Engine Authorization: \`POST .../v1alpha/projects/<project>/locations/global/authorizations?authorizationId=<auth_id>\` with \`{"name": "projects/<project_num>/locations/global/authorizations/<auth_id>", "displayName": "<display_name>", "serverSideOauth2": {"clientId": "<id>", "clientSecret": "<secret>", "authorizationUri": "<uri>", "tokenUri": "https://oauth2.googleapis.com/token"}}\`.
      - Low-Code / Agent Designer Agent: \`POST .../v1alpha/projects/<project>/locations/global/collections/default_collection/engines/<app_id>/assistants/default_assistant/agents\` with \`{"displayName": "<name>", "description": "<desc>", "lowCodeAgentDefinition": {"rootAgentId": "root_agent", "draftDisplayName": "<name>", "draftDescription": "<desc>", "nodes": [{"id": "root_agent", "displayName": "<name>", "llmAgentNode": {"description": "<desc>", "instruction": "<instr>", "model": "gemini-2.5-flash"}}]}, "starterPrompts": [{"text": "<starter>"}], "sharingConfig": {"scope": "ALL_USERS"}}\`.
-      - ADK Agent on Agent Engine (\`assistants/default_assistant/agents\` & \`agents-cli publish gemini-enterprise\`):
-        - **CRITICAL Multi-Region (\`us\` vs \`global\`) & Engine ID Suffix Discovery**: In labs where the Gemini Enterprise App (e.g., \`cymbal-enterprise-app\`) is created in multi-region \`us\` (or \`global\`), the actual engine ID often has a generated suffix (e.g., \`cymbal-enterprise-app_1773784699527\` or \`cymbal-enterprise-app_usbu2xhmizb5x\`) while \`displayName\` is \`cymbal-enterprise-app\`. Always query BOTH \`https://us-discoveryengine.googleapis.com/v1alpha/projects/<project>/locations/us/collections/default_collection/engines\` and \`https://discoveryengine.googleapis.com/v1alpha/projects/<project>/locations/global/collections/default_collection/engines\` to discover the exact \`engine["name"]\` (\`projects/<project_num>/locations/<loc>/collections/default_collection/engines/<actual_engine_id>\`).
-        - **\`agents-cli publish gemini-enterprise\` Flag Format**: \`--gemini-enterprise-app-id\` MUST be the FULL Discovery Engine resource path (\`projects/<project_num>/locations/<loc>/collections/default_collection/engines/<actual_engine_id>\`), NEVER the short name \`cymbal-enterprise-app\` (passing a short name fails with \`Invalid GEMINI_ENTERPRISE_APP_ID format. Expected: projects/{project_number}/locations/{location}/collections/{collection}/engines/{engine_id}\`).
-        - **Direct REST Registration & Sharing (\`ALL_USERS\`)**: In addition to (or as fallback for) \`agents-cli publish\`, POST/PATCH the agent on \`https://<loc>-discoveryengine.googleapis.com/v1alpha/<engine_full_name>/assistants/default_assistant/agents\` with \`{"displayName": "<name>", "description": "<desc>", "adkAgentDefinition": {"provisionedReasoningEngine": {"reasoningEngine": "projects/<project_num>/locations/<region>/reasoningEngines/<re_id>"}}, "sharingConfig": {"scope": "ALL_USERS"}}\` (include \`authorizationConfig\` only if an OAuth authorization exists). If the agent already exists in \`GET .../<engine_full_name>/assistants/default_assistant/agents\`, PATCH \`<agent_full_name>?updateMask=sharingConfig\` with \`{"sharingConfig": {"scope": "ALL_USERS"}}\` so organization-wide sharing (\`All users\`) is always enabled.
-      - Querying Agents via \`streamAssist\`: \`POST https://<loc>-discoveryengine.googleapis.com/v1alpha/<engine_full_name>/assistants/default_assistant:streamAssist\` with \`{"query": {"text": "<prompt>"}, "session": "<session_name>", "toolsSpec": {"webGroundingSpec": {}}, "agentsSpec": {"agentSpecs": [{"agentId": "<agent_id>"}]}}\`.
+     - ADK Agent on Agent Engine (\`assistants/default_assistant/agents\` & \`agents-cli publish gemini-enterprise\`):
+       - **CRITICAL Multi-Region (\`us\` vs \`global\`) & Engine ID Suffix Discovery**: In labs where the Gemini Enterprise App (e.g., \`cymbal-enterprise-app\`) is created in multi-region \`us\` (or \`global\`), the actual engine ID often has a generated suffix (e.g., \`cymbal-enterprise-app_1773784699527\` or \`cymbal-enterprise-app_usbu2xhmizb5x\`) while \`displayName\` is \`cymbal-enterprise-app\`. Always query BOTH \`https://us-discoveryengine.googleapis.com/v1alpha/projects/<project>/locations/us/collections/default_collection/engines\` and \`https://discoveryengine.googleapis.com/v1alpha/projects/<project>/locations/global/collections/default_collection/engines\` to discover the exact \`engine["name"]\` (\`projects/<project_num>/locations/<loc>/collections/default_collection/engines/<actual_engine_id>\`).
+       - **\`agents-cli publish gemini-enterprise\` Flag Format**: \`--gemini-enterprise-app-id\` MUST be the FULL Discovery Engine resource path (\`projects/<project_num>/locations/<loc>/collections/default_collection/engines/<actual_engine_id>\`), NEVER the short name \`cymbal-enterprise-app\` (passing a short name fails with \`Invalid GEMINI_ENTERPRISE_APP_ID format. Expected: projects/{project_number}/locations/{location}/collections/{collection}/engines/{engine_id}\`).
+       - **Direct REST Registration & Sharing (\`ALL_USERS\`)**: In addition to (or as fallback for) \`agents-cli publish\`, POST/PATCH the agent on \`https://<loc>-discoveryengine.googleapis.com/v1alpha/<engine_full_name>/assistants/default_assistant/agents\` with \`{"displayName": "<name>", "description": "<desc>", "adkAgentDefinition": {"provisionedReasoningEngine": {"reasoningEngine": "projects/<project_num>/locations/<region>/reasoningEngines/<re_id>"}}, "sharingConfig": {"scope": "ALL_USERS"}}\` (include \`authorizationConfig\` only if an OAuth authorization exists). If the agent already exists in \`GET .../<engine_full_name>/assistants/default_assistant/agents\`, PATCH \`<agent_full_name>?updateMask=sharingConfig\` with \`{"sharingConfig": {"scope": "ALL_USERS"}}\` so organization-wide sharing (\`All users\`) is always enabled.
+     - **Querying Managed & Custom Agents (including the Deep Research Agent \`deep_research\`) via \`streamAssist\`**:
+       - Standalone Gemini Enterprise apps have no attached data stores (\`servingConfigs/default_search:search\` returns \`400 ENGINE_HAS_NO_DATA_STORES\`). Always use \`POST https://<loc>-discoveryengine.googleapis.com/v1alpha/<engine_full_name>/assistants/default_assistant:streamAssist\`.
+       - First create a clean session via \`POST https://<loc>-discoveryengine.googleapis.com/v1alpha/<engine_full_name>/sessions\` with \`{"userPseudoId": "student-user", "state": "IN_PROGRESS"}\` -> capture \`session_name = resp["name"]\`.
+       - **CRITICAL Multi-Turn \`agentsSpec\` Rule**: In \`streamAssist\`, agent selection (\`"agentsSpec": {"agentSpecs": [{"agentId": "<agent_id>"}]}\`, e.g. \`"deep_research"\`) is evaluated per-turn and is NOT sticky on the session! You MUST include BOTH \`"session": session_name\` AND \`"agentsSpec": {"agentSpecs": [{"agentId": "deep_research"}]}\` (plus \`"toolsSpec": {"webGroundingSpec": {}}\`) on **EVERY SINGLE TURN** of the conversation! Omitting \`agentsSpec\` on Turn 2 causes Turn 2 to route to \`root_agent\` (\`answer_generation_mode: ANSWER_GENERATION_MODE_UNSPECIFIED\`) instead of updating the research plan in \`deep_research\` (\`answer_generation_mode: AGENT\`).
+       - For **Deep Research Agent (\`deep_research\`)** multi-turn tasks (initial research prompt -> plan refinement prompt -> "Start research"):
+         1. **Turn 1 (Initial Research Prompt)**: Call \`streamAssist\` with \`{"session": session_name, "query": {"text": "<initial_prompt>"}, "agentsSpec": {"agentSpecs": [{"agentId": "deep_research"}]}, "toolsSpec": {"webGroundingSpec": {}}}\` and wait for completion (which records the initial \`## Research Plan\` from \`agent: "deep_research"\` on Turn 0 of \`session_name\`).
+         2. **Turn 2 (Update / Refine Research Plan)**: Call \`streamAssist\` on the **same \`session_name\`** with \`{"session": session_name, "query": {"text": "<plan_update_prompt>"}, "agentsSpec": {"agentSpecs": [{"agentId": "deep_research"}]}, "toolsSpec": {"webGroundingSpec": {}}}\` and wait for completion (which records the updated \`## Research Plan\` from \`agent: "deep_research"\` on Turn 1 of \`session_name\`).
+         3. **Turn 3 (Start Research)**: After Turn 1 and Turn 2 have completed cleanly on \`session_name\`, also create a second session (or spawn a non-blocking background script \`nohup python3 /tmp/run_deep_research.py >/tmp/deep_research.log 2>&1 &\` that runs Turn 1 -> Turn 2 -> Turn 3 \`"Start research"\` with \`agentsSpec: {"agentSpecs": [{"agentId": "deep_research"}]}\`) so both the 2-turn updated Research Plan session and an active research execution session exist without blocking the task script past its timeout.
 10. **Model Armor (\`modelarmor.<loc>.rep.googleapis.com/v1\`)**:
     - Enable \`modelarmor.googleapis.com\` and \`dlp.googleapis.com\` first.
     - Use regional endpoint \`https://modelarmor.<loc>.rep.googleapis.com/v1/projects/<project>/locations/<loc>/templates?templateId=<id>\` (e.g. \`us\`).

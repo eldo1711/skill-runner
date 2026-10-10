@@ -2523,7 +2523,7 @@ async function execInStudentCloudShell(username, projectId, command, timeoutMs =
       ? `export DRIVE_ACCESS_TOKEN="${authStatus.accessToken}"; `
       : '';
     const projExport = projectId
-      ? `export GOOGLE_CLOUD_PROJECT="${projectId}"; export DEVSHELL_PROJECT_ID="${projectId}"; `
+      ? `export GOOGLE_CLOUD_PROJECT="${projectId}"; export DEVSHELL_PROJECT_ID="${projectId}"; export CLOUDSDK_CORE_PROJECT="${projectId}"; gcloud config set project "${projectId}" --quiet >/dev/null 2>&1 || true; `
       : '';
     const envPrefix = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1; export PYTHONUNBUFFERED=1; ${projExport}${driveExport}`;
     const fullScript = `${envPrefix}\n${command}`;

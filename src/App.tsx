@@ -26,8 +26,10 @@ import {
   Power,
   X,
   SlidersHorizontal,
+  BookOpen,
 } from 'lucide-react';
 import { ExecutionMode, LabCredentials, RunnerState, TargetSurface, TargetType } from './types';
+import { AGENT_LEARNINGS, renderAgentLearningsMarkdown } from '../shared/agentLearnings';
 
 const INITIAL_STATE: RunnerState = {
   targetType: 'lab',
@@ -129,6 +131,9 @@ export default function App() {
   const [canStartLocally, setCanStartLocally] = useState<boolean>(false);
   const [startingBridge, setStartingBridge] = useState<boolean>(false);
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
+  const [showLearnings, setShowLearnings] = useState<boolean>(false);
+  const [learningsCategory, setLearningsCategory] = useState<string>('ALL');
+  const [learningsSearch, setLearningsSearch] = useState<string>('');
 
   useEffect(() => {
     const q = `session=${encodeURIComponent(sessionId)}`;
@@ -801,6 +806,16 @@ export default function App() {
                 {endingLab ? 'Resetting...' : isCourseMode ? 'New Course / Reset' : 'New Lab / Reset'}
               </button>
             )}
+
+            <button
+              type="button"
+              onClick={() => setShowLearnings(true)}
+              className="px-3 py-1.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-200 border border-indigo-500/30 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition"
+              title="View cumulative agent engineering learnings, root causes, and reusable patterns"
+            >
+              <BookOpen className="w-3.5 h-3.5 text-indigo-400" />
+              Agent Learnings ({AGENT_LEARNINGS.length})
+            </button>
 
             <button
               type="button"
@@ -2230,6 +2245,176 @@ export default function App() {
           </section>
         </div>
       </main>
+
+      {showLearnings && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-5xl w-full max-h-[88vh] flex flex-col overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 bg-slate-900/95">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-indigo-500/20 border border-indigo-500/40 flex items-center justify-center">
+                  <BookOpen className="w-5 h-5 text-indigo-300" />
+                </div>
+                <div>
+                  <h2 className="text-base font-bold text-white">
+                    Agent Engineering Learnings & Knowledge Base
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    Cumulative failure modes, API invariants, and self-healing patterns learned across hands-on labs and courses
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(renderAgentLearningsMarkdown());
+                    setCopiedField('learnings-md');
+                    setTimeout(() => setCopiedField(null), 2000);
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition"
+                >
+                  {copiedField === 'learnings-md' ? (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      Copied Markdown Handbook!
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      Copy Markdown Handbook
+                    </>
+                  )}
+                </button>
+                <a
+                  href="/api/learnings/markdown"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium flex items-center gap-1.5 transition"
+                >
+                  <ExternalLink className="w-3.5 h-3.5 text-cyan-400" />
+                  Raw .md
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setShowLearnings(false)}
+                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="px-6 py-3 border-b border-slate-800 bg-slate-950/60 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {[
+                  'ALL',
+                  'Cloud Shell & Auth',
+                  'Discovery Engine & Gemini Enterprise',
+                  'Vertex AI & Agent Runtime',
+                  'Course & Embedded Lab Orchestration',
+                  'DOM, Shadow DOM & Quiz Grading',
+                  'Self-Healing & Grader Verification',
+                ].map((cat) => (
+                  <button
+                    key={cat}
+                    type="button"
+                    onClick={() => setLearningsCategory(cat)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-medium cursor-pointer transition border ${
+                      learningsCategory === cat
+                        ? 'bg-indigo-500/25 text-indigo-200 border-indigo-500/50'
+                        : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+                    }`}
+                  >
+                    {cat === 'ALL' ? `All (${AGENT_LEARNINGS.length})` : cat}
+                  </button>
+                ))}
+              </div>
+              <input
+                type="text"
+                value={learningsSearch}
+                onChange={(e) => setLearningsSearch(e.target.value)}
+                placeholder="Filter by keyword, API, or tag..."
+                className="w-64 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
+              />
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-4">
+              {AGENT_LEARNINGS.filter((item) => {
+                if (learningsCategory !== 'ALL' && item.category !== learningsCategory) {
+                  return false;
+                }
+                if (!learningsSearch.trim()) return true;
+                const q = learningsSearch.toLowerCase();
+                return (
+                  item.id.toLowerCase().includes(q) ||
+                  item.title.toLowerCase().includes(q) ||
+                  item.symptom.toLowerCase().includes(q) ||
+                  item.rootCause.toLowerCase().includes(q) ||
+                  item.generalPrinciple.toLowerCase().includes(q) ||
+                  item.tags.some((t) => t.toLowerCase().includes(q))
+                );
+              }).map((item) => (
+                <div
+                  key={item.id}
+                  className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-3"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs font-mono font-bold">
+                        {item.id}
+                      </span>
+                      <span className="px-2 py-0.5 rounded bg-slate-800 text-cyan-300 border border-slate-700 text-[11px] font-medium">
+                        {item.category}
+                      </span>
+                      <h3 className="text-sm font-bold text-white">{item.title}</h3>
+                    </div>
+                    <span className="text-[11px] font-mono text-slate-400">{item.date}</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                    <div className="rounded-lg bg-red-950/20 border border-red-500/20 p-3">
+                      <div className="text-[11px] font-bold uppercase tracking-wider text-red-300 mb-1">
+                        Observed Failure Mode
+                      </div>
+                      <p className="text-slate-300 leading-relaxed">{item.symptom}</p>
+                    </div>
+                    <div className="rounded-lg bg-amber-950/20 border border-amber-500/20 p-3">
+                      <div className="text-[11px] font-bold uppercase tracking-wider text-amber-300 mb-1">
+                        Root Cause (Why Agents Fail Here)
+                      </div>
+                      <p className="text-slate-300 leading-relaxed">{item.rootCause}</p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg bg-emerald-950/20 border border-emerald-500/25 p-3 text-xs">
+                    <div className="text-[11px] font-bold uppercase tracking-wider text-emerald-300 mb-1">
+                      General Principle for Building Better Agents
+                    </div>
+                    <p className="text-slate-200 leading-relaxed">{item.generalPrinciple}</p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                    <div className="text-[11px] text-slate-400">
+                      <span className="font-semibold text-slate-300">In Skills Runner: </span>
+                      {item.implementationInSkillsRunner}
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {item.tags.map((tag) => (
+                        <span
+                          key={tag}
+                          className="px-2 py-0.5 rounded-full bg-slate-900 border border-slate-800 text-[10px] font-mono text-slate-400"
+                        >
+                          #{tag}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

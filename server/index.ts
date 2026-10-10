@@ -16,6 +16,7 @@ import {
 } from './browserOrchestrator.js';
 import { ExecutionMode } from './types.js';
 import { routeIncomingBridgeSocket } from './macBridgeHub.js';
+import { AGENT_LEARNINGS, renderAgentLearningsMarkdown } from '../shared/agentLearnings.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -117,6 +118,18 @@ app.get('/api/health', (req, res) => {
     macBridgeConnected: orch.getState().macBridgeConnected,
     status: orch.getState().status,
   });
+});
+
+// Cumulative Agent Engineering Learnings catalog & Markdown export
+app.get('/api/learnings', (_req, res) => {
+  res.json({
+    count: AGENT_LEARNINGS.length,
+    learnings: AGENT_LEARNINGS,
+  });
+});
+
+app.get('/api/learnings/markdown', (_req, res) => {
+  res.type('text/markdown; charset=utf-8').send(renderAgentLearningsMarkdown());
 });
 
 // Get current runner state for this browser session

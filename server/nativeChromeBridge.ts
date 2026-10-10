@@ -1718,7 +1718,7 @@ export async function execInStudentCloudShellBridge(
 
   try {
     const projExport = projectId
-      ? `export GOOGLE_CLOUD_PROJECT="${projectId}"; export DEVSHELL_PROJECT_ID="${projectId}"; `
+      ? `export GOOGLE_CLOUD_PROJECT="${projectId}"; export DEVSHELL_PROJECT_ID="${projectId}"; export CLOUDSDK_CORE_PROJECT="${projectId}"; gcloud config set project "${projectId}" --quiet >/dev/null 2>&1 || true; `
       : '';
     const driveExport = hostAccessToken
       ? `export DRIVE_ACCESS_TOKEN="${hostAccessToken}"; `
@@ -1774,6 +1774,7 @@ export async function execInStudentCloudShellBridge(
                 (fs.existsSync('/etc/ssl/cert.pem') ? '/etc/ssl/cert.pem' : ''),
               GOOGLE_CLOUD_PROJECT: projectId,
               DEVSHELL_PROJECT_ID: projectId,
+              CLOUDSDK_CORE_PROJECT: projectId,
               DRIVE_ACCESS_TOKEN: hostAccessToken,
             },
             timeout: timeoutMs,

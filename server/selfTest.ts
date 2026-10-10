@@ -19,6 +19,7 @@ import {
   inferTargetTypeFromUrl,
   listActiveSessions,
 } from './browserOrchestrator.js';
+import { AGENT_LEARNINGS, renderAgentLearningsMarkdown } from '../shared/agentLearnings.js';
 
 async function runVerificationTests() {
   console.log('🧪 Running Skills Runner Verification Suite...');
@@ -1205,6 +1206,88 @@ async function runVerificationTests() {
   await sessEmbedded.resetForNewLab({ endLabInChrome: false, closeIncognito: false });
   await embeddedLabPage.close();
   console.log('✓ Embedded Hands-on Lab detection inside Course and Lab mode switching verified.');
+
+  // 13. Verify Cumulative Agent Learnings & Deep Research Agent synthesis
+  if (AGENT_LEARNINGS.length < 11) {
+    throw new Error(`Expected at least 11 AGENT_LEARNINGS entries, got ${AGENT_LEARNINGS.length}`);
+  }
+  const mdLearnings = renderAgentLearningsMarkdown();
+  if (
+    !mdLearnings.includes('L-001') ||
+    !mdLearnings.includes('L-004') ||
+    !mdLearnings.includes('deep_research')
+  ) {
+    throw new Error('renderAgentLearningsMarkdown() is missing expected learning entries.');
+  }
+
+  const deepResearchTask1Synth = await synthesizeTaskShellScript({
+    labTitle: 'Explore the Deep Research Agent',
+    task: {
+      id: 'task-1',
+      number: 1,
+      title: 'Task 1. Deploy Gemini Enterprise and Configure an Identity Provider',
+      description: 'Deploy Gemini Enterprise and Configure an Identity Provider',
+      rawSectionText:
+        'App name\tCymbal Shops Gemini Enterprise\nCompany name\tCymbal Shops\nSelect Google Identity as your identity provider and click Confirm Workforce Identity.',
+      steps: [],
+      hasCheckProgress: true,
+      progressVerified: false,
+      status: 'pending',
+    },
+    credentials: {
+      username: 'student-03-491dcb9d7bbb@qwiklabs.net',
+      password: 'secret',
+      projectId: 'qwiklabs-gcp-04-cf5ef3e1c56d',
+      consoleUrl: '',
+      region: 'us-central1',
+      zone: 'us-central1-a',
+    },
+  });
+  if (
+    !deepResearchTask1Synth ||
+    !deepResearchTask1Synth.script.includes('cymbal-shops-gemini-enterprise') ||
+    !deepResearchTask1Synth.script.includes('"idpType": "GSUITE"') ||
+    deepResearchTask1Synth.script.includes('aclConfig?updateMask=')
+  ) {
+    throw new Error('Deep Research Task 1 synthesis failed aclConfig/engine checks.');
+  }
+
+  const deepResearchTask2Synth = await synthesizeTaskShellScript({
+    labTitle: 'Explore the Deep Research Agent',
+    task: {
+      id: 'task-2',
+      number: 2,
+      title: 'Task 2. Use the Deep Research agent',
+      description: 'Task 2. Use the Deep Research agent',
+      rawSectionText:
+        'Enter the following prompt into the search bar and click Send.\n```\nWhat are some examples of how gen AI agents are being used effectively in the retail industry?\n```\nSuggest the following change by sending the message below in the chat:\n```\nHighlight any differences in embracing the technology between US, European, and Asian markets.\n```\nClick Start research.',
+      steps: [],
+      hasCheckProgress: true,
+      progressVerified: false,
+      status: 'pending',
+    },
+    credentials: {
+      username: 'student-03-491dcb9d7bbb@qwiklabs.net',
+      password: 'secret',
+      projectId: 'qwiklabs-gcp-04-cf5ef3e1c56d',
+      consoleUrl: '',
+      region: 'us-central1',
+      zone: 'us-central1-a',
+    },
+  });
+  if (
+    !deepResearchTask2Synth ||
+    !deepResearchTask2Synth.script.includes('"agentId": "deep_research"') ||
+    !deepResearchTask2Synth.script.includes(
+      'What are some examples of how gen AI agents are being used effectively in the retail industry?'
+    ) ||
+    !deepResearchTask2Synth.script.includes(
+      'Highlight any differences in embracing the technology between US, European, and Asian markets.'
+    )
+  ) {
+    throw new Error('Deep Research Task 2 synthesis failed multi-turn deep_research checks.');
+  }
+  console.log('✓ Cumulative Agent Learnings & Deep Research Agent synthesis verified.');
 
   await browser.close();
   console.log('✅ All verification tests passed!');
