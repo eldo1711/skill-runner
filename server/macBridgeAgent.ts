@@ -500,13 +500,13 @@ async function checkProgressInUserChrome(
   let targetTabIndex = Number(tabIndex) || 0;
   let resolvedLabUrl = String(labUrl || '');
 
-  if (!targetWindowId || !resolvedLabUrl) {
+  if (!targetWindowId || !resolvedLabUrl || !isLabPageUrl(resolvedLabUrl)) {
     const tabs = await listUserChromeTabs();
     const labTab = tabs.find((t) => t.suggestedRole === 'lab');
     if (labTab) {
-      if (!targetWindowId) targetWindowId = labTab.windowId;
-      if (!targetTabIndex) targetTabIndex = labTab.tabIndex;
-      if (!resolvedLabUrl) resolvedLabUrl = labTab.url;
+      targetWindowId = labTab.windowId;
+      targetTabIndex = labTab.tabIndex;
+      resolvedLabUrl = labTab.url;
     }
   }
 
@@ -533,7 +533,7 @@ async function checkProgressInUserChrome(
 
   let origin = 'https://partner.skills.google';
   try {
-    if (resolvedLabUrl) {
+    if (resolvedLabUrl && isLabPageUrl(resolvedLabUrl)) {
       origin = new URL(resolvedLabUrl).origin;
     }
   } catch {

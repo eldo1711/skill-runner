@@ -1185,9 +1185,19 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
         effectiveUrl.includes('/course_templates/') ||
         effectiveUrl.includes('/course_sessions/'));
 
+    const isExplicitLabPage = Boolean(
+      labHeader ||
+        pageLabInstanceId ||
+        effectiveUrl.includes('/labs/') ||
+        effectiveUrl.includes('/focuses/') ||
+        effectiveUrl.includes('/catalog_lab/') ||
+        document.querySelector(
+          'ql-lab-control-panel, ql-lab-control-button, ql-activity-tracking'
+        )
+    );
+
     const isCoursePage = Boolean(
-      !labHeader &&
-        !pageLabInstanceId &&
+      !isExplicitLabPage &&
         (contentsMenu ||
           document.querySelector('ql-quiz') ||
           document.querySelector('ql-iframe.document-iframe') ||
@@ -1205,6 +1215,23 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
     let currentWatchTimePath = '';
     let currentQuiz: CourseQuizData | undefined;
 
+    const allBreadcrumbCourseLinks = Array.from(
+      document.querySelectorAll('.breadcrumb-item a[href*="/course_templates/"]')
+    ) as HTMLAnchorElement[];
+    const breadcrumbCourseLink = document.querySelector(
+      '.breadcrumb-item a[href*="/course_templates/"], .breadcrumb-item a[href*="/paths/"]'
+    ) as HTMLAnchorElement | null;
+    const primaryCourseLink = allBreadcrumbCourseLinks[0] || breadcrumbCourseLink;
+    if (primaryCourseLink) {
+      courseOverviewUrl = (primaryCourseLink.getAttribute('href') || '').trim();
+    }
+    if (!courseOverviewUrl) {
+      const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute('href') || '';
+      if (canonical.includes('/course_templates/')) {
+        courseOverviewUrl = canonical.trim();
+      }
+    }
+
     if (isCoursePage) {
       const stripHtml = (s: string) => {
         const div = document.createElement('div');
@@ -1216,23 +1243,6 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
         'ql-button[data-analytics-position="course-banner"], ql-button[data-content-type="course"]'
       );
       const bannerCourseTitle = (bannerBtn?.getAttribute('data-content-name') || '').trim();
-      const breadcrumbCourseLink = document.querySelector(
-        '.breadcrumb-item a[href*="/course_templates/"], .breadcrumb-item a[href*="/paths/"]'
-      ) as HTMLAnchorElement | null;
-      const allBreadcrumbCourseLinks = Array.from(
-        document.querySelectorAll('.breadcrumb-item a[href*="/course_templates/"]')
-      ) as HTMLAnchorElement[];
-      const primaryCourseLink = allBreadcrumbCourseLinks[0] || breadcrumbCourseLink;
-
-      if (primaryCourseLink) {
-        courseOverviewUrl = (primaryCourseLink.getAttribute('href') || '').trim();
-      }
-      if (!courseOverviewUrl) {
-        const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute('href') || '';
-        if (canonical.includes('/course_templates/')) {
-          courseOverviewUrl = canonical.trim();
-        }
-      }
 
       if (bannerBtn) {
         courseStartHref = (bannerBtn.getAttribute('href') || '').trim();

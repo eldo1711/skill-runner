@@ -192,9 +192,7 @@ app.post('/api/lab/start-and-run', async (req, res) => {
   try {
     const orch = getReqOrchestrator(req);
     const { url, labTabKey, targetType } = req.body || {};
-    const inferredTargetType =
-      inferTargetTypeFromUrl(typeof url === 'string' ? url : '') ||
-      inferTargetTypeFromUrl(orch.getState().labCurrentUrl || orch.getState().labUrl);
+    const inferredTargetType = inferTargetTypeFromUrl(typeof url === 'string' ? url : '');
     const effectiveTargetType = inferredTargetType || targetType;
     if (effectiveTargetType === 'course' || effectiveTargetType === 'lab') {
       orch.setTargetType(effectiveTargetType);

@@ -114,6 +114,7 @@ export class LabBrowserOrchestrator {
   private isLoopRunning = false;
   private pauseRequested = false;
   private pendingOverrideInstruction: string = '';
+  private manualTargetTypeOverride: TargetType | null = null;
 
   constructor(sessionId = 'default') {
     this.sessionId = sessionId || 'default';
@@ -263,12 +264,36 @@ export class LabBrowserOrchestrator {
 
   public setTargetType(targetType: TargetType): TargetType {
     const normalized: TargetType = targetType === 'course' ? 'course' : 'lab';
+    this.manualTargetTypeOverride = normalized;
     this.state.targetType = normalized;
     this.addLog(
       'info',
       'system',
       `Switched target mode to: ${normalized === 'course' ? 'Course (Multimedia & Quiz Progression)' : 'Hands-on Lab'}`
     );
+
+    if (
+      normalized === 'lab' &&
+      !this.isLoopRunning &&
+      this.state.tasks.some((t) => Boolean(t.activityType))
+    ) {
+      const hasEmbeddedLab = this.state.tasks.some(
+        (t) => t.activityType === 'lab' && Boolean(t.activityHref)
+      );
+      this.state.tasks = [];
+      if (hasEmbeddedLab && (this.state.selectedLabTabKey || this.state.labUrl)) {
+        this.runInContext(() => {
+          this.parseLabInstructions().catch((err) => {
+            this.addLog(
+              'warn',
+              'lab_window',
+              `Could not auto-load embedded lab from course: ${err?.message || String(err)}`
+            );
+          });
+        });
+      }
+    }
+
     this.emitState();
     return normalized;
   }
@@ -514,11 +539,24 @@ export class LabBrowserOrchestrator {
 
     if (this.state.selectedLabTabKey) {
       const currentLabTab = findByKey(this.state.selectedLabTabKey);
-      if (!currentLabTab) {
+      const isStillValidLabTab = Boolean(
+        currentLabTab &&
+          (currentLabTab.suggestedRole === 'lab' ||
+            (this.state.labUrl && currentLabTab.url === this.state.labUrl) ||
+            (this.state.labCurrentUrl && currentLabTab.url === this.state.labCurrentUrl))
+      );
+      if (!isStillValidLabTab) {
         const movedLabTab =
-          (this.state.labUrl && tabs.find((t) => t.url === this.state.labUrl)) ||
+          (this.state.labCurrentUrl &&
+            tabs.find((t) => t.url === this.state.labCurrentUrl && t.suggestedRole === 'lab')) ||
+          (this.state.labUrl &&
+            tabs.find((t) => t.url === this.state.labUrl && t.suggestedRole === 'lab')) ||
           tabs.find((t) => t.suggestedRole === 'lab');
-        this.state.selectedLabTabKey = movedLabTab ? movedLabTab.key : null;
+        if (movedLabTab) {
+          this.state.selectedLabTabKey = movedLabTab.key;
+        } else if (!currentLabTab) {
+          this.state.selectedLabTabKey = null;
+        }
       }
     } else if (autoSelectLab) {
       const labTab = tabs.find((t) => t.suggestedRole === 'lab');
@@ -581,14 +619,19 @@ export class LabBrowserOrchestrator {
     const consoleTab = tabs.find((t) => t.key === this.state.selectedConsoleTabKey);
     const shellTab = tabs.find((t) => t.key === this.state.selectedCloudShellTabKey);
 
-    if (labTab) {
+    if (labTab && labTab.suggestedRole === 'lab') {
       this.state.labUrl = labTab.url;
       this.state.labCurrentUrl = labTab.url;
       const inferred = inferTargetTypeFromUrl(labTab.url);
-      if (inferred) {
-        this.state.targetType = inferred;
-      } else if (labTab.contentKind === 'course' || labTab.contentKind === 'lab') {
-        this.state.targetType = labTab.contentKind;
+      if (inferred === 'lab' || labTab.contentKind === 'lab') {
+        this.state.targetType = 'lab';
+        this.manualTargetTypeOverride = null;
+      } else if (this.manualTargetTypeOverride !== 'lab') {
+        if (inferred) {
+          this.state.targetType = inferred;
+        } else if (labTab.contentKind === 'course') {
+          this.state.targetType = 'course';
+        }
       }
     }
 
@@ -782,7 +825,10 @@ export class LabBrowserOrchestrator {
   public async openLabUrl(labUrl: string): Promise<void> {
     const trimmedUrl = labUrl.trim();
     const inferredTarget = inferTargetTypeFromUrl(trimmedUrl);
-    if (inferredTarget) {
+    if (inferredTarget === 'lab') {
+      this.manualTargetTypeOverride = null;
+      this.state.targetType = 'lab';
+    } else if (inferredTarget && this.manualTargetTypeOverride !== 'lab') {
       this.state.targetType = inferredTarget;
     }
     if (
@@ -790,8 +836,12 @@ export class LabBrowserOrchestrator {
       this.state.labUrl &&
       this.state.labUrl !== trimmedUrl
     ) {
+      const savedOverride = this.manualTargetTypeOverride;
       await this.resetForNewLab({ endLabInChrome: false, closeIncognito: true });
-      if (inferredTarget) {
+      this.manualTargetTypeOverride = savedOverride;
+      if (inferredTarget === 'lab') {
+        this.state.targetType = 'lab';
+      } else if (inferredTarget && savedOverride !== 'lab') {
         this.state.targetType = inferredTarget;
       }
     }
@@ -831,7 +881,7 @@ export class LabBrowserOrchestrator {
     this.state.labTitle = parsed.labTitle;
     this.state.labTimer = parsed.labTimer;
     this.state.isLabStarted = parsed.isLabStarted;
-    if (parsed.isCourse) {
+    if (parsed.isCourse && this.manualTargetTypeOverride !== 'lab') {
       this.state.targetType = 'course';
     }
 
@@ -865,7 +915,74 @@ export class LabBrowserOrchestrator {
     }
 
     this.addLog('info', 'lab_window', 'Scanning DOM (piercing Shadow DOM components)...');
-    const parsed = await parseLabPageDom(this.labPage);
+    let parsed = await parseLabPageDom(this.labPage);
+
+    // If the page is a Course that contains an embedded Hands-on Lab, and either:
+    // 1. The operator explicitly selected "Lab" mode, OR
+    // 2. All non-lab course activities (lessons, videos, quizzes) are already completed while the embedded lab is still pending,
+    // automatically navigate the Chrome tab into the embedded lab and parse its lab tasks!
+    if (parsed.isCourse) {
+      const embeddedLabTask =
+        parsed.tasks.find(
+          (t) => t.activityType === 'lab' && !t.progressVerified && Boolean(t.activityHref)
+        ) || parsed.tasks.find((t) => t.activityType === 'lab' && Boolean(t.activityHref));
+      const hasPendingEmbeddedLab = parsed.tasks.some(
+        (t) => t.activityType === 'lab' && !t.progressVerified && Boolean(t.activityHref)
+      );
+      const allNonLabActivitiesDone =
+        hasPendingEmbeddedLab &&
+        parsed.tasks.every((t) => t.activityType === 'lab' || t.progressVerified);
+
+      if (
+        embeddedLabTask?.activityHref &&
+        (this.manualTargetTypeOverride === 'lab' ||
+          (!this.isLoopRunning &&
+            allNonLabActivitiesDone &&
+            this.manualTargetTypeOverride !== 'course'))
+      ) {
+        let origin = 'https://partner.skills.google';
+        try {
+          origin = new URL(this.state.labCurrentUrl || this.state.labUrl || origin).origin;
+        } catch {
+          // Default origin
+        }
+        const labFullUrl = new URL(embeddedLabTask.activityHref, origin).toString();
+        const labTarget = parseTabKey(this.state.selectedLabTabKey);
+        this.addLog(
+          'action',
+          'lab_window',
+          `Course contains embedded Hands-on Lab "${embeddedLabTask.title}" — navigating Chrome tab to ${labFullUrl} and switching to Lab Mode...`
+        );
+        this.manualTargetTypeOverride = 'lab';
+        this.state.targetType = 'lab';
+        this.state.labUrl = labFullUrl;
+        this.state.labCurrentUrl = labFullUrl;
+        if (parsed.courseOverviewUrl) {
+          this.state.courseOverviewUrl = parsed.courseOverviewUrl;
+        }
+        const navRes = await completeCourseActivityInUserChrome({
+          windowId: labTarget?.windowId,
+          tabIndex: labTarget?.tabIndex,
+          activityUrl: labFullUrl,
+          activityType: 'document',
+        });
+        if (navRes.htmlContent && navRes.htmlContent.trim().length > 200) {
+          const tmpFile = path.join(
+            os.tmpdir(),
+            `skills_embedded_lab_${this.sessionId.replace(/[^a-zA-Z0-9_-]/g, '_')}.html`
+          );
+          fs.writeFileSync(tmpFile, navRes.htmlContent, 'utf8');
+          await this.labPage.goto(`file://${tmpFile}`, {
+            waitUntil: 'domcontentloaded',
+            timeout: 30000,
+          });
+          await this.labPage.waitForTimeout(250);
+        } else {
+          await this.syncLabPageFromUserChrome();
+        }
+        parsed = await parseLabPageDom(this.labPage);
+      }
+    }
 
     this.state.labTitle = parsed.labTitle;
     this.state.labTimer = parsed.labTimer;
@@ -948,6 +1065,9 @@ export class LabBrowserOrchestrator {
       return;
     }
 
+    if (parsed.courseOverviewUrl) {
+      this.state.courseOverviewUrl = parsed.courseOverviewUrl;
+    }
     if (parsed.tasks.length > 0) {
       this.state.targetType = 'lab';
     }
@@ -1196,7 +1316,10 @@ export class LabBrowserOrchestrator {
   }
 
   private isCourseSession(): boolean {
+    if (this.manualTargetTypeOverride === 'lab') return false;
+    if (this.manualTargetTypeOverride === 'course') return true;
     const inferred = inferTargetTypeFromUrl(this.state.labCurrentUrl || this.state.labUrl);
+    if (inferred === 'lab') return false;
     if (inferred === 'course') return true;
     return (
       this.state.targetType === 'course' ||
@@ -1325,7 +1448,10 @@ export class LabBrowserOrchestrator {
 
     if (requestedUrl) {
       const inferredFromUrl = inferTargetTypeFromUrl(requestedUrl);
-      if (inferredFromUrl) {
+      if (inferredFromUrl === 'lab') {
+        this.manualTargetTypeOverride = null;
+        this.state.targetType = 'lab';
+      } else if (inferredFromUrl && this.manualTargetTypeOverride !== 'lab') {
         this.state.targetType = inferredFromUrl;
       }
     }
@@ -1340,7 +1466,8 @@ export class LabBrowserOrchestrator {
       );
       const liveTabTargetType = inferTargetTypeFromUrl(liveTab?.url) || liveTab?.contentKind;
       const targetTypeMismatch = Boolean(
-        (liveTabTargetType === 'course' || liveTabTargetType === 'lab') &&
+        this.manualTargetTypeOverride !== 'lab' &&
+          (liveTabTargetType === 'course' || liveTabTargetType === 'lab') &&
           liveTabTargetType !== this.state.targetType
       );
       if (
@@ -1450,6 +1577,7 @@ export class LabBrowserOrchestrator {
     }
     await clearSavedStateOnMacBridge().catch(() => {});
 
+    this.manualTargetTypeOverride = null;
     this.state = {
       ...this.state,
       sessionId: this.sessionId,
@@ -1711,12 +1839,20 @@ export class LabBrowserOrchestrator {
       if (prioritizedTaskIdx >= 0) {
         orderedTaskIndices.push(prioritizedTaskIdx);
       }
+      // Run all non-lab course activities (documents, links, videos, html_bundles, quizzes) first
       for (let idx = 0; idx < this.state.tasks.length; idx++) {
-        if (idx !== prioritizedTaskIdx) {
+        if (idx !== prioritizedTaskIdx && this.state.tasks[idx]?.activityType !== 'lab') {
+          orderedTaskIndices.push(idx);
+        }
+      }
+      // Then transition into any embedded hands-on labs
+      for (let idx = 0; idx < this.state.tasks.length; idx++) {
+        if (idx !== prioritizedTaskIdx && this.state.tasks[idx]?.activityType === 'lab') {
           orderedTaskIndices.push(idx);
         }
       }
 
+      let transitionToEmbeddedLabUrl: string | null = null;
       for (const taskIdx of orderedTaskIndices) {
         if (this.pauseRequested) {
           this.setStatus('paused');
@@ -2025,15 +2161,26 @@ export class LabBrowserOrchestrator {
             }
           }
         } else if (actType === 'lab') {
-          task.status = 'skipped';
-          task.progressMessage = 'Hands-on Lab (run in Lab mode)';
-          for (const s of task.steps) s.status = 'skipped';
-          this.emitState();
           this.addLog(
-            'info',
+            'action',
             'lab_window',
-            `Course contains hands-on lab #${task.number}: "${task.title}" (${actUrl}) — switch to Lab mode to execute hands-on lab tasks.`
+            `Transitioning from Course into embedded Hands-on Lab #${task.number}: "${task.title}" (${actUrl})...`
           );
+          const labNavRes = await completeCourseActivityInUserChrome({
+            windowId: labTarget?.windowId,
+            tabIndex: labTarget?.tabIndex,
+            activityUrl: actUrl,
+            activityType: 'document',
+          });
+          await loadHtmlIntoPreviewPage(labNavRes.htmlContent, labNavRes.url || actUrl);
+          transitionToEmbeddedLabUrl = labNavRes.url || actUrl;
+          this.manualTargetTypeOverride = 'lab';
+          this.state.targetType = 'lab';
+          this.state.labUrl = transitionToEmbeddedLabUrl;
+          this.state.labCurrentUrl = transitionToEmbeddedLabUrl;
+          this.state.tasks = [];
+          this.emitState();
+          break;
         }
 
         if (singleStepOnly) {
@@ -2043,11 +2190,19 @@ export class LabBrowserOrchestrator {
         }
       }
 
+      if (transitionToEmbeddedLabUrl) {
+        this.isLoopRunning = false;
+        await this.parseLabInstructions();
+        if (!this.pauseRequested) {
+          await this.startLabAndLaunchIncognito();
+          await this.startExecutionLoop(singleStepOnly);
+        }
+        return;
+      }
+
       const allDone =
         this.state.tasks.length > 0 &&
-        this.state.tasks.every(
-          (t) => t.status === 'completed' || t.progressVerified || t.activityType === 'lab'
-        );
+        this.state.tasks.every((t) => t.status === 'completed' || t.progressVerified);
       if (allDone) {
         if (this.state.courseOverviewUrl) {
           try {

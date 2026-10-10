@@ -1137,6 +1137,75 @@ async function runVerificationTests() {
   }
   console.log('✓ <ql-quiz> multiple-select solving & macBridgeAgent two-pass AX matching verified.');
 
+  // 17. Verify Embedded Hands-On Lab inside a Course (<ql-contents-menu> + <ql-lab-header>/<ql-activity-tracking>)
+  console.log(
+    '[17/17] Verifying embedded Hands-on Lab detection inside a Course and Lab mode switching...'
+  );
+  const embeddedLabPage = await browser.newPage();
+  await embeddedLabPage.setContent(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>Evaluate and improve search results - Use filter expressions in queries and serving controls to adjust search results | Google Skills</title>
+        <link rel="canonical" href="https://partner.skills.google/paths/3575/course_templates/1323/labs/631927" />
+      </head>
+      <body>
+        <div class="breadcrumb-item">
+          <a href="/paths/3575/course_templates/1323">Evaluate and improve search results</a>
+        </div>
+        <ql-contents-menu
+          modules='[{"title":"Start the course","expanded":true,"steps":[{"id":631924,"activities":[{"id":631924,"title":"Overview","type":"document","href":"/paths/3575/course_sessions/46035271/documents/631924","isComplete":true}]},{"id":631927,"activities":[{"id":631927,"title":"Use filter expressions in queries and serving controls to adjust search results","type":"lab","href":"/paths/3575/course_sessions/46035271/labs/631927","isComplete":false}]}]}]'
+        ></ql-contents-menu>
+        <ql-lab-header lab-title="Use filter expressions in queries and serving controls to adjust search results"></ql-lab-header>
+        <div class="js-lab-content-body">
+          <h2>Task 1. Create a Cloud Storage data store for an unstructured search app</h2>
+          <ol>
+            <li>In the Google Cloud console, navigate to Agent Builder and create a data store.</li>
+          </ol>
+          <ql-activity-tracking step="1" labinstanceid="175200001">Check my progress</ql-activity-tracking>
+          <h2>Task 2. Create boost and filter controls</h2>
+          <ol>
+            <li>Create a boost control and a filter control in Serving Controls.</li>
+          </ol>
+          <ql-activity-tracking step="2" labinstanceid="175200001">Check my progress</ql-activity-tracking>
+        </div>
+      </body>
+    </html>
+  `);
+  const parsedEmbeddedLab = await parseLabPageDom(embeddedLabPage);
+  if (parsedEmbeddedLab.isCourse) {
+    throw new Error(
+      'Expected embedded lab page with <ql-lab-header> and <ql-activity-tracking> to have isCourse === false even when <ql-contents-menu> is present!'
+    );
+  }
+  if (parsedEmbeddedLab.courseOverviewUrl !== '/paths/3575/course_templates/1323') {
+    throw new Error(
+      `Expected courseOverviewUrl to be preserved on embedded lab page, got "${parsedEmbeddedLab.courseOverviewUrl}"`
+    );
+  }
+  if (
+    parsedEmbeddedLab.tasks.length !== 2 ||
+    !parsedEmbeddedLab.tasks[0].hasCheckProgress ||
+    parsedEmbeddedLab.tasks[0].activityType
+  ) {
+    throw new Error(
+      `Expected 2 hands-on lab tasks with hasCheckProgress, got ${JSON.stringify(parsedEmbeddedLab.tasks)}`
+    );
+  }
+  const sessEmbedded = getSessionOrchestrator('test-session-embedded');
+  await sessEmbedded.resetForNewLab({ endLabInChrome: false, closeIncognito: false });
+  sessEmbedded.setTargetType('course');
+  if (sessEmbedded.getState().targetType !== 'course') {
+    throw new Error('Expected targetType to be course after setTargetType("course")');
+  }
+  sessEmbedded.setTargetType('lab');
+  if (sessEmbedded.getState().targetType !== 'lab') {
+    throw new Error('Expected targetType to be lab after setTargetType("lab")');
+  }
+  await sessEmbedded.resetForNewLab({ endLabInChrome: false, closeIncognito: false });
+  await embeddedLabPage.close();
+  console.log('✓ Embedded Hands-on Lab detection inside Course and Lab mode switching verified.');
+
   await browser.close();
   console.log('✅ All verification tests passed!');
 }

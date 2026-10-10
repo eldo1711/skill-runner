@@ -429,17 +429,22 @@ export default function App() {
     const selectedTab = (state.availableChromeTabs || []).find(
       (t) => t.key === state.selectedLabTabKey
     );
+    const hasEmbeddedLabInLoadedCourse = state.tasks.some((t) => t.activityType === 'lab');
     const activeUrl =
       sourceMode === 'url' && urlInput.trim()
         ? urlInput.trim()
         : selectedTab?.url || state.labCurrentUrl || state.labUrl;
     const effectiveType =
-      inferTargetTypeFromUrl(activeUrl) ||
-      (selectedTab?.contentKind === 'course' || selectedTab?.contentKind === 'lab'
-        ? selectedTab.contentKind
-        : null) ||
-      state.targetType ||
-      'lab';
+      sourceMode === 'url' && urlInput.trim()
+        ? inferTargetTypeFromUrl(activeUrl) || state.targetType || 'lab'
+        : state.targetType === 'lab' && hasEmbeddedLabInLoadedCourse
+          ? 'lab'
+          : state.targetType ||
+            inferTargetTypeFromUrl(activeUrl) ||
+            (selectedTab?.contentKind === 'course' || selectedTab?.contentKind === 'lab'
+              ? selectedTab.contentKind
+              : null) ||
+            'lab';
     if (effectiveType !== state.targetType) {
       setState((prev) => ({ ...prev, targetType: effectiveType }));
     }
@@ -681,9 +686,7 @@ export default function App() {
           },
         ];
 
-  const isCourseMode =
-    state.targetType === 'course' ||
-    state.tasks.some((t) => Boolean(t.activityType));
+  const isCourseMode = state.targetType === 'course';
 
   const formatTabLabel = (t: (typeof chromeTabs)[number]) => {
     const roleTag =
