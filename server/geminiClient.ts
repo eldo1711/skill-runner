@@ -13,6 +13,15 @@ import {
   ModelGardenEntry,
 } from './types.js';
 import { sessionAsyncStorage } from './macBridgeHub.js';
+import {
+  MemorializedKnowledgeEntry,
+  MemorializedLabRecipe,
+  MemorializedQuizQA,
+} from '../shared/agentLearnings.js';
+import {
+  retrieveRelevantKnowledgeForPrompt,
+  slugifyKnowledgeId,
+} from './knowledgeStore.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -5043,7 +5052,13 @@ ${combinedText}
       1. Inspect the exact \`[Cell <N> | code | exec=...]\` indices and surrounding markdown instructions in \`=== VERTEX AI WORKBENCH NOTEBOOK ===\`.
       2. Remove all \`#[ TODO ... ]\` comments from patched cells, and use the exact variable names and metric names expected by downstream cells in the notebook (for example: in Task 3 Cell 22 use \`metrics=[POINTWISE_METRIC]\` so Cell 26 \`display_explanations(pointwise_result, num=1, metrics=[POINTWISE_METRIC])\` succeeds; in Task 5 Cell 34/36 set \`PAIRWISE_METRIC_NAME = "pairwise_summarization_quality"\` and \`metric_prompt_template=MetricPromptTemplateExamples.get_prompt_template(PAIRWISE_METRIC_NAME)\`; in Task 6 Cell 40 add \`"context": context,\` to \`eval_dataset\`, in Cell 42 add \`"rouge_l_sum", "bleu", "coherence",\` to \`metrics\`, in Task 6 Cell 44 set \`prompt_template=prompt_template,\`, and set \`run_through_cell=54\` so all evaluation and visualization cells 40..54 execute and save).
       3. Never write raw unquoted English prose into Python code (if copying multi-line rubric strings, ensure all strings are properly quoted).
-      4. \`wb_helper.update_and_run_notebook(...)\` automatically handles \`Cell 5\` kernel restarts, automatically delegates execution to the Workbench VM over \`gcloud compute ssh\` (using \`/opt/micromamba/bin/python3\` as user \`jupyter\`) if the external proxy returns 403, automatically installs a universal NumPy 1.x/2.x + \`scikit-learn\` compatibility shim (\`np.long\` and \`numpy.core.numeric.ComplexWarning\`), reuses the active kernel across tasks, skips already-executed cells from previous tasks, and saves \`/home/jupyter/<filename>\` after each cell. Always call \`wb_helper.update_and_run_notebook(...)\` rather than writing custom raw SSH scripts.`;
+      4. \`wb_helper.update_and_run_notebook(...)\` automatically handles \`Cell 5\` kernel restarts, automatically delegates execution to the Workbench VM over \`gcloud compute ssh\` (using \`/opt/micromamba/bin/python3\` as user \`jupyter\`) if the external proxy returns 403, automatically installs a universal NumPy 1.x/2.x + \`scikit-learn\` compatibility shim (\`np.long\` and \`numpy.core.numeric.ComplexWarning\`), reuses the active kernel across tasks, skips already-executed cells from previous tasks, and saves \`/home/jupyter/<filename>\` after each cell. Always call \`wb_helper.update_and_run_notebook(...)\` rather than writing custom raw SSH scripts.${(() => {
+    const retrieved = retrieveRelevantKnowledgeForPrompt(
+      `${labTitle}\n${task.title}\n${combinedText.slice(0, 2000)}`,
+      5
+    );
+    return retrieved ? `\n\n${retrieved}` : '';
+  })()}`;
 
   const hasUnclosedHeredoc = (script: string): boolean => {
     const heredocRegex = /<<-?\s*['"]?([A-Za-z0-9_]+)['"]?/g;
@@ -5436,12 +5451,16 @@ export async function solveCourseQuizQuestions(
   const questionsToSolve = questions.filter((q) => !lockedChoicesByItemId[q.id]);
 
   if (questionsToSolve.length > 0) {
+    const memorializedContext = retrieveRelevantKnowledgeForPrompt(
+      `${courseTitle}\n${questionsToSolve.map((q) => `${q.stem} ${q.options.map((o) => o.title).join(' ')}`).join('\n')}`,
+      6
+    );
     const prompt = `You are completing the Google Cloud Skills course quiz for "${courseTitle}".
-Use the official course lesson material below (if provided) and your Google Cloud / ADK / Vertex AI expertise to determine the exact correct option for each question.
+Use the official course lesson material below (if provided), any previously memorialized course & quiz learnings, and your Google Cloud / ADK / Vertex AI expertise to determine the exact correct option for each question.
 
 COURSE LESSON MATERIAL:
 ${courseKnowledgeBase ? courseKnowledgeBase.slice(0, 80000) : '(Use Google Cloud domain knowledge)'}
-
+${memorializedContext ? `\n${memorializedContext}\n` : ''}
 QUESTIONS TO SOLVE:
 ${JSON.stringify(
   questionsToSolve.map((q) => {
@@ -5592,5 +5611,330 @@ Return ONLY valid JSON matching:
     };
   });
 }
+
+/**
+ * Distills a completed course module (`document`, `html_bundle`, `video`, `link`) into a structured
+ * `MemorializedKnowledgeEntry` (`stream: 'course_content'`) for permanent agent memory.
+ */
+export async function distillCourseModuleLearning(params: {
+  courseTitle: string;
+  moduleTitle: string;
+  moduleUrl?: string;
+  rawText: string;
+}): Promise<MemorializedKnowledgeEntry> {
+  const { courseTitle, moduleTitle, moduleUrl, rawText } = params;
+  const id = slugifyKnowledgeId('kb-course', courseTitle, moduleTitle);
+  const cleanText = (rawText || '').replace(/\s+/g, ' ').trim();
+
+  // Deterministic fallback summary and key concepts
+  const fallbackSentences = cleanText
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 35 && s.length <= 280);
+  const fallbackSummary =
+    fallbackSentences.slice(0, 2).join(' ') ||
+    `Distilled core architectural concepts and technical curriculum from "${moduleTitle}" in "${courseTitle}".`;
+  const fallbackConcepts =
+    fallbackSentences.slice(0, 5).length > 0
+      ? fallbackSentences.slice(0, 5)
+      : [`Completed module "${moduleTitle}" in course "${courseTitle}".`];
+
+  if (cleanText.length >= 80) {
+    try {
+      const ai = getGenAIClient();
+      const prompt = `You are building a permanent technical knowledge base for an autonomous Google Cloud & Enterprise AI engineering agent.
+Distill the following course module into a concise, high-signal technical learning entry.
+
+Course Title: ${courseTitle}
+Module Title: ${moduleTitle}
+Module Content:
+${cleanText.slice(0, 35000)}
+
+Return ONLY valid JSON matching:
+{
+  "summary": "<1-2 sentence executive technical summary of the module>",
+  "conceptsAndCapabilities": [
+    "<3 to 5 concrete architectural facts or product capabilities taught in this module>"
+  ],
+  "agentRulesAndTakeaways": [
+    "<2 to 4 actionable engineering rules or best practices for building and configuring agents based on this module>"
+  ],
+  "tags": ["<3 to 6 lowercase technical tags, e.g. gemini-enterprise, adk, vertex-ai, bigquery>"]
+}`;
+      const resp = await generateContentWithModelFallback(ai, {
+        model: getActiveGeminiModel(),
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          temperature: 0.1,
+        },
+      });
+      const text = String((resp as any)?.text || '').trim();
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : text || '{}');
+      if (
+        parsed?.summary &&
+        Array.isArray(parsed?.conceptsAndCapabilities) &&
+        parsed.conceptsAndCapabilities.length > 0
+      ) {
+        return {
+          id,
+          stream: 'course_content',
+          timestamp: new Date().toISOString(),
+          courseOrLabTitle: courseTitle,
+          moduleOrTaskTitle: moduleTitle,
+          sourceUrl: moduleUrl || '',
+          tags: Array.isArray(parsed.tags)
+            ? parsed.tags.map((t: any) => String(t).toLowerCase())
+            : ['course-curriculum', 'google-cloud'],
+          summary: String(parsed.summary),
+          conceptsAndCapabilities: parsed.conceptsAndCapabilities.map((c: any) => String(c)),
+          agentRulesAndTakeaways: Array.isArray(parsed.agentRulesAndTakeaways)
+            ? parsed.agentRulesAndTakeaways.map((r: any) => String(r))
+            : [],
+        };
+      }
+    } catch {
+      // Fall back to deterministic extraction below
+    }
+  }
+
+  return {
+    id,
+    stream: 'course_content',
+    timestamp: new Date().toISOString(),
+    courseOrLabTitle: courseTitle,
+    moduleOrTaskTitle: moduleTitle,
+    sourceUrl: moduleUrl || '',
+    tags: ['course-curriculum', 'google-cloud'],
+    summary: fallbackSummary,
+    conceptsAndCapabilities: fallbackConcepts,
+    agentRulesAndTakeaways: [
+      `Apply curriculum concepts from "${moduleTitle}" when solving quizzes or labs in "${courseTitle}".`,
+    ],
+  };
+}
+
+/**
+ * Distills a passed course quiz (`<ql-quiz>`) into a `MemorializedKnowledgeEntry` (`stream: 'quiz_mastery'`)
+ * recording every verified question, its winning answer(s), any eliminated incorrect options, and rationale.
+ */
+export async function distillQuizMasteryLearning(params: {
+  courseTitle: string;
+  quizTitle: string;
+  quizUrl?: string;
+  questions: QuizQuestionInput[];
+  solvedAnswers: SolvedQuizAnswer[];
+  excludedChoicesByItemId?: Record<string, string[]>;
+  scorePercent?: number;
+}): Promise<MemorializedKnowledgeEntry> {
+  const {
+    courseTitle,
+    quizTitle,
+    quizUrl,
+    questions,
+    solvedAnswers,
+    excludedChoicesByItemId = {},
+    scorePercent = 100,
+  } = params;
+
+  const id = slugifyKnowledgeId('kb-quiz', courseTitle, quizTitle);
+  const answerById = new Map<string, SolvedQuizAnswer>();
+  for (const a of solvedAnswers) {
+    answerById.set(a.quizItemId, a);
+  }
+
+  const quizQa: MemorializedQuizQA[] = questions.map((q) => {
+    const ans = answerById.get(q.id);
+    const verifiedAnswers: string[] = [];
+    if (ans?.optionTitles && ans.optionTitles.length > 0) {
+      verifiedAnswers.push(...ans.optionTitles);
+    } else if (ans?.optionTitle) {
+      verifiedAnswers.push(ans.optionTitle);
+    } else {
+      const known = q.options.filter((o) => o.isAnswer).map((o) => o.title);
+      if (known.length > 0) verifiedAnswers.push(...known);
+    }
+
+    const excludedIds = new Set(excludedChoicesByItemId[q.id] || []);
+    const eliminatedWrongOptions = q.options
+      .filter((o) => excludedIds.has(o.id))
+      .map((o) => o.title);
+
+    const explanation =
+      ans?.reason ||
+      q.options.find((o) => o.isAnswer && o.rationale)?.rationale ||
+      'Verified 100% passing quiz answer.';
+
+    return {
+      question: q.stem,
+      verifiedAnswers: verifiedAnswers.length > 0 ? verifiedAnswers : ['Verified pass'],
+      eliminatedWrongOptions:
+        eliminatedWrongOptions.length > 0 ? eliminatedWrongOptions : undefined,
+      explanation,
+      domainRule: `${q.stem} -> ${verifiedAnswers.join('; ')}`,
+    };
+  });
+
+  const conceptsAndCapabilities = quizQa.map(
+    (qa) => `${qa.question} -> ${qa.verifiedAnswers.join('; ')} (${qa.explanation})`
+  );
+
+  return {
+    id,
+    stream: 'quiz_mastery',
+    timestamp: new Date().toISOString(),
+    courseOrLabTitle: courseTitle,
+    moduleOrTaskTitle: quizTitle,
+    sourceUrl: quizUrl || '',
+    tags: ['quiz-mastery', 'verified-answers', 'google-cloud'],
+    summary: `Passed "${quizTitle}" in "${courseTitle}" (${scorePercent}%) — memorialized ${quizQa.length} verified Q&A pair(s).`,
+    conceptsAndCapabilities,
+    agentRulesAndTakeaways: quizQa.map((qa) => qa.domainRule),
+    quizQa,
+  };
+}
+
+/**
+ * Distills a verified hands-on lab task (`checkRes.verified === true`) into a `MemorializedKnowledgeEntry`
+ * (`stream: 'lab_execution'`) capturing the objective, self-healing delta, grader verification signal,
+ * and reusable recipe.
+ */
+export async function distillLabTaskLearning(params: {
+  labTitle: string;
+  task: LabTask;
+  labUrl?: string;
+  winningScript: string;
+  scriptSummary: string;
+  attempts: number;
+  previousErrors: string[];
+  graderMessage?: string;
+}): Promise<MemorializedKnowledgeEntry> {
+  const {
+    labTitle,
+    task,
+    labUrl,
+    winningScript,
+    scriptSummary,
+    attempts,
+    previousErrors,
+    graderMessage,
+  } = params;
+
+  const id = slugifyKnowledgeId('kb-lab', labTitle, `task-${task.number}-${task.title}`);
+  const cleanErrors = previousErrors.map((e) => e.trim()).filter(Boolean);
+
+  const defaultRecipe: MemorializedLabRecipe = {
+    servicesUsed: ['google-cloud'],
+    verifiedScriptSummary:
+      scriptSummary ||
+      `Verified Task #${task.number} (${task.title}): ${graderMessage || 'Check My Progress passed'}`,
+    verifiedScriptSnippet: winningScript ? winningScript.slice(0, 1200) : '',
+    attemptsRequired: attempts,
+    selfHealingDelta:
+      cleanErrors.length > 0
+        ? `Resolved after ${attempts} attempt(s). Earlier failure(s): ${cleanErrors.join(' | ').slice(0, 400)}`
+        : 'Passed on first attempt using idempotent Cloud Shell / REST synthesis.',
+  };
+
+  try {
+    const ai = getGenAIClient();
+    const prompt = `You are distilling a verified Google Cloud Skills Boost hands-on lab task solution into a permanent engineering recipe for future agent runs.
+
+Lab Title: ${labTitle}
+Task #${task.number}: ${task.title}
+Task Instructions:
+${(task.rawSectionText || task.steps.map((s) => s.instruction).join('\n')).slice(0, 4000)}
+
+Attempts Required: ${attempts}
+Earlier Errors Before Passing (if any):
+${cleanErrors.length > 0 ? cleanErrors.join('\n---\n').slice(0, 2000) : '(Passed on 1st attempt)'}
+
+Winning Script Summary: ${scriptSummary}
+Winning Script (excerpt):
+${(winningScript || '').slice(0, 6000)}
+
+Return ONLY valid JSON matching:
+{
+  "summary": "<1-sentence summary of how this lab task was solved and verified>",
+  "conceptsAndCapabilities": [
+    "<2 to 4 architectural or API concepts demonstrated by this lab task>"
+  ],
+  "agentRulesAndTakeaways": [
+    "<2 to 4 reusable technical rules, exact API/CLI flags, or self-healing fixes from passing this task>"
+  ],
+  "servicesUsed": ["<Google Cloud APIs/services used, e.g. discoveryengine.googleapis.com>"],
+  "verifiedScriptSummary": "<concrete explanation of the API/CLI solution that passed>",
+  "selfHealingDelta": "<key pitfall avoided or self-healed to make the grader pass>",
+  "tags": ["<3 to 6 lowercase technical tags>"]
+}`;
+    const resp = await generateContentWithModelFallback(ai, {
+      model: getActiveGeminiModel(),
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        temperature: 0.1,
+      },
+    });
+    const text = String((resp as any)?.text || '').trim();
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : text || '{}');
+    if (
+      parsed?.summary &&
+      Array.isArray(parsed?.conceptsAndCapabilities) &&
+      parsed.conceptsAndCapabilities.length > 0
+    ) {
+      return {
+        id,
+        stream: 'lab_execution',
+        timestamp: new Date().toISOString(),
+        courseOrLabTitle: labTitle,
+        moduleOrTaskTitle: `Task ${task.number}: ${task.title}`,
+        sourceUrl: labUrl || '',
+        tags: Array.isArray(parsed.tags)
+          ? parsed.tags.map((t: any) => String(t).toLowerCase())
+          : ['lab-recipe', 'google-cloud'],
+        summary: String(parsed.summary),
+        conceptsAndCapabilities: parsed.conceptsAndCapabilities.map((c: any) => String(c)),
+        agentRulesAndTakeaways: Array.isArray(parsed.agentRulesAndTakeaways)
+          ? parsed.agentRulesAndTakeaways.map((r: any) => String(r))
+          : [],
+        labRecipe: {
+          servicesUsed: Array.isArray(parsed.servicesUsed)
+            ? parsed.servicesUsed.map((s: any) => String(s))
+            : defaultRecipe.servicesUsed,
+          verifiedScriptSummary: String(
+            parsed.verifiedScriptSummary || defaultRecipe.verifiedScriptSummary
+          ),
+          verifiedScriptSnippet: defaultRecipe.verifiedScriptSnippet,
+          attemptsRequired: attempts,
+          selfHealingDelta: String(parsed.selfHealingDelta || defaultRecipe.selfHealingDelta),
+        },
+      };
+    }
+  } catch {
+    // Fall back to deterministic recipe below
+  }
+
+  return {
+    id,
+    stream: 'lab_execution',
+    timestamp: new Date().toISOString(),
+    courseOrLabTitle: labTitle,
+    moduleOrTaskTitle: `Task ${task.number}: ${task.title}`,
+    sourceUrl: labUrl || '',
+    tags: ['lab-recipe', 'google-cloud'],
+    summary: `Verified Task #${task.number} ("${task.title}") in "${labTitle}" (${attempts} attempt${attempts === 1 ? '' : 's'}).`,
+    conceptsAndCapabilities: [
+      `${task.title}: ${(task.rawSectionText || task.steps.map((s) => s.instruction).join(' ')).replace(/\s+/g, ' ').trim().slice(0, 320)}`,
+    ],
+    agentRulesAndTakeaways: [
+      defaultRecipe.verifiedScriptSummary,
+      defaultRecipe.selfHealingDelta || '',
+    ].filter(Boolean),
+    labRecipe: defaultRecipe,
+  };
+}
+
 
 

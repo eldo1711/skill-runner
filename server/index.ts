@@ -17,6 +17,11 @@ import {
 import { ExecutionMode } from './types.js';
 import { routeIncomingBridgeSocket } from './macBridgeHub.js';
 import { AGENT_LEARNINGS, renderAgentLearningsMarkdown } from '../shared/agentLearnings.js';
+import {
+  getAllMemorializedKnowledge,
+  recordMemorializedKnowledge,
+  syncKnowledgeWithBridge,
+} from './knowledgeStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -120,16 +125,53 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Cumulative Agent Engineering Learnings catalog & Markdown export
-app.get('/api/learnings', (_req, res) => {
-  res.json({
-    count: AGENT_LEARNINGS.length,
-    learnings: AGENT_LEARNINGS,
-  });
+// Cumulative Course, Quiz, Lab & Agent Engineering Knowledge Base catalog & Markdown export
+app.get('/api/learnings', async (req, res) => {
+  try {
+    const orch = getReqOrchestrator(req);
+    const entries = await syncKnowledgeWithBridge(orch.getBridgeHub());
+    res.json({
+      count: AGENT_LEARNINGS.length + entries.length,
+      entriesCount: entries.length,
+      entries,
+      learnings: AGENT_LEARNINGS,
+    });
+  } catch {
+    const entries = getAllMemorializedKnowledge();
+    res.json({
+      count: AGENT_LEARNINGS.length + entries.length,
+      entriesCount: entries.length,
+      entries,
+      learnings: AGENT_LEARNINGS,
+    });
+  }
 });
 
-app.get('/api/learnings/markdown', (_req, res) => {
-  res.type('text/markdown; charset=utf-8').send(renderAgentLearningsMarkdown());
+app.post('/api/learnings', async (req, res) => {
+  try {
+    const orch = getReqOrchestrator(req);
+    const entry = req.body?.entry || req.body;
+    if (!entry || !entry.id || !entry.stream) {
+      res.status(400).json({ error: 'Valid knowledge entry with id and stream is required.' });
+      return;
+    }
+    const entries = await recordMemorializedKnowledge(entry, orch.getBridgeHub());
+    res.json({ ok: true, entriesCount: entries.length, entries });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || String(err) });
+  }
+});
+
+app.get('/api/learnings/markdown', async (req, res) => {
+  try {
+    const orch = getReqOrchestrator(req);
+    const entries = await syncKnowledgeWithBridge(orch.getBridgeHub());
+    res.type('text/markdown; charset=utf-8').send(renderAgentLearningsMarkdown(entries));
+  } catch {
+    res
+      .type('text/markdown; charset=utf-8')
+      .send(renderAgentLearningsMarkdown(getAllMemorializedKnowledge()));
+  }
 });
 
 // Get current runner state for this browser session

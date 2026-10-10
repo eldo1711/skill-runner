@@ -53,6 +53,9 @@ import {
 import {
   checkModelGardenAvailability,
   decideNextStepAction,
+  distillCourseModuleLearning,
+  distillLabTaskLearning,
+  distillQuizMasteryLearning,
   fetchCourseKnowledgeFromIframeSrc,
   formatAutonomousAntigravityPrompt,
   getActiveGeminiModel,
@@ -65,6 +68,10 @@ import {
   synthesizeTaskShellScript,
   transformAgyLaunchCommand,
 } from './geminiClient.js';
+import {
+  recordMemorializedKnowledge,
+  syncKnowledgeWithBridge,
+} from './knowledgeStore.js';
 import {
   MacBridgeHub,
   SessionExecutionContext,
@@ -192,6 +199,7 @@ export class LabBrowserOrchestrator {
           if (this.state.status === 'idle' && this.state.tasks.length === 0) {
             clearSavedStateOnMacBridge().catch(() => {});
           }
+          syncKnowledgeWithBridge(this.hub).catch(() => {});
           this.scanOpenChromeWindows(false).catch(() => {});
         } else {
           this.state.availableChromeTabs = [];
@@ -1968,6 +1976,30 @@ export class LabBrowserOrchestrator {
               'lab_window',
               `Completed activity #${task.number}: "${task.title}" (${this.state.totalScore}/${this.state.maxScore} done).`
             );
+
+            // Memorialize course module content asynchronously
+            (async () => {
+              try {
+                let rawModuleText = courseKnowledgeBase || task.rawSectionText || '';
+                if (!rawModuleText && this.labPage) {
+                  rawModuleText = await this.labPage.innerText('body').catch(() => '');
+                }
+                const entry = await distillCourseModuleLearning({
+                  courseTitle: this.state.labTitle || 'Google Cloud Skills Course',
+                  moduleTitle: task.title,
+                  moduleUrl: actUrl,
+                  rawText: rawModuleText,
+                });
+                await recordMemorializedKnowledge(entry, this.hub);
+                this.addLog(
+                  'ai',
+                  'gemini',
+                  `Memorialized course learning [${entry.id}]: ${entry.summary}`
+                );
+              } catch {
+                // Non-blocking memorialization
+              }
+            })();
           }
         }
 
@@ -2145,6 +2177,29 @@ export class LabBrowserOrchestrator {
                   'lab_window',
                   `Quiz "${task.title}" PASSED with score ${grade ?? 100}%!`
                 );
+
+                // Memorialize verified quiz Q&A pairs
+                (async () => {
+                  try {
+                    const entry = await distillQuizMasteryLearning({
+                      courseTitle: this.state.labTitle || 'Google Cloud Skills Course',
+                      quizTitle: task.title,
+                      quizUrl: actUrl,
+                      questions: cq.items,
+                      solvedAnswers: answers,
+                      excludedChoicesByItemId,
+                      scorePercent: grade ?? 100,
+                    });
+                    await recordMemorializedKnowledge(entry, this.hub);
+                    this.addLog(
+                      'ai',
+                      'gemini',
+                      `Memorialized ${cq.items.length} verified quiz Q&A pair(s) [${entry.id}]`
+                    );
+                  } catch {
+                    // Non-blocking memorialization
+                  }
+                })();
                 break;
               } else {
                 this.addLog(
@@ -2347,6 +2402,7 @@ export class LabBrowserOrchestrator {
           const maxAttempts = task.hasCheckProgress ? 4 : 2;
           let previousErrorMessage: string | undefined;
           let previousScriptOutput: string | undefined;
+          const previousErrors: string[] = [];
 
           for (let attempt = 1; attempt <= maxAttempts; attempt++) {
             if (this.pauseRequested || !this.state.isLabStarted) {
@@ -2446,11 +2502,37 @@ export class LabBrowserOrchestrator {
               );
 
               if (checkRes.verified) {
+                // Memorialize verified lab task solution & self-healing delta
+                (async () => {
+                  try {
+                    const entry = await distillLabTaskLearning({
+                      labTitle: this.state.labTitle || 'Google Cloud Skills Boost Lab',
+                      task,
+                      labUrl: this.state.labCurrentUrl || this.state.labUrl,
+                      winningScript: synth?.script || '',
+                      scriptSummary: synth?.summary || '',
+                      attempts: attempt,
+                      previousErrors,
+                      graderMessage: checkRes.message,
+                    });
+                    await recordMemorializedKnowledge(entry, this.hub);
+                    this.addLog(
+                      'ai',
+                      'gemini',
+                      `Memorialized verified lab recipe [${entry.id}]: ${entry.summary}`
+                    );
+                  } catch {
+                    // Non-blocking memorialization
+                  }
+                })();
                 await this.syncLabPageFromUserChrome().catch(() => {});
                 await this.refreshScreenshots().catch(() => {});
                 break;
               }
               previousErrorMessage = checkRes.message;
+              previousErrors.push(
+                `${checkRes.message}${previousScriptOutput ? ` | Output: ${previousScriptOutput.slice(-300)}` : ''}`
+              );
             } else {
               if (lastSshOk) {
                 task.status = 'completed';

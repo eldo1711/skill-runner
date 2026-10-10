@@ -44,6 +44,9 @@ const SNAPSHOT_HTML_PATH = path.join(SNAPSHOT_DIR, 'live_lab_snapshot.html');
 const SNAPSHOT_FILES_DIR = path.join(SNAPSHOT_DIR, 'live_lab_snapshot_files');
 const STATE_FILE_PATH = path.join(SNAPSHOT_DIR, 'runner_state.json');
 const SESSION_ID_FILE = path.join(SNAPSHOT_DIR, 'session_id');
+const KNOWLEDGE_FILE_PATH = path.join(SNAPSHOT_DIR, 'knowledge_base.json');
+const KNOWLEDGE_MD_PATH = path.join(SNAPSHOT_DIR, 'AGENT_LEARNINGS.md');
+const REPO_KNOWLEDGE_MD_PATH = path.join(os.homedir(), 'skills-runner', 'AGENT_LEARNINGS.md');
 
 const SSH_BIN_DIR = path.join(SNAPSHOT_DIR, 'ssh-bin');
 
@@ -2825,6 +2828,55 @@ async function connectBridge() {
             }
           } catch {}
           result = { ok: true };
+        } else if (method === 'save_learning_entry') {
+          fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
+          let existing = [];
+          try {
+            if (fs.existsSync(KNOWLEDGE_FILE_PATH)) {
+              const parsed = JSON.parse(fs.readFileSync(KNOWLEDGE_FILE_PATH, 'utf8'));
+              if (Array.isArray(parsed)) existing = parsed;
+              else if (Array.isArray(parsed?.entries)) existing = parsed.entries;
+            }
+          } catch {}
+          const byId = new Map();
+          for (const item of existing) {
+            if (item && item.id) byId.set(item.id, item);
+          }
+          if (Array.isArray(params?.entries)) {
+            for (const item of params.entries) {
+              if (item && item.id) byId.set(item.id, item);
+            }
+          }
+          if (params?.entry && params.entry.id) {
+            byId.set(params.entry.id, params.entry);
+          }
+          const merged = Array.from(byId.values()).sort((a, b) =>
+            String(b.timestamp || '').localeCompare(String(a.timestamp || ''))
+          );
+          fs.writeFileSync(
+            KNOWLEDGE_FILE_PATH,
+            JSON.stringify({ updatedAt: new Date().toISOString(), entries: merged }, null, 2),
+            'utf8'
+          );
+          if (typeof params?.markdown === 'string' && params.markdown.trim()) {
+            fs.writeFileSync(KNOWLEDGE_MD_PATH, params.markdown, 'utf8');
+            try {
+              if (fs.existsSync(path.dirname(REPO_KNOWLEDGE_MD_PATH))) {
+                fs.writeFileSync(REPO_KNOWLEDGE_MD_PATH, params.markdown, 'utf8');
+              }
+            } catch {}
+          }
+          result = { ok: true, count: merged.length, path: KNOWLEDGE_FILE_PATH };
+        } else if (method === 'get_learning_entries') {
+          let entries = [];
+          try {
+            if (fs.existsSync(KNOWLEDGE_FILE_PATH)) {
+              const parsed = JSON.parse(fs.readFileSync(KNOWLEDGE_FILE_PATH, 'utf8'));
+              if (Array.isArray(parsed)) entries = parsed;
+              else if (Array.isArray(parsed?.entries)) entries = parsed.entries;
+            }
+          } catch {}
+          result = { ok: true, entries };
         } else if (method === 'close_incognito_windows') {
           const closeScript = `
 tell application "Google Chrome"

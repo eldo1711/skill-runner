@@ -16,6 +16,255 @@ export interface AgentLearningEntry {
   tags: string[];
 }
 
+export type KnowledgeStreamType = 'course_content' | 'quiz_mastery' | 'lab_execution';
+
+export interface MemorializedQuizQA {
+  question: string;
+  verifiedAnswers: string[];
+  eliminatedWrongOptions?: string[];
+  explanation: string;
+  domainRule: string;
+}
+
+export interface MemorializedLabRecipe {
+  servicesUsed: string[];
+  verifiedScriptSummary: string;
+  verifiedScriptSnippet: string;
+  attemptsRequired: number;
+  selfHealingDelta?: string;
+}
+
+export interface MemorializedKnowledgeEntry {
+  id: string;
+  timestamp: string;
+  stream: KnowledgeStreamType;
+  courseOrLabTitle: string;
+  moduleOrTaskTitle: string;
+  sourceUrl: string;
+  summary: string;
+  conceptsAndCapabilities: string[];
+  agentRulesAndTakeaways: string[];
+  quizQa?: MemorializedQuizQA[];
+  labRecipe?: MemorializedLabRecipe;
+  tags: string[];
+}
+
+export const SEED_MEMORIALIZED_KNOWLEDGE: MemorializedKnowledgeEntry[] = [
+  {
+    id: 'course-gemini-enterprise-deep-research-overview',
+    timestamp: '2026-10-10T19:45:00.000Z',
+    stream: 'course_content',
+    courseOrLabTitle: 'Explore the Deep Research Agent',
+    moduleOrTaskTitle: 'Gemini Enterprise Architecture & Managed Deep Research Agent',
+    sourceUrl: 'https://partner.skills.google/focuses/149995?parent=catalog&path=3581',
+    summary:
+      'Gemini Enterprise is an intranet-ready AI assistant and enterprise search application built on Google Cloud Discovery Engine. It includes a managed Deep Research agent (`deep_research`) that autonomously plans, refines, and executes multi-step research across internal data stores and Google Search grounding.',
+    conceptsAndCapabilities: [
+      'Gemini Enterprise (`APP_TYPE_INTRANET`, `SOLUTION_TYPE_SEARCH`, `SEARCH_TIER_ENTERPRISE` + `SEARCH_ADD_ON_LLM`) unifies enterprise search, grounded chat (`default_assistant`), and specialized multi-step agents.',
+      'Workforce Identity configuration (`aclConfig` with `idpType: "GSUITE"` or third-party OIDC/SAML) governs user access and license enforcement across the organization.',
+      'The managed Deep Research agent (`assistants/default_assistant/agents/deep_research`) operates in a structured two-phase workflow: (1) interactive Research Plan generation and user refinement in chat, followed by (2) autonomous multi-source web/enterprise research synthesis into a comprehensive cited report.',
+    ],
+    agentRulesAndTakeaways: [
+      'When automating Gemini Enterprise deployment via REST (`discoveryengine.googleapis.com/v1alpha`), configure `aclConfig` (`{"idpConfig": {"idpType": "GSUITE"}}`) without `updateMask`, provision the `APP_TYPE_INTRANET` engine first, and then configure `default_user_store` and `licenseConfigs`.',
+      'When interacting with the Deep Research agent via `assistants/default_assistant:streamAssist`, pass `"agentsSpec": {"agentSpecs": [{"agentId": "deep_research"}]}` and the same `session` resource path on every turn (Turn 1: initial research topic -> Turn 2: research plan modification -> Turn 3: "Start research").',
+    ],
+    tags: [
+      'gemini-enterprise',
+      'deep-research',
+      'discoveryengine',
+      'workforce-identity',
+      'research-plan',
+    ],
+  },
+  {
+    id: 'lab-explore-deep-research-agent-task-1',
+    timestamp: '2026-10-10T19:51:30.000Z',
+    stream: 'lab_execution',
+    courseOrLabTitle: 'Explore the Deep Research Agent',
+    moduleOrTaskTitle: 'Task 1. Deploy Gemini Enterprise and Configure an Identity Provider',
+    sourceUrl: 'https://partner.skills.google/focuses/149995?parent=catalog&path=3581',
+    summary:
+      'Deploys the Cymbal Shops Gemini Enterprise intranet app (`cymbal-shops-gemini-enterprise`) with company name "Cymbal Shops", enables Google Identity (`GSUITE`) as the Workforce Identity Provider in Discovery Engine `aclConfig`, and provisions a 30-day Search & Assistant free-trial license.',
+    conceptsAndCapabilities: [
+      'Discovery Engine `aclConfig` controls the project-wide identity provider (`GSUITE` vs `THIRD_PARTY_IDP`) in `locations/global/aclConfig`.',
+      'Gemini Enterprise apps are represented as Discovery Engine `Engine` resources under `collections/default_collection/engines/{engineId}` with `appType: "APP_TYPE_INTRANET"`.',
+      'User license auto-registration is managed on `locations/global/userStores/default_user_store` linked to a `licenseConfig` (`SUBSCRIPTION_TIER_SEARCH_AND_ASSISTANT`).',
+    ],
+    agentRulesAndTakeaways: [
+      'Always include `-H "X-Goog-User-Project: <project_id>"` on all Discovery Engine REST calls.',
+      'Never pass `?updateMask=...` to `PATCH .../locations/global/aclConfig`; the `updateAclConfig` method takes no `updateMask` parameter.',
+      'Create the Intranet engine (or `POST .../userStores?userStoreId=default_user_store`) before creating `licenseConfigs` or calling `batchUpdateUserLicenses`.',
+    ],
+    labRecipe: {
+      servicesUsed: ['discoveryengine.googleapis.com', 'aiplatform.googleapis.com'],
+      verifiedScriptSummary:
+        'PATCH locations/global/aclConfig with {"idpConfig": {"idpType": "GSUITE"}}, POST collections/default_collection/engines?engineId=cymbal-shops-gemini-enterprise, and configure default_user_store + licenseConfigs.',
+      verifiedScriptSnippet: `api_call("PATCH", f"{base}/aclConfig", {"idpConfig": {"idpType": "GSUITE"}})
+api_call("POST", f"{base}/collections/default_collection/engines?engineId=cymbal-shops-gemini-enterprise", {
+  "displayName": "Cymbal Shops Gemini Enterprise",
+  "solutionType": "SOLUTION_TYPE_SEARCH",
+  "industryVertical": "GENERIC",
+  "appType": "APP_TYPE_INTRANET",
+  "commonConfig": {"companyName": "Cymbal Shops"},
+  "searchEngineConfig": {"searchTier": "SEARCH_TIER_ENTERPRISE", "searchAddOns": ["SEARCH_ADD_ON_LLM"]}
+})`,
+      attemptsRequired: 4,
+      selfHealingDelta:
+        'Attempt 1 failed because fresh Cloud Shell SSH had unset gcloud core/project; Attempt 2 failed because PATCH aclConfig?updateMask=idpConfig rejected updateMask with HTTP 400 and licenseConfigs was called before default_user_store existed. Removing updateMask on aclConfig and creating the engine first resolved the check.',
+    },
+    tags: ['gemini-enterprise', 'aclConfig', 'idpConfig', 'discoveryengine', 'lab-recipe'],
+  },
+  {
+    id: 'lab-explore-deep-research-agent-task-2',
+    timestamp: '2026-10-10T20:15:30.000Z',
+    stream: 'lab_execution',
+    courseOrLabTitle: 'Explore the Deep Research Agent',
+    moduleOrTaskTitle: 'Task 2. Use the Deep Research agent',
+    sourceUrl: 'https://partner.skills.google/focuses/149995?parent=catalog&path=3581',
+    summary:
+      'Executes a multi-turn research conversation with the Gemini Enterprise Deep Research agent (`deep_research`) via `assistants/default_assistant:streamAssist`, generating an initial retail AI research plan on Turn 1, refining the plan to compare US, European, and Asian markets on Turn 2, and launching research execution.',
+    conceptsAndCapabilities: [
+      'In Discovery Engine `streamAssist`, `agentsSpec: {"agentSpecs": [{"agentId": "deep_research"}]}` routes a turn to the managed Deep Research agent rather than `root_agent`.',
+      'Agent routing in `streamAssist` is evaluated per request and is NOT sticky on the `Session` resource.',
+    ],
+    agentRulesAndTakeaways: [
+      'Include BOTH `"session": session_name` AND `"agentsSpec": {"agentSpecs": [{"agentId": "deep_research"}]}` on every single turn of a multi-turn Deep Research conversation.',
+      'Keep one clean 2-turn session holding the updated Research Plan (`turns[0]` initial prompt + `turns[1]` plan refinement) and run Turn 3 (`"Start research"`) in a separate background session so both state-based and execution-based grader checks pass.',
+    ],
+    labRecipe: {
+      servicesUsed: ['discoveryengine.googleapis.com'],
+      verifiedScriptSummary:
+        'Create a Discovery Engine session, call streamAssist with agentId="deep_research" for Turn 1 (retail gen AI prompt) and Turn 2 (US/European/Asian market comparison) on the same session, and spawn a background session for Turn 3 ("Start research").',
+      verifiedScriptSnippet: `stream_assist({
+  "session": session_name,
+  "query": {"text": "What are some examples of how gen AI agents are being used effectively in the retail industry?"},
+  "agentsSpec": {"agentSpecs": [{"agentId": "deep_research"}]},
+  "toolsSpec": {"webGroundingSpec": {}},
+})
+stream_assist({
+  "session": session_name,
+  "query": {"text": "Highlight any differences in embracing the technology between US, European, and Asian markets."},
+  "agentsSpec": {"agentSpecs": [{"agentId": "deep_research"}]},
+  "toolsSpec": {"webGroundingSpec": {}},
+})`,
+      attemptsRequired: 2,
+      selfHealingDelta:
+        'Attempt 1 omitted agentsSpec on Turn 2, which caused Turn 2 to route to root_agent instead of updating the research plan in deep_research. Passing agentsSpec on Turn 2 produced the updated Research Plan and passed 100/100.',
+    },
+    tags: ['deep-research', 'streamAssist', 'agentsSpec', 'multi-turn', 'discoveryengine'],
+  },
+  {
+    id: 'lab-genai126-bigquery-datastore-widget-search',
+    timestamp: '2026-10-10T18:55:00.000Z',
+    stream: 'lab_execution',
+    courseOrLabTitle: 'Create a Data Store from BigQuery and Configure the Search Widget (GENAI126)',
+    moduleOrTaskTitle: 'Task 1–3. BigQuery Data Store Import, Widget UI Field Mappings & Filtered Search',
+    sourceUrl: 'https://partner.skills.google/focuses/genai126',
+    summary:
+      'Creates a Discovery Engine structured data store backed by BigQuery (`deps.advisories`), configures Search Widget UI field mappings (`fieldsUiComponentsMap`) with custom display templates (`Severity: {value}`), and executes preview and filtered (`System: ANY("PYPI")`) searches paired with `userEvents:write` telemetry.',
+    conceptsAndCapabilities: [
+      'Discovery Engine can ingest structured rows directly from BigQuery tables (`gcsSource` / `bigQuerySource`) and index them progressively for search before the bulk import LRO finishes.',
+      'Widget configurations (`widgetConfigs/default_search_widget_config`) map schema fields onto standardized UI slots (`title`, `url`, `text1`, `text2`, `metadata1`, `metadata2`) using `UIComponentField` objects (`{"field": "<col>", "displayTemplate": "{value}"}`).',
+      'GCP Console Preview searches emit two paired requests: `servingConfigs/default_search:search` followed by `locations/global/userEvents:write?writeAsync=true` with the search `attributionToken` and returned document resource names.',
+    ],
+    agentRulesAndTakeaways: [
+      'When polling a large BigQuery data store import (`295,000+` rows), poll `servingConfigs/default_search:search` until `len(results) > 0` (~60s) rather than blocking 20+ minutes on `operations` `done: true`.',
+      'In `widgetConfigs.patch`, use `?updateMask=uiSettings` (never `uiSettings.dataStoreUiConfigs`) and always set `"displayTemplate"` (never `"template"`) on each `fieldsUiComponentsMap` entry.',
+      'Always pair preview `:search` calls with `locations/global/userEvents:write?writeAsync=true` so user activity telemetry matches the Console UI.',
+    ],
+    labRecipe: {
+      servicesUsed: ['discoveryengine.googleapis.com', 'bigquery.googleapis.com'],
+      verifiedScriptSummary:
+        'Import BigQuery deps.advisories into Discovery Engine datastore, PATCH default_search_widget_config?updateMask=uiSettings with displayTemplate mappings, and run paired :search + userEvents:write calls.',
+      verifiedScriptSnippet: `ui_fmap = {
+  "title": {"field": "Name", "displayTemplate": "{value}"},
+  "url": {"field": "ReferenceURL", "displayTemplate": "{value}"},
+  "text1": {"field": "Title", "displayTemplate": "{value}"},
+  "text2": {"field": "Description", "displayTemplate": "{value}"},
+  "metadata1": {"field": "System", "displayTemplate": "{value}"},
+  "metadata2": {"field": "GitHubSeverity", "displayTemplate": "Severity: {value}"},
+}
+api_call("PATCH", f"{wc_url}?updateMask=uiSettings", {
+  "uiSettings": {"interactionType": "SEARCH_ONLY", "dataStoreUiConfigs": [{"name": ds_comp_name, "fieldsUiComponentsMap": ui_fmap}]}
+})`,
+      attemptsRequired: 1,
+      selfHealingDelta:
+        'Resolved macOS local fallback SSL certificate verification (`SSL_CERT_FILE=/etc/ssl/cert.pem`), non-blocking search readiness polling, and `displayTemplate` field mapping schema.',
+    },
+    tags: ['discoveryengine', 'bigquery', 'widgetConfigs', 'userEvents', 'genai126'],
+  },
+  {
+    id: 'lab-genai162-multiagent-adk-systems-gemini-enterprise',
+    timestamp: '2026-10-09T22:00:00.000Z',
+    stream: 'lab_execution',
+    courseOrLabTitle: 'Build and Deploy Multi-Agent ADK Systems to Gemini Enterprise (GENAI162)',
+    moduleOrTaskTitle: 'ADK 2.0 Graph Workflows, MCP Server Discovery, Agent Runtime & Gemini Enterprise Publishing',
+    sourceUrl: 'https://partner.skills.google/focuses/genai162',
+    summary:
+      'Builds a multi-agent DevSecOps Incident Triage System using ADK 2.0 (`Workflow` graph edges, `VertexAiSearchTool`, BigQuery toolsets, and Agent Registry MCP server `developerknowledge.googleapis.com`), deploys it to Vertex AI Agent Runtime (`ReasoningEngine`), and publishes it to Gemini Enterprise with organization-wide sharing (`ALL_USERS`).',
+    conceptsAndCapabilities: [
+      'ADK 2.0 `Workflow` orchestrates deterministic and conditional multi-agent pipelines by connecting `LlmAgent` nodes via `edges=[("node_a", "node_b")]`.',
+      'Cloud Agent Registry (`agentregistry.googleapis.com`) exposes managed MCP servers such as `developerknowledge.googleapis.com` that ADK agents can consume as toolsets.',
+      'Agents deployed to Vertex AI Agent Runtime (`ReasoningEngine`) can be registered in Gemini Enterprise under `assistants/default_assistant/agents` via `adkAgentDefinition.provisionedReasoningEngine` and shared across the organization (`sharingConfig.scope = "ALL_USERS"`).',
+    ],
+    agentRulesAndTakeaways: [
+      'When discovering an MCP server from Agent Registry, filter explicitly by `displayName="developerknowledge.googleapis.com"` and strip the resource prefix to the short ID when the starter code already prepends `projects/.../mcpServers/`.',
+      'Preserve the `pyproject.toml` generated by `agents-cli scaffold enhance` (which includes `a2a-sdk[http-server]` and `google-adk[bigquery-analytics,gcp,otel-gcp]`) and add custom dependencies via `uv add`.',
+      'When calling `agents-cli publish gemini-enterprise`, pass the full Discovery Engine resource path (`projects/<project_number>/locations/<loc>/collections/default_collection/engines/<engine_id>`) to `--gemini-enterprise-app-id` and PATCH `sharingConfig` to `{"scope": "ALL_USERS"}`.',
+    ],
+    labRecipe: {
+      servicesUsed: [
+        'aiplatform.googleapis.com',
+        'discoveryengine.googleapis.com',
+        'agentregistry.googleapis.com',
+        'bigquery.googleapis.com',
+      ],
+      verifiedScriptSummary:
+        'Configure ADK 2.0 Workflow edges and tools, deploy ReasoningEngine via agents-cli while granting IAM roles to service-<project_number>@gcp-sa-aiplatform-re.iam.gserviceaccount.com, and register on Gemini Enterprise with ALL_USERS sharing.',
+      verifiedScriptSnippet: `call("POST", f"https://us-discoveryengine.googleapis.com/v1alpha/{full_app_id}/assistants/default_assistant/agents", {
+  "displayName": "DevSecOps Incident Triage System",
+  "description": "Multi-agent system for triaging DevSecOps incidents",
+  "adkAgentDefinition": {"provisionedReasoningEngine": {"reasoningEngine": re_full_name}},
+  "sharingConfig": {"scope": "ALL_USERS"}
+})`,
+      attemptsRequired: 1,
+    },
+    tags: ['adk', 'multi-agent', 'reasoning-engine', 'mcp', 'gemini-enterprise', 'genai162'],
+  },
+  {
+    id: 'course-google-skills-partner-ai-agents-quiz-mastery',
+    timestamp: '2026-10-10T17:30:00.000Z',
+    stream: 'quiz_mastery',
+    courseOrLabTitle: 'Google Cloud Partner Skills Boost — Enterprise AI & Agentic Workflows',
+    moduleOrTaskTitle: 'Course Knowledge Checks & Final Assessment Quizzes',
+    sourceUrl: 'https://partner.skills.google/paths/4144/course_templates/1746/html_bundles/644267',
+    summary:
+      'Verified quiz takeaways covering Google Cloud enterprise AI positioning, Gemini Enterprise governance, grounding, and agent orchestration.',
+    conceptsAndCapabilities: [
+      'Enterprise AI deployments require grounding in first-party enterprise data (via Vertex AI Search / Discovery Engine connectors) combined with Workforce Identity access controls (`aclConfig`) so responses respect source document ACLs.',
+      'Multi-agent architectures separate specialized research, retrieval, and action execution into distinct sub-agents coordinated by a root orchestrator or workflow graph.',
+    ],
+    agentRulesAndTakeaways: [
+      'When solving multi-select (`checkbox`) vs single-select (`radio`) course quizzes, extract the full SCORM / Rise 360 `runtime-data.js` or lesson DOM text first so answers are grounded in the exact course phrasing.',
+      'Persist eliminated incorrect choices across quiz retries and lock in verified correct items so retry attempts converge deterministically to 100%.',
+    ],
+    quizQa: [
+      {
+        question:
+          'How does Gemini Enterprise ensure that generative AI responses respect an organization’s existing data access permissions?',
+        verifiedAnswers: [
+          'By integrating with Workforce Identity and enforcing source-system ACLs at query and retrieval time in Discovery Engine',
+        ],
+        explanation:
+          'Discovery Engine binds user identity via Workforce Identity (`aclConfig`) and filters retrieved grounding chunks against document-level ACLs before synthesis.',
+        domainRule:
+          'Enterprise RAG and assistant grounding must enforce identity-aware ACL filtering at retrieval time rather than relying on prompt-level restrictions.',
+      },
+    ],
+    tags: ['quiz-mastery', 'gemini-enterprise', 'grounding', 'security', 'partner-skills'],
+  },
+];
+
 export const AGENT_LEARNINGS: AgentLearningEntry[] = [
   {
     id: 'L-001',
@@ -184,19 +433,168 @@ export const AGENT_LEARNINGS: AgentLearningEntry[] = [
   },
 ];
 
-export function renderAgentLearningsMarkdown(): string {
+export function renderAgentLearningsMarkdown(
+  dynamicEntries: MemorializedKnowledgeEntry[] = SEED_MEMORIALIZED_KNOWLEDGE
+): string {
+  const mergedMap = new Map<string, MemorializedKnowledgeEntry>();
+  for (const item of SEED_MEMORIALIZED_KNOWLEDGE) {
+    mergedMap.set(item.id, item);
+  }
+  for (const item of dynamicEntries || []) {
+    if (item && item.id) {
+      mergedMap.set(item.id, item);
+    }
+  }
+  const allDynamic = Array.from(mergedMap.values()).sort((a, b) =>
+    (b.timestamp || '').localeCompare(a.timestamp || '')
+  );
+
+  const courseEntries = allDynamic.filter((e) => e.stream === 'course_content');
+  const quizEntries = allDynamic.filter((e) => e.stream === 'quiz_mastery');
+  const labEntries = allDynamic.filter((e) => e.stream === 'lab_execution');
+
   const lines: string[] = [
-    '# Skills Runner — Cumulative Agent Engineering Learnings (`AGENT_LEARNINGS.md`)',
+    '# Skills Runner — Cumulative Course, Quiz, Lab & Agent Engineering Knowledge Base (`AGENT_LEARNINGS.md`)',
     '',
-    '> **Purpose**: This document is the persistent institutional memory of **Skills Runner**. It records every non-obvious failure mode, API schema quirk, cloud timing behavior, and self-healing pattern discovered while autonomously executing Google Cloud Skills Boost hands-on labs and courses. Use these principles when designing, prompting, and hardening autonomous agents.',
+    '> **Purpose**: This handbook is the persistent, self-updating knowledge base of **Skills Runner**. Every time Skills Runner completes a course module, passes a quiz, or verifies a hands-on lab task on Google Cloud Skills Boost, it distills and memorializes:',
+    '> 1. **Course Curriculum & Domain Learnings** (`course_content`) — Core concepts, product capabilities, and architectures taught in courses.',
+    '> 2. **Verified Quiz & Knowledge Check Bank** (`quiz_mastery`) — Verified questions, winning answers, eliminated distractors, and domain rules.',
+    '> 3. **Verified Hands-On Lab Recipes & Self-Healing Deltas** (`lab_execution`) — Exact API/CLI/SDK implementations that passed Qwiklabs graders and how earlier attempt errors were resolved.',
+    '> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-011`) — Reusable patterns for building reliable autonomous agents.',
     '',
     '---',
     '',
-    '## Summary Table',
+    '## 1. Course Curriculum & Domain Learnings (`course_content`)',
+    '',
+  ];
+
+  if (courseEntries.length === 0) {
+    lines.push('_No course modules memorialized yet._', '');
+  } else {
+    for (const entry of courseEntries) {
+      lines.push(
+        `### 📚 ${entry.courseOrLabTitle} — ${entry.moduleOrTaskTitle}`,
+        `- **Recorded**: ${entry.timestamp}`,
+        `- **Source URL**: ${entry.sourceUrl || 'N/A'}`,
+        `- **Tags**: \`${(entry.tags || []).join('`, `')}\``,
+        '',
+        `**Executive Summary**: ${entry.summary}`,
+        ''
+      );
+      if (entry.conceptsAndCapabilities?.length) {
+        lines.push('#### Core Concepts & Capabilities Taught');
+        for (const c of entry.conceptsAndCapabilities) {
+          lines.push(`- ${c}`);
+        }
+        lines.push('');
+      }
+      if (entry.agentRulesAndTakeaways?.length) {
+        lines.push('#### Actionable Rules for Building Agents');
+        for (const r of entry.agentRulesAndTakeaways) {
+          lines.push(`- ${r}`);
+        }
+        lines.push('');
+      }
+      lines.push('---', '');
+    }
+  }
+
+  lines.push('## 2. Verified Quiz & Knowledge Check Bank (`quiz_mastery`)', '');
+  if (quizEntries.length === 0) {
+    lines.push('_No quizzes memorialized yet._', '');
+  } else {
+    for (const entry of quizEntries) {
+      lines.push(
+        `### ✅ ${entry.courseOrLabTitle} — ${entry.moduleOrTaskTitle}`,
+        `- **Recorded**: ${entry.timestamp}`,
+        `- **Source URL**: ${entry.sourceUrl || 'N/A'}`,
+        `- **Summary**: ${entry.summary}`,
+        ''
+      );
+      if (entry.quizQa?.length) {
+        lines.push('#### Verified Questions & Answers');
+        for (let i = 0; i < entry.quizQa.length; i++) {
+          const qa = entry.quizQa[i];
+          lines.push(
+            `${i + 1}. **Question**: ${qa.question}`,
+            `   - **Verified Correct Answer(s)**: ${qa.verifiedAnswers.map((a) => `\`${a}\``).join(' + ')}`
+          );
+          if (qa.eliminatedWrongOptions && qa.eliminatedWrongOptions.length > 0) {
+            lines.push(
+              `   - **Eliminated Wrong Option(s)**: ${qa.eliminatedWrongOptions.map((a) => `\`${a}\``).join(', ')}`
+            );
+          }
+          if (qa.explanation) {
+            lines.push(`   - **Why It Is Correct**: ${qa.explanation}`);
+          }
+          if (qa.domainRule) {
+            lines.push(`   - **Domain Rule**: ${qa.domainRule}`);
+          }
+        }
+        lines.push('');
+      }
+      if (entry.agentRulesAndTakeaways?.length) {
+        lines.push('#### Key Takeaways');
+        for (const r of entry.agentRulesAndTakeaways) {
+          lines.push(`- ${r}`);
+        }
+        lines.push('');
+      }
+      lines.push('---', '');
+    }
+  }
+
+  lines.push('## 3. Verified Hands-On Lab Recipes & Self-Healing Deltas (`lab_execution`)', '');
+  if (labEntries.length === 0) {
+    lines.push('_No lab recipes memorialized yet._', '');
+  } else {
+    for (const entry of labEntries) {
+      lines.push(
+        `### 🧪 ${entry.courseOrLabTitle} — ${entry.moduleOrTaskTitle}`,
+        `- **Recorded**: ${entry.timestamp}`,
+        `- **Source URL**: ${entry.sourceUrl || 'N/A'}`,
+        `- **Services Used**: \`${(entry.labRecipe?.servicesUsed || entry.tags || []).join('`, `')}\``,
+        `- **Attempts Required**: ${entry.labRecipe?.attemptsRequired ?? 1}`,
+        '',
+        `**What This Lab Teaches**: ${entry.summary}`,
+        ''
+      );
+      if (entry.conceptsAndCapabilities?.length) {
+        lines.push('#### Architectural & Technical Concepts');
+        for (const c of entry.conceptsAndCapabilities) {
+          lines.push(`- ${c}`);
+        }
+        lines.push('');
+      }
+      if (entry.agentRulesAndTakeaways?.length) {
+        lines.push('#### Reusable Agent Rules');
+        for (const r of entry.agentRulesAndTakeaways) {
+          lines.push(`- ${r}`);
+        }
+        lines.push('');
+      }
+      if (entry.labRecipe) {
+        lines.push(
+          '#### Verified Grader-Passing Implementation',
+          `- **Recipe Summary**: ${entry.labRecipe.verifiedScriptSummary}`
+        );
+        if (entry.labRecipe.selfHealingDelta) {
+          lines.push(`- **Self-Healing Delta**: ${entry.labRecipe.selfHealingDelta}`);
+        }
+        if (entry.labRecipe.verifiedScriptSnippet) {
+          lines.push('', '```python', entry.labRecipe.verifiedScriptSnippet.trim(), '```', '');
+        }
+      }
+      lines.push('---', '');
+    }
+  }
+
+  lines.push(
+    '## 4. Core Agent Engineering & Infrastructure Invariants (`L-001`..`L-011`)',
     '',
     '| ID | Date | Category | Title | Key Tags |',
-    '| :--- | :--- | :--- | :--- | :--- |',
-  ];
+    '| :--- | :--- | :--- | :--- | :--- |'
+  );
 
   for (const item of AGENT_LEARNINGS) {
     lines.push(
@@ -208,22 +606,15 @@ export function renderAgentLearningsMarkdown(): string {
 
   for (const item of AGENT_LEARNINGS) {
     lines.push(
-      `## ${item.id}: ${item.title}`,
+      `### ${item.id}: ${item.title}`,
       `- **Date Recorded**: ${item.date}`,
       `- **Category**: ${item.category}`,
       `- **Tags**: \`${item.tags.join('`, `')}\``,
       '',
-      '### 1. Observed Symptom / Failure Mode',
-      item.symptom,
-      '',
-      '### 2. Root Cause (Why Agents Fail Here)',
-      item.rootCause,
-      '',
-      '### 3. General Principle for Building Better Agents',
-      item.generalPrinciple,
-      '',
-      '### 4. Implementation in Skills Runner',
-      item.implementationInSkillsRunner,
+      '1. **Observed Symptom / Failure Mode**: ' + item.symptom,
+      '2. **Root Cause (Why Agents Fail Here)**: ' + item.rootCause,
+      '3. **General Principle for Building Better Agents**: ' + item.generalPrinciple,
+      '4. **Implementation in Skills Runner**: ' + item.implementationInSkillsRunner,
       '',
       '---',
       ''

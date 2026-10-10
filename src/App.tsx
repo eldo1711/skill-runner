@@ -29,7 +29,12 @@ import {
   BookOpen,
 } from 'lucide-react';
 import { ExecutionMode, LabCredentials, RunnerState, TargetSurface, TargetType } from './types';
-import { AGENT_LEARNINGS, renderAgentLearningsMarkdown } from '../shared/agentLearnings';
+import {
+  AGENT_LEARNINGS,
+  MemorializedKnowledgeEntry,
+  SEED_MEMORIALIZED_KNOWLEDGE,
+  renderAgentLearningsMarkdown,
+} from '../shared/agentLearnings';
 
 const INITIAL_STATE: RunnerState = {
   targetType: 'lab',
@@ -132,11 +137,31 @@ export default function App() {
   const [startingBridge, setStartingBridge] = useState<boolean>(false);
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
   const [showLearnings, setShowLearnings] = useState<boolean>(false);
-  const [learningsCategory, setLearningsCategory] = useState<string>('ALL');
+  const [learningsTab, setLearningsTab] = useState<
+    'all' | 'course_content' | 'quiz_mastery' | 'lab_execution' | 'engineering'
+  >('all');
   const [learningsSearch, setLearningsSearch] = useState<string>('');
+  const [memorializedEntries, setMemorializedEntries] = useState<MemorializedKnowledgeEntry[]>(
+    SEED_MEMORIALIZED_KNOWLEDGE
+  );
+
+  const refreshLearningsCatalog = () => {
+    const q = `session=${encodeURIComponent(sessionId)}`;
+    fetch(`/api/learnings?${q}`, {
+      headers: { 'X-Session-Id': sessionId },
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data?.entries) && data.entries.length > 0) {
+          setMemorializedEntries(data.entries);
+        }
+      })
+      .catch(() => {});
+  };
 
   useEffect(() => {
     const q = `session=${encodeURIComponent(sessionId)}`;
+    refreshLearningsCatalog();
     fetch(`/api/state?${q}`, {
       headers: { 'X-Session-Id': sessionId },
     })
@@ -809,12 +834,15 @@ export default function App() {
 
             <button
               type="button"
-              onClick={() => setShowLearnings(true)}
+              onClick={() => {
+                refreshLearningsCatalog();
+                setShowLearnings(true);
+              }}
               className="px-3 py-1.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-200 border border-indigo-500/30 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition"
-              title="View cumulative agent engineering learnings, root causes, and reusable patterns"
+              title="View memorialized course curriculum, verified quiz Q&A bank, hands-on lab recipes, and agent engineering invariants"
             >
               <BookOpen className="w-3.5 h-3.5 text-indigo-400" />
-              Agent Learnings ({AGENT_LEARNINGS.length})
+              Agent Learnings ({memorializedEntries.length + AGENT_LEARNINGS.length})
             </button>
 
             <button
@@ -2248,7 +2276,7 @@ export default function App() {
 
       {showLearnings && (
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-5xl w-full max-h-[88vh] flex flex-col overflow-hidden">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-6xl w-full max-h-[88vh] flex flex-col overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 bg-slate-900/95">
               <div className="flex items-center gap-3">
                 <div className="w-9 h-9 rounded-xl bg-indigo-500/20 border border-indigo-500/40 flex items-center justify-center">
@@ -2256,18 +2284,20 @@ export default function App() {
                 </div>
                 <div>
                   <h2 className="text-base font-bold text-white">
-                    Agent Engineering Learnings & Knowledge Base
+                    Continuous Course, Quiz & Lab Knowledge Base
                   </h2>
                   <p className="text-xs text-slate-400">
-                    Cumulative failure modes, API invariants, and self-healing patterns learned across hands-on labs and courses
+                    Memorialized curriculum concepts, verified 100% quiz Q&A bank, hands-on lab recipes, and agent engineering invariants
                   </p>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <button
                   type="button"
                   onClick={() => {
-                    navigator.clipboard.writeText(renderAgentLearningsMarkdown());
+                    navigator.clipboard.writeText(
+                      renderAgentLearningsMarkdown(memorializedEntries)
+                    );
                     setCopiedField('learnings-md');
                     setTimeout(() => setCopiedField(null), 2000);
                   }}
@@ -2285,8 +2315,37 @@ export default function App() {
                     </>
                   )}
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const blob = new Blob(
+                      [
+                        JSON.stringify(
+                          {
+                            exportedAt: new Date().toISOString(),
+                            entries: memorializedEntries,
+                            engineeringLearnings: AGENT_LEARNINGS,
+                          },
+                          null,
+                          2
+                        ),
+                      ],
+                      { type: 'application/json' }
+                    );
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'skills-runner-knowledge-base.json';
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition"
+                >
+                  <Download className="w-3.5 h-3.5 text-emerald-400" />
+                  Export JSON
+                </button>
                 <a
-                  href="/api/learnings/markdown"
+                  href={`/api/learnings/markdown?session=${encodeURIComponent(sessionId)}`}
                   target="_blank"
                   rel="noreferrer"
                   className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium flex items-center gap-1.5 transition"
@@ -2306,26 +2365,41 @@ export default function App() {
 
             <div className="px-6 py-3 border-b border-slate-800 bg-slate-950/60 flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-1.5">
-                {[
-                  'ALL',
-                  'Cloud Shell & Auth',
-                  'Discovery Engine & Gemini Enterprise',
-                  'Vertex AI & Agent Runtime',
-                  'Course & Embedded Lab Orchestration',
-                  'DOM, Shadow DOM & Quiz Grading',
-                  'Self-Healing & Grader Verification',
-                ].map((cat) => (
+                {(
+                  [
+                    {
+                      id: 'all',
+                      label: `All Knowledge (${memorializedEntries.length + AGENT_LEARNINGS.length})`,
+                    },
+                    {
+                      id: 'course_content',
+                      label: `Course Content (${memorializedEntries.filter((e) => e.stream === 'course_content').length})`,
+                    },
+                    {
+                      id: 'quiz_mastery',
+                      label: `Quiz Q&A Bank (${memorializedEntries.filter((e) => e.stream === 'quiz_mastery').length})`,
+                    },
+                    {
+                      id: 'lab_execution',
+                      label: `Lab Recipes (${memorializedEntries.filter((e) => e.stream === 'lab_execution').length})`,
+                    },
+                    {
+                      id: 'engineering',
+                      label: `Agent Invariants (${AGENT_LEARNINGS.length})`,
+                    },
+                  ] as const
+                ).map((tab) => (
                   <button
-                    key={cat}
+                    key={tab.id}
                     type="button"
-                    onClick={() => setLearningsCategory(cat)}
-                    className={`px-2.5 py-1 rounded-lg text-[11px] font-medium cursor-pointer transition border ${
-                      learningsCategory === cat
+                    onClick={() => setLearningsTab(tab.id)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition border ${
+                      learningsTab === tab.id
                         ? 'bg-indigo-500/25 text-indigo-200 border-indigo-500/50'
                         : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
                     }`}
                   >
-                    {cat === 'ALL' ? `All (${AGENT_LEARNINGS.length})` : cat}
+                    {tab.label}
                   </button>
                 ))}
               </div>
@@ -2333,84 +2407,275 @@ export default function App() {
                 type="text"
                 value={learningsSearch}
                 onChange={(e) => setLearningsSearch(e.target.value)}
-                placeholder="Filter by keyword, API, or tag..."
-                className="w-64 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
+                placeholder="Search courses, quiz questions, lab recipes, or APIs..."
+                className="w-72 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500"
               />
             </div>
 
             <div className="p-6 overflow-y-auto space-y-4">
-              {AGENT_LEARNINGS.filter((item) => {
-                if (learningsCategory !== 'ALL' && item.category !== learningsCategory) {
-                  return false;
-                }
-                if (!learningsSearch.trim()) return true;
-                const q = learningsSearch.toLowerCase();
-                return (
-                  item.id.toLowerCase().includes(q) ||
-                  item.title.toLowerCase().includes(q) ||
-                  item.symptom.toLowerCase().includes(q) ||
-                  item.rootCause.toLowerCase().includes(q) ||
-                  item.generalPrinciple.toLowerCase().includes(q) ||
-                  item.tags.some((t) => t.toLowerCase().includes(q))
-                );
-              }).map((item) => (
-                <div
-                  key={item.id}
-                  className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-3"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs font-mono font-bold">
-                        {item.id}
-                      </span>
-                      <span className="px-2 py-0.5 rounded bg-slate-800 text-cyan-300 border border-slate-700 text-[11px] font-medium">
-                        {item.category}
-                      </span>
-                      <h3 className="text-sm font-bold text-white">{item.title}</h3>
-                    </div>
-                    <span className="text-[11px] font-mono text-slate-400">{item.date}</span>
-                  </div>
+              {learningsTab !== 'engineering' &&
+                memorializedEntries
+                  .filter((entry) => {
+                    if (learningsTab !== 'all' && entry.stream !== learningsTab) {
+                      return false;
+                    }
+                    if (!learningsSearch.trim()) return true;
+                    const q = learningsSearch.toLowerCase();
+                    const blob = [
+                      entry.id,
+                      entry.courseOrLabTitle,
+                      entry.moduleOrTaskTitle,
+                      entry.summary,
+                      ...(entry.tags || []),
+                      ...(entry.conceptsAndCapabilities || []),
+                      ...(entry.agentRulesAndTakeaways || []),
+                      ...(entry.quizQa || []).map(
+                        (qp) => `${qp.question} ${qp.verifiedAnswers.join(' ')} ${qp.explanation}`
+                      ),
+                      entry.labRecipe?.verifiedScriptSummary || '',
+                      entry.labRecipe?.selfHealingDelta || '',
+                    ]
+                      .join(' ')
+                      .toLowerCase();
+                    return blob.includes(q);
+                  })
+                  .map((entry) => {
+                    const streamBadge =
+                      entry.stream === 'course_content'
+                        ? {
+                            label: 'Course Content',
+                            cls: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30',
+                          }
+                        : entry.stream === 'quiz_mastery'
+                        ? {
+                            label: 'Quiz Mastery',
+                            cls: 'bg-purple-500/20 text-purple-300 border-purple-500/30',
+                          }
+                        : {
+                            label: 'Verified Lab Recipe',
+                            cls: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30',
+                          };
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                    <div className="rounded-lg bg-red-950/20 border border-red-500/20 p-3">
-                      <div className="text-[11px] font-bold uppercase tracking-wider text-red-300 mb-1">
-                        Observed Failure Mode
+                    return (
+                      <div
+                        key={entry.id}
+                        className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-3"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span
+                              className={`px-2 py-0.5 rounded border text-[11px] font-semibold ${streamBadge.cls}`}
+                            >
+                              {streamBadge.label}
+                            </span>
+                            <span className="px-2 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-700 text-[11px] font-medium">
+                              {entry.courseOrLabTitle}
+                            </span>
+                            <h3 className="text-sm font-bold text-white">
+                              {entry.moduleOrTaskTitle}
+                            </h3>
+                          </div>
+                          <span className="text-[11px] font-mono text-slate-400">
+                            {entry.timestamp.slice(0, 10)}
+                          </span>
+                        </div>
+
+                        <p className="text-xs text-slate-200 leading-relaxed">{entry.summary}</p>
+
+                        {entry.conceptsAndCapabilities &&
+                          entry.conceptsAndCapabilities.length > 0 && (
+                            <div className="rounded-lg bg-cyan-950/15 border border-cyan-500/20 p-3 space-y-1.5">
+                              <div className="text-[11px] font-bold uppercase tracking-wider text-cyan-300">
+                                Core Concepts & Capabilities Taught
+                              </div>
+                              <ul className="list-disc list-inside space-y-1 text-xs text-slate-300">
+                                {entry.conceptsAndCapabilities.map((concept, idx) => (
+                                  <li key={idx} className="leading-relaxed">
+                                    {concept}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+
+                        {entry.agentRulesAndTakeaways &&
+                          entry.agentRulesAndTakeaways.length > 0 && (
+                            <div className="rounded-lg bg-indigo-950/20 border border-indigo-500/25 p-3 space-y-1.5">
+                              <div className="text-[11px] font-bold uppercase tracking-wider text-indigo-300">
+                                Actionable Agent Engineering Takeaways
+                              </div>
+                              <ul className="list-disc list-inside space-y-1 text-xs text-slate-200">
+                                {entry.agentRulesAndTakeaways.map((rule, idx) => (
+                                  <li key={idx} className="leading-relaxed">
+                                    {rule}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+
+                        {entry.stream === 'quiz_mastery' &&
+                          entry.quizQa &&
+                          entry.quizQa.length > 0 && (
+                            <div className="space-y-2">
+                              {entry.quizQa.map((qa, idx) => (
+                                <div
+                                  key={idx}
+                                  className="rounded-lg bg-purple-950/15 border border-purple-500/20 p-3 text-xs space-y-1.5"
+                                >
+                                  <div className="font-semibold text-white">
+                                    Q{idx + 1}: {qa.question}
+                                  </div>
+                                  <div className="text-emerald-300 font-medium">
+                                    ✓ Verified Answer:{' '}
+                                    <span className="text-emerald-200">
+                                      {qa.verifiedAnswers.join(' + ')}
+                                    </span>
+                                  </div>
+                                  {qa.eliminatedWrongOptions &&
+                                    qa.eliminatedWrongOptions.length > 0 && (
+                                      <div className="text-red-300/90 text-[11px]">
+                                        ✗ Eliminated Option(s):{' '}
+                                        {qa.eliminatedWrongOptions.join(' | ')}
+                                      </div>
+                                    )}
+                                  <div className="text-slate-300 text-[11px] leading-relaxed">
+                                    <span className="font-semibold text-purple-300">
+                                      Explanation:{' '}
+                                    </span>
+                                    {qa.explanation}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                        {entry.stream === 'lab_execution' && entry.labRecipe && (
+                          <div className="space-y-2.5 text-xs">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                              <div className="rounded-lg bg-slate-900/90 border border-slate-800 p-3">
+                                <div className="text-[11px] font-bold uppercase tracking-wider text-cyan-300 mb-1">
+                                  Verified Recipe & Services ({entry.labRecipe.attemptsRequired}{' '}
+                                  attempt{entry.labRecipe.attemptsRequired === 1 ? '' : 's'})
+                                </div>
+                                <p className="text-slate-300 leading-relaxed mb-1.5">
+                                  {entry.labRecipe.verifiedScriptSummary}
+                                </p>
+                                <p className="text-[11px] text-slate-400">
+                                  <span className="font-semibold text-slate-300">Services: </span>
+                                  {(entry.labRecipe.servicesUsed || []).join(', ')}
+                                </p>
+                              </div>
+                              <div className="rounded-lg bg-amber-950/20 border border-amber-500/20 p-3">
+                                <div className="text-[11px] font-bold uppercase tracking-wider text-amber-300 mb-1">
+                                  Self-Healing Delta & Pitfall Avoided
+                                </div>
+                                <p className="text-slate-300 leading-relaxed">
+                                  {entry.labRecipe.selfHealingDelta ||
+                                    'Passed on first attempt using idempotent synthesis.'}
+                                </p>
+                              </div>
+                            </div>
+                            {entry.labRecipe.verifiedScriptSnippet && (
+                              <div className="rounded-lg bg-emerald-950/20 border border-emerald-500/25 p-3">
+                                <div className="text-[11px] font-bold uppercase tracking-wider text-emerald-300 mb-1">
+                                  Reusable Grader-Passing Snippet
+                                </div>
+                                <pre className="mt-1 p-2.5 rounded bg-slate-950 border border-slate-800 text-[11px] font-mono text-emerald-200 overflow-x-auto">
+                                  {entry.labRecipe.verifiedScriptSnippet}
+                                </pre>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                          <span className="text-[10px] font-mono text-slate-500">{entry.id}</span>
+                          <div className="flex flex-wrap gap-1">
+                            {(entry.tags || []).map((tag) => (
+                              <span
+                                key={tag}
+                                className="px-2 py-0.5 rounded-full bg-slate-900 border border-slate-800 text-[10px] font-mono text-slate-400"
+                              >
+                                #{tag}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
                       </div>
-                      <p className="text-slate-300 leading-relaxed">{item.symptom}</p>
-                    </div>
-                    <div className="rounded-lg bg-amber-950/20 border border-amber-500/20 p-3">
-                      <div className="text-[11px] font-bold uppercase tracking-wider text-amber-300 mb-1">
-                        Root Cause (Why Agents Fail Here)
-                      </div>
-                      <p className="text-slate-300 leading-relaxed">{item.rootCause}</p>
-                    </div>
-                  </div>
+                    );
+                  })}
 
-                  <div className="rounded-lg bg-emerald-950/20 border border-emerald-500/25 p-3 text-xs">
-                    <div className="text-[11px] font-bold uppercase tracking-wider text-emerald-300 mb-1">
-                      General Principle for Building Better Agents
-                    </div>
-                    <p className="text-slate-200 leading-relaxed">{item.generalPrinciple}</p>
-                  </div>
-
-                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                    <div className="text-[11px] text-slate-400">
-                      <span className="font-semibold text-slate-300">In Skills Runner: </span>
-                      {item.implementationInSkillsRunner}
-                    </div>
-                    <div className="flex flex-wrap gap-1">
-                      {item.tags.map((tag) => (
-                        <span
-                          key={tag}
-                          className="px-2 py-0.5 rounded-full bg-slate-900 border border-slate-800 text-[10px] font-mono text-slate-400"
-                        >
-                          #{tag}
+              {(learningsTab === 'all' || learningsTab === 'engineering') &&
+                AGENT_LEARNINGS.filter((item) => {
+                  if (!learningsSearch.trim()) return true;
+                  const q = learningsSearch.toLowerCase();
+                  return (
+                    item.id.toLowerCase().includes(q) ||
+                    item.title.toLowerCase().includes(q) ||
+                    item.symptom.toLowerCase().includes(q) ||
+                    item.rootCause.toLowerCase().includes(q) ||
+                    item.generalPrinciple.toLowerCase().includes(q) ||
+                    item.tags.some((t) => t.toLowerCase().includes(q))
+                  );
+                }).map((item) => (
+                  <div
+                    key={item.id}
+                    className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-3"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs font-mono font-bold">
+                          {item.id}
                         </span>
-                      ))}
+                        <span className="px-2 py-0.5 rounded bg-slate-800 text-cyan-300 border border-slate-700 text-[11px] font-medium">
+                          {item.category}
+                        </span>
+                        <h3 className="text-sm font-bold text-white">{item.title}</h3>
+                      </div>
+                      <span className="text-[11px] font-mono text-slate-400">{item.date}</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                      <div className="rounded-lg bg-red-950/20 border border-red-500/20 p-3">
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-red-300 mb-1">
+                          Observed Failure Mode
+                        </div>
+                        <p className="text-slate-300 leading-relaxed">{item.symptom}</p>
+                      </div>
+                      <div className="rounded-lg bg-amber-950/20 border border-amber-500/20 p-3">
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-amber-300 mb-1">
+                          Root Cause (Why Agents Fail Here)
+                        </div>
+                        <p className="text-slate-300 leading-relaxed">{item.rootCause}</p>
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg bg-emerald-950/20 border border-emerald-500/25 p-3 text-xs">
+                      <div className="text-[11px] font-bold uppercase tracking-wider text-emerald-300 mb-1">
+                        General Principle for Building Better Agents
+                      </div>
+                      <p className="text-slate-200 leading-relaxed">{item.generalPrinciple}</p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                      <div className="text-[11px] text-slate-400">
+                        <span className="font-semibold text-slate-300">In Skills Runner: </span>
+                        {item.implementationInSkillsRunner}
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {item.tags.map((tag) => (
+                          <span
+                            key={tag}
+                            className="px-2 py-0.5 rounded-full bg-slate-900 border border-slate-800 text-[10px] font-mono text-slate-400"
+                          >
+                            #{tag}
+                          </span>
+                        ))}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                ))}
             </div>
           </div>
         </div>

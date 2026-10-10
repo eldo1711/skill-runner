@@ -1,6 +1,7 @@
 import { chromium } from 'playwright';
 import { parseGssKnowledgeCheckHtml, parseLabPageDom } from './labParser.js';
 import {
+  distillQuizMasteryLearning,
   formatAutonomousAntigravityPrompt,
   getModelGardenEntries,
   interpolateLabVariables,
@@ -19,7 +20,15 @@ import {
   inferTargetTypeFromUrl,
   listActiveSessions,
 } from './browserOrchestrator.js';
-import { AGENT_LEARNINGS, renderAgentLearningsMarkdown } from '../shared/agentLearnings.js';
+import {
+  AGENT_LEARNINGS,
+  SEED_MEMORIALIZED_KNOWLEDGE,
+  renderAgentLearningsMarkdown,
+} from '../shared/agentLearnings.js';
+import {
+  getAllMemorializedKnowledge,
+  retrieveRelevantKnowledgeForPrompt,
+} from './knowledgeStore.js';
 
 async function runVerificationTests() {
   console.log('🧪 Running Skills Runner Verification Suite...');
@@ -1207,17 +1216,80 @@ async function runVerificationTests() {
   await embeddedLabPage.close();
   console.log('✓ Embedded Hands-on Lab detection inside Course and Lab mode switching verified.');
 
-  // 13. Verify Cumulative Agent Learnings & Deep Research Agent synthesis
+  // 13. Verify Cumulative Agent Learnings, 3-Stream Knowledge Memorialization & Deep Research Agent synthesis
   if (AGENT_LEARNINGS.length < 11) {
     throw new Error(`Expected at least 11 AGENT_LEARNINGS entries, got ${AGENT_LEARNINGS.length}`);
   }
-  const mdLearnings = renderAgentLearningsMarkdown();
+  if (SEED_MEMORIALIZED_KNOWLEDGE.length < 6) {
+    throw new Error(
+      `Expected at least 6 SEED_MEMORIALIZED_KNOWLEDGE entries across course/quiz/lab streams, got ${SEED_MEMORIALIZED_KNOWLEDGE.length}`
+    );
+  }
+  const allKb = getAllMemorializedKnowledge();
+  const hasCourseStream = allKb.some((e) => e.stream === 'course_content');
+  const hasQuizStream = allKb.some((e) => e.stream === 'quiz_mastery');
+  const hasLabStream = allKb.some((e) => e.stream === 'lab_execution');
+  if (!hasCourseStream || !hasQuizStream || !hasLabStream) {
+    throw new Error('Expected all 3 knowledge streams (course_content, quiz_mastery, lab_execution) in getAllMemorializedKnowledge()');
+  }
+
+  const retrievedDeepResearch = retrieveRelevantKnowledgeForPrompt(
+    'Explore the Deep Research Agent streamAssist agentsSpec deep_research',
+    4
+  );
+  if (
+    !retrievedDeepResearch.includes('deep_research') ||
+    !retrievedDeepResearch.includes('PRIOR MEMORIALIZED COURSE, QUIZ & LAB KNOWLEDGE')
+  ) {
+    throw new Error('retrieveRelevantKnowledgeForPrompt failed to retrieve Deep Research learnings.');
+  }
+
+  const distilledQuiz = await distillQuizMasteryLearning({
+    courseTitle: 'Configure and manage Gemini Enterprise',
+    quizTitle: 'Module Quiz',
+    questions: [
+      {
+        id: 'q1',
+        itemType: 'multiple-choice',
+        stem: 'Which agent is built into Gemini Enterprise for multi-step research?',
+        options: [
+          { id: '1', title: 'Deep Research Agent' },
+          { id: '2', title: 'Cloud SQL Agent' },
+        ],
+      },
+    ],
+    solvedAnswers: [
+      {
+        quizItemId: 'q1',
+        itemType: 'multiple-choice',
+        choiceId: '1',
+        optionIndex: 0,
+        optionTitle: 'Deep Research Agent',
+        reason: 'Deep Research Agent synthesizes multi-step research reports.',
+      },
+    ],
+    excludedChoicesByItemId: { q1: ['2'] },
+    scorePercent: 100,
+  });
+  if (
+    distilledQuiz.stream !== 'quiz_mastery' ||
+    !distilledQuiz.quizQa ||
+    distilledQuiz.quizQa[0]?.verifiedAnswers[0] !== 'Deep Research Agent' ||
+    distilledQuiz.quizQa[0]?.eliminatedWrongOptions?.[0] !== 'Cloud SQL Agent'
+  ) {
+    throw new Error('distillQuizMasteryLearning verification failed.');
+  }
+
+  const mdLearnings = renderAgentLearningsMarkdown(allKb);
   if (
     !mdLearnings.includes('L-001') ||
     !mdLearnings.includes('L-004') ||
-    !mdLearnings.includes('deep_research')
+    !mdLearnings.includes('deep_research') ||
+    !mdLearnings.includes('1. Course Curriculum & Domain Learnings') ||
+    !mdLearnings.includes('2. Verified Quiz & Knowledge Check Bank') ||
+    !mdLearnings.includes('3. Verified Hands-On Lab Recipes & Self-Healing Deltas')
   ) {
-    throw new Error('renderAgentLearningsMarkdown() is missing expected learning entries.');
+    throw new Error('renderAgentLearningsMarkdown() is missing expected handbook sections.');
   }
 
   const deepResearchTask1Synth = await synthesizeTaskShellScript({
@@ -1287,7 +1359,7 @@ async function runVerificationTests() {
   ) {
     throw new Error('Deep Research Task 2 synthesis failed multi-turn deep_research checks.');
   }
-  console.log('✓ Cumulative Agent Learnings & Deep Research Agent synthesis verified.');
+  console.log('✓ Cumulative Agent Learnings, 3-Stream Knowledge Memorialization & Deep Research Agent synthesis verified.');
 
   await browser.close();
   console.log('✅ All verification tests passed!');
