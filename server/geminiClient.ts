@@ -5060,7 +5060,27 @@ ${combinedText}
            - In \`app/salesforce_client.py\`, initialize \`SalesforceClient(domain: str)\` with \`self.instance_url = f"https://{self.domain}"\` (removing \`client_id\`, \`client_secret\`, and \`_authenticate\`) and pass \`access_token: str\` directly to \`search_files(self, access_token: str, query: str)\` and \`download_version_text(self, access_token: str, version_id: str, name: str)\`.
            - In \`app/tools.py\`, register \`CredentialManager.register_auth_provider(GcpAuthProvider())\`, construct \`salesforce_auth_config = AuthConfig(auth_scheme=GcpAuthProviderScheme(name=SALESFORCE_AUTH_PROVIDER_URI))\`, add \`credential: AuthCredential\` to \`search_salesforce(query: str, credential: AuthCredential) -> dict\` extracting \`token = credential.oauth2.access_token\`, and wrap it in \`search_salesforce_tool = AuthenticatedFunctionTool(func=search_salesforce, auth_config=salesforce_auth_config)\`.
            - In \`app/agent.py\`, import \`search_salesforce_tool\` and set \`tools=[search_salesforce_tool]\` on \`root_agent\`.
-           - Construct \`SALESFORCE_AUTH_PROVIDER_URI="projects/\${PROJECT_ID}/locations/\${REGION}/authProviders/salesforce-2lo-auth-provider"\` deterministically (never from an unexported env var), redeploy \`salesforce-agent\` to Cloud Run, explicitly remove legacy secret env vars via \`gcloud run services update salesforce-agent --region="\${REGION}" --update-env-vars="SALESFORCE_AUTH_PROVIDER_URI=projects/\${PROJECT_ID}/locations/\${REGION}/authProviders/salesforce-2lo-auth-provider,SALESFORCE_DOMAIN=\${SF_DOMAIN}" --remove-env-vars="SALESFORCE_CLIENT_ID,SALESFORCE_CLIENT_SECRET" --no-iap --quiet\`, and grant \`roles/agentidentity.user\` on \`salesforce-2lo-auth-provider\` to BOTH \`serviceAccount:\${SF_SA}\` (\`\${PROJECT_NUMBER}-compute@developer.gserviceaccount.com\`) and \`user:\${STUDENT_EMAIL}\`.
+            - Construct \`SALESFORCE_AUTH_PROVIDER_URI="projects/\${PROJECT_ID}/locations/\${REGION}/authProviders/salesforce-2lo-auth-provider"\` deterministically (never from an unexported env var), redeploy \`salesforce-agent\` to Cloud Run, explicitly remove legacy secret env vars via \`gcloud run services update salesforce-agent --region="\${REGION}" --update-env-vars="SALESFORCE_AUTH_PROVIDER_URI=projects/\${PROJECT_ID}/locations/\${REGION}/authProviders/salesforce-2lo-auth-provider,SALESFORCE_DOMAIN=\${SF_DOMAIN}" --remove-env-vars="SALESFORCE_CLIENT_ID,SALESFORCE_CLIENT_SECRET" --no-iap --quiet\`, and grant \`roles/agentidentity.user\` on \`salesforce-2lo-auth-provider\` to BOTH \`serviceAccount:\${SF_SA}\` (\`\${PROJECT_NUMBER}-compute@developer.gserviceaccount.com\`) and \`user:\${STUDENT_EMAIL}\`.
+      9. **Observe and Secure a Multi-Agent System (\`telemetry.googleapis.com\`, \`gcloud alpha agent-registry\`, \`apphub.googleapis.com\`, \`cloudasset.googleapis.com\`, SCC AI Protection & Least-Privilege Remediation)**:
+         - **Always Export Bash Variables (\`export PROJECT_ID=...\` / \`set -a\`)**: Whenever a synthesized bash script embeds a \`python3 - << 'EOF'\` heredoc that calls \`os.environ.get("PROJECT_ID")\` or \`os.environ.get("LOCATION")\`, ALWAYS \`export PROJECT_ID\` and \`export LOCATION\` (or pass \`set -a\`) beforehand so child Python subprocesses never evaluate \`os.environ.get("PROJECT_ID")\` to \`None\` and construct \`--project=None\`.
+         - **Task 1 (Prepare Environment)**: Enable \`observability.googleapis.com\`, \`cloudtrace.googleapis.com\`, \`telemetry.googleapis.com\`, \`apphub.googleapis.com\`, \`apptopology.googleapis.com\`, \`agentregistry.googleapis.com\`, \`cloudasset.googleapis.com\`, \`monitoring.googleapis.com\`, and \`logging.googleapis.com\`, and run \`bash ~/lab2_prereqs.sh\` if \`github_agent\` or \`salesforce-agent\` is not yet deployed.
+         - **Task 2 (Export Traces to Cloud Trace)**:
+           - \`salesforce-agent\` uses \`google-adk[otel-gcp]\` and \`get_gcp_exporters(enable_cloud_tracing=True)\` targeting the Telemetry OTLP API (\`telemetry.googleapis.com\`), which requires \`roles/telemetry.tracesWriter\` (\`Cloud Telemetry Traces Writer\`) in addition to \`roles/cloudtrace.agent\`.
+           - Resolve \`SF_SA=$(gcloud run services describe salesforce-agent --region="\${LOCATION}" --project="\${PROJECT_ID}" --format="value(spec.template.spec.serviceAccountName)")\` (falling back to \`\${PROJECT_NUMBER}-compute@developer.gserviceaccount.com\`), grant \`roles/telemetry.tracesWriter\` on \`\${PROJECT_ID}\` to \`serviceAccount:\${SF_SA}\`, and query \`github_agent\` via \`agents-cli query\` (or the ReasoningEngine \`streamQuery\` REST API) and \`salesforce-agent\` to emit \`call_llm\`, \`agent_run\`, and \`execute_tool\` trace spans.
+         - **Task 4 (Register the Cloud Run Agent \`salesforce-agent\` in Agent Registry)**:
+           - Provision the Discovery Engine service agent via \`gcloud beta services identity create --service=discoveryengine.googleapis.com --project="\${PROJECT_ID}" --quiet\` and grant \`serviceAccount:service-\${PROJECT_NUMBER}@gcp-sa-discoveryengine.iam.gserviceaccount.com\` \`roles/run.invoker\` on \`salesforce-agent\` (\`gcloud run services add-iam-policy-binding salesforce-agent --region="\${LOCATION}" --project="\${PROJECT_ID}" --member="serviceAccount:service-\${PROJECT_NUMBER}@gcp-sa-discoveryengine.iam.gserviceaccount.com" --role="roles/run.invoker" --quiet\`).
+           - Download the A2A agent card from \`\${SF_URL}/a2a/app/.well-known/agent-card.json\` (or \`\${SF_URL}/.well-known/agent-card.json\`) to \`salesforce_card.json\`. **CRITICAL**: Do NOT run \`export TOKEN=$(gcloud auth print-identity-token)\` under \`set -e\` without \`|| true\` because Cloud Shell user credentials cannot mint an identity token without impersonation (\`No identity token can be obtained from the current credentials\`); instead use \`TOKEN=$(gcloud auth print-identity-token 2>/dev/null || gcloud auth print-access-token 2>/dev/null || true)\` and fetch with \`curl -sL -H "Authorization: Bearer \${TOKEN}" "\${SF_URL}/a2a/app/.well-known/agent-card.json" -o salesforce_card.json\`.
+           - Register \`salesforce-agent\` in Agent Registry using the **EXACT** \`gcloud alpha agent-registry services create\` flags (**NEVER** \`--agent-spec-type=A2A\` or \`--agent-spec-file\`):
+             \`gcloud alpha agent-registry services create salesforce-agent --location="\${LOCATION}" --project="\${PROJECT_ID}" --agent-spec-type=a2a-agent-card --agent-spec-content="$(cat salesforce_card.json)" --quiet\`
+             and verify discovery with \`gcloud alpha agent-registry agents list --location="\${LOCATION}" --project="\${PROJECT_ID}"\`.
+         - **Task 5 (Register the GitHub MCP Server \`github-mcp\` in Agent Registry)**:
+           - Register \`github-mcp\` using the **EXACT** flags \`--mcp-server-spec-type=no-spec\` and \`--interfaces="protocolBinding=JSONRPC,url=https://api.githubcopilot.com/mcp/"\` (**NEVER** singular \`--interface\` and **NEVER** \`protocol=JSONRPC\`):
+             \`gcloud alpha agent-registry services create github-mcp --location="\${LOCATION}" --project="\${PROJECT_ID}" --mcp-server-spec-type=no-spec --interfaces="protocolBinding=JSONRPC,url=https://api.githubcopilot.com/mcp/" --quiet\`
+             and verify discovery with \`gcloud alpha agent-registry mcp-servers list --location="\${LOCATION}" --project="\${PROJECT_ID}"\`.
+         - **Tasks 7, 8 & 9 (Intentional Risk, Policy Analyzer & Least-Privilege Remediation)**:
+           - Task 7: Grant \`roles/editor\` to \`serviceAccount:\${SF_SA}\` on \`\${PROJECT_ID}\`.
+           - Task 8: Run \`gcloud asset analyze-iam-policy --scope="projects/\${PROJECT_ID}" --identity="serviceAccount:\${SF_SA}" --expand-resources\`.
+           - Task 9: Ensure the 4 narrow required roles (\`roles/aiplatform.user\`, \`roles/telemetry.tracesWriter\`, \`roles/logging.logWriter\`, \`roles/cloudtrace.agent\`) are bound to \`serviceAccount:\${SF_SA}\` on \`\${PROJECT_ID}\`, then revoke \`roles/editor\` via \`gcloud projects remove-iam-policy-binding "\${PROJECT_ID}" --member="serviceAccount:\${SF_SA}" --role="roles/editor" --all --quiet\`.
     - **CRITICAL Dependency Version Compatibility for \`AdkApp\` on Agent Runtime**: Google Cloud Shell pre-installs \`google-cloud-aiplatform==1.165.1\` alongside an older \`google-adk==1.14.1\`. Because \`google-cloud-aiplatform>=1.165.1\` passes \`auto_create_session=True\` to \`google.adk.runners.Runner()\`, deploying with \`google-adk<1.30.0\` causes the ReasoningEngine container to crash at startup with \`TypeError: Runner.__init__() got an unexpected keyword argument 'auto_create_session'\`. Always upgrade BOTH packages (\`pip install --upgrade "google-cloud-aiplatform[agent_engines,adk]" "google-adk>=1.30.0" cloudpickle pydantic\`) before calling \`agent_engines.create(...)\` and pin the exact upgraded versions in \`requirements=[...]\`.
     - In \`config\` passed to \`client.agent_engines.create(agent=..., config=config)\`, \`"identity_type"\` MUST be the enum \`types.IdentityType.AGENT_IDENTITY\` (NEVER a list \`[types.IdentityType.AGENT_IDENTITY]\`). Many starter \`deploy.py\` files use bracketed placeholders like \`"identity_type": [IDENTITY_TYPE]\` — always replace the entire \`[IDENTITY_TYPE]\` including its brackets with \`types.IdentityType.AGENT_IDENTITY\`.
     - \`ae.api_resource\` returned by \`client.agent_engines.list()\` is a Pydantic v2 \`BaseModel\` (\`ae.api_resource.model_dump()\`), NOT a protobuf message (never call \`google.protobuf.json_format.MessageToDict(ae.api_resource)\`).
@@ -6041,7 +6061,8 @@ export function sanitizeSynthesizedShellScript(rawScript: string): string {
   let cleaned = rawScript.replace(/\[\^\r?\n\]/g, '[^\\n]');
   for (let pass = 0; pass < 4; pass++) {
     const next = cleaned
-      .replace(/(?<![rR])(\b[rR])(['"])(?!\2\2)([^\r\n'"]*)\r?\n([^\r\n'"]*\2)/g, '$1$2$3\\n$4')
+      .replace(/(?<![rR])(\b[rR])'(?!'')([^\r\n']*)\r?\n([^\r\n']*')/g, "$1'$2\\n$3")
+      .replace(/(?<![rR])(\b[rR])"(?!"")([^\r\n"]*)\r?\n([^\r\n"]*")/g, '$1"$2\\n$3')
       .replace(/(?<!["'])(["'])\r?\n\1(?=\s*(?:\.join\b|\)|,|\]|:))/g, '$1\\n$1');
     if (next === cleaned) break;
     cleaned = next;
@@ -6052,6 +6073,17 @@ export function sanitizeSynthesizedShellScript(rawScript: string): string {
       /--two-legged-oauth-token-(?:endpoint|uri)\b/g,
       '--two-legged-oauth-token-url'
     )
+    .replace(
+      /--agent-spec-type=(['"]?)(?:A2A|a2a)\1(?=\s|$)/g,
+      '--agent-spec-type=$1a2a-agent-card$1'
+    )
+    .replace(
+      /--agent-spec-file(?:=|\s+)(['"]?)([^\s'"]+)\1/g,
+      '--agent-spec-content="$(cat $2)"'
+    )
+    .replace(/--interface=/g, '--interfaces=')
+    .replace(/(--interfaces=(?:['"]?))protocol=/g, '$1protocolBinding=')
+    .replace(/(,)\s*protocol=/g, '$1protocolBinding=')
     .replace(
       /^[ \t]*gcloud\s+auth\s+(?:application-default\s+)?login\b[^\n]*$/gm,
       '# [skills-runner] gcloud & ADC credentials are pre-provisioned non-interactively'

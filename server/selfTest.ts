@@ -1378,15 +1378,18 @@ async function runVerificationTests() {
     );
   }
   const sanitizedCmd = sanitizeSynthesizedShellScript(
-    'gcloud config set aiplatform/region us-central1\n  gcloud auth application-default login\ngcloud alpha agent-identity auth-providers create salesforce-2lo-auth-provider --two-legged-oauth-token-endpoint="https://example.my.salesforce.com/services/oauth2/token"\npattern = r\'def capture_response_to_state\\b.*?(?=\ndef |\\Z)\'\ncallback_context.state[state_key] = "\n".join(text_parts)\necho ok'
+    'gcloud config set aiplatform/region us-central1\n  gcloud auth application-default login\ngcloud alpha agent-identity auth-providers create salesforce-2lo-auth-provider --two-legged-oauth-token-endpoint="https://example.my.salesforce.com/services/oauth2/token"\ngcloud alpha agent-registry services create salesforce-agent --agent-spec-type=A2A --agent-spec-file=salesforce_card.json\ngcloud alpha agent-registry services create github-mcp --mcp-server-spec-type=no-spec --interface="protocol=JSONRPC,url=https://api.githubcopilot.com/mcp/"\npattern = r\'def capture_response_to_state\\b.*?(?=\ndef |\\Z)\'\nm = re.search(r\'--agent-spec-type[^"\\n]*"\n[^\']*\' , help_text)\ncallback_context.state[state_key] = "\n".join(text_parts)\necho ok'
   );
   if (
     !sanitizedCmd.includes('gcloud config set ai/region us-central1') ||
     sanitizedCmd.includes('aiplatform/region') ||
     !sanitizedCmd.includes('--two-legged-oauth-token-url="https://example.my.salesforce.com/services/oauth2/token"') ||
     sanitizedCmd.includes('--two-legged-oauth-token-endpoint') ||
+    !sanitizedCmd.includes('--agent-spec-type=a2a-agent-card --agent-spec-content="$(cat salesforce_card.json)"') ||
+    !sanitizedCmd.includes('--interfaces="protocolBinding=JSONRPC,url=https://api.githubcopilot.com/mcp/"') ||
     /^\s*gcloud\s+auth\s+application-default\s+login/m.test(sanitizedCmd) ||
     !sanitizedCmd.includes("pattern = r'def capture_response_to_state\\b.*?(?=\\ndef |\\Z)'") ||
+    !sanitizedCmd.includes('m = re.search(r\'--agent-spec-type[^"\\n]*"\\n[^\']*\' , help_text)') ||
     !sanitizedCmd.includes('callback_context.state[state_key] = "\\n".join(text_parts)')
   ) {
     throw new Error(`sanitizeSynthesizedShellScript failed: ${sanitizedCmd}`);
@@ -1396,11 +1399,14 @@ async function runVerificationTests() {
     !mdLearnings.includes('APEX012') ||
     !mdLearnings.includes('L-013') ||
     !mdLearnings.includes('APEX013') ||
-    !mdLearnings.includes('AuthenticatedFunctionTool')
+    !mdLearnings.includes('AuthenticatedFunctionTool') ||
+    !mdLearnings.includes('L-014') ||
+    !mdLearnings.includes('APEX014') ||
+    !mdLearnings.includes('a2a-agent-card')
   ) {
-    throw new Error('Expected L-012, APEX012, L-013, and APEX013 in renderAgentLearningsMarkdown output.');
+    throw new Error('Expected L-012, APEX012, L-013, APEX013, L-014, and APEX014 in renderAgentLearningsMarkdown output.');
   }
-  console.log('✓ L-012 & L-013 sanitization, single-line string newline repair, Auth Provider flag repair & APEX012/APEX013 learnings verified.');
+  console.log('✓ L-012, L-013 & L-014 sanitization, single-line string newline repair, Auth Provider & Agent Registry flag repair, and APEX012/APEX013/APEX014 learnings verified.');
 
   await browser.close();
   console.log('✅ All verification tests passed!');

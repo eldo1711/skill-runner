@@ -1743,7 +1743,7 @@ export async function execInStudentCloudShellBridge(
     const adcExport = adcB64
       ? `mkdir -p "$HOME/.config/gcloud"; echo "${adcB64}" | base64 -d > "$HOME/.config/gcloud/application_default_credentials.json" 2>/dev/null || true; chmod 600 "$HOME/.config/gcloud/application_default_credentials.json" 2>/dev/null || true; export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/application_default_credentials.json"; `
       : '';
-    const envPrefix = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1; export PYTHONUNBUFFERED=1; ${projExport}${driveExport}${adcExport}`;
+    const envPrefix = `set -a; export CLOUDSDK_CORE_DISABLE_PROMPTS=1; export PYTHONUNBUFFERED=1; ${projExport}${driveExport}${adcExport}`;
     const fullScript = `${envPrefix}\n${command}`;
     const b64Script = Buffer.from(fullScript, 'utf8').toString('base64');
     const remoteCmd = `echo ${b64Script} | base64 -d > /tmp/ql_cmd_$$.sh && bash /tmp/ql_cmd_$$.sh < /dev/null; _ec=$?; rm -f /tmp/ql_cmd_$$.sh; exit $_ec`;

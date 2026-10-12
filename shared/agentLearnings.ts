@@ -375,6 +375,70 @@ search_salesforce_tool = AuthenticatedFunctionTool(
       'adk',
     ],
   },
+  {
+    id: 'lab-fde-observe-secure-multiagent-apex014',
+    timestamp: '2026-10-12T20:33:00.000Z',
+    stream: 'lab_execution',
+    courseOrLabTitle: '[FDE] Observe and Secure a Multi-Agent System: Challenge Lab (APEX014)',
+    moduleOrTaskTitle:
+      'Multi-Agent Observability & Security Posture: OpenTelemetry OTLP Trace Export, Agent Registry Discovery (Agent Runtime vs. Cloud Run A2A vs. MCP), App Hub Agent Topology, SCC AI Protection & Policy Analyzer Least-Privilege Remediation',
+    sourceUrl: 'https://explore.qwiklabs.com/classrooms/21414/labs/115587',
+    summary:
+      'End-to-end architecture and verified implementation recipes for observing and securing a multi-runtime enterprise agent fleet across Vertex AI Agent Runtime (`github_agent`), Cloud Run (`salesforce-agent`), and remote MCP servers (`github-mcp`) using Cloud Trace (`telemetry.googleapis.com`), Agent Registry, App Hub (`Agent Topology`), Security Command Center AI Protection, and Cloud Asset Inventory Policy Analyzer.',
+    conceptsAndCapabilities: [
+      'Three Pillars of Multi-Agent Traceability in Cloud Trace & Agent Topology: (1) Instrumentation library `google-adk[otel-gcp]` in `pyproject.toml`, which installs `opentelemetry-instrumentation-google-genai` to emit `call_llm`, `agent_run`, and `execute_tool` spans that render as directed edges in Agent Topology; (2) Exporter configuration via `setup_telemetry()` calling `get_gcp_exporters(enable_cloud_tracing=True)` targeting the Telemetry OTLP API (`telemetry.googleapis.com`); and (3) IAM export permission `roles/telemetry.tracesWriter` (`Cloud Telemetry Traces Writer`) on the runtime identity (`serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com` for Cloud Run agents; built-in managed telemetry for Vertex AI Agent Runtime agents).',
+      'Three Discovery Paths for Agent Topology & SCC AI Protection (Backed by App Hub + Agent Registry): (1) Vertex AI Agent Runtime agents (`github_agent`) are auto-discovered and auto-classified as `functionalType.type = "AGENT"` in App Hub (`discoveredWorkloads`) and listed automatically in `gcloud alpha agent-registry agents list`; (2) Cloud Run A2A agents (`salesforce-agent`) are discovered in App Hub as generic workloads (`TYPE_UNSPECIFIED`) until registered in Agent Registry by granting `roles/run.invoker` to the Discovery Engine service agent (`service-${PROJECT_NUMBER}@gcp-sa-discoveryengine.iam.gserviceaccount.com`), downloading `${SF_URL}/a2a/app/.well-known/agent-card.json` to `salesforce_card.json`, and running `gcloud alpha agent-registry services create salesforce-agent --agent-spec-type=a2a-agent-card --agent-spec-content="$(cat salesforce_card.json)"`; and (3) Remote MCP servers (`github-mcp`) require `apphub.googleapis.com` enabled and explicit registration via `gcloud alpha agent-registry services create github-mcp --mcp-server-spec-type=no-spec --interfaces="protocolBinding=JSONRPC,url=https://api.githubcopilot.com/mcp/"`.',
+      'Security Posture & Blast-Radius Analysis with SCC AI Protection and Policy Analyzer: SCC AI Protection combines the Agent Registry inventory with IAM posture analysis to surface `Agents with excessive permissions` (such as `roles/editor` bound to an agent service account). Cloud Asset Inventory Policy Analyzer (`gcloud asset analyze-iam-policy --scope="projects/${PROJECT_ID}" --identity="serviceAccount:${SF_SA}" --expand-resources`) provides immediate, deterministic proof of the blast radius across all project resources without waiting for SCC background scan cycles.',
+      'Least-Privilege Remediation without Breaking Observability or Inference: Before revoking a broad role (`roles/editor`) from an agent service account (`${PROJECT_NUMBER}-compute@developer.gserviceaccount.com`), verify that the narrow operational roles (`roles/aiplatform.user`, `roles/telemetry.tracesWriter`, `roles/logging.logWriter`, `roles/cloudtrace.agent`) are explicitly bound on the project so Gemini inference, OTLP trace export, and Cloud Logging continue uninterrupted after `roles/editor` is removed.',
+    ],
+    agentRulesAndTakeaways: [
+      'Always enable `set -a` (`allexport`) or explicitly `export PROJECT_ID` and `export LOCATION` before invoking embedded `python3 - << \'EOF\'` blocks so `os.environ.get("PROJECT_ID")` never evaluates to `None` (`--project=None`).',
+      'When registering a Cloud Run A2A agent in Agent Registry via `gcloud alpha agent-registry services create`, the exact flags are `--agent-spec-type=a2a-agent-card` and `--agent-spec-content="$(cat salesforce_card.json)"` (never `--agent-spec-type=A2A` or `--agent-spec-file`).',
+      'When registering an MCP server in Agent Registry via `gcloud alpha agent-registry services create`, the exact flags are `--mcp-server-spec-type=no-spec` and `--interfaces="protocolBinding=JSONRPC,url=https://api.githubcopilot.com/mcp/"` (never singular `--interface` and never `protocol=JSONRPC`).',
+      'Never run bare `export TOKEN=$(gcloud auth print-identity-token)` under `set -euo pipefail` in Cloud Shell user sessions (user credentials cannot mint an OIDC identity token without `--impersonate-service-account`); use `TOKEN=$(gcloud auth print-identity-token 2>/dev/null || gcloud auth print-access-token 2>/dev/null || true)` when fetching `.well-known/agent-card.json`.',
+    ],
+    labRecipe: {
+      servicesUsed: [
+        'observability.googleapis.com',
+        'cloudtrace.googleapis.com',
+        'telemetry.googleapis.com (OTLP)',
+        'apphub.googleapis.com',
+        'apptopology.googleapis.com',
+        'agentregistry.googleapis.com',
+        'cloudasset.googleapis.com (Policy Analyzer)',
+      ],
+      verifiedScriptSummary:
+        'Enables observability, App Hub, Agent Registry, and Cloud Asset APIs; grants `roles/telemetry.tracesWriter` to the `salesforce-agent` Cloud Run service account and emits trace spans; grants `roles/run.invoker` to `service-${PROJECT_NUMBER}@gcp-sa-discoveryengine.iam.gserviceaccount.com` and registers `salesforce-agent` (`--agent-spec-type=a2a-agent-card --agent-spec-content="$(cat salesforce_card.json)"`); registers `github-mcp` (`--mcp-server-spec-type=no-spec --interfaces="protocolBinding=JSONRPC,url=https://api.githubcopilot.com/mcp/"`); analyzes IAM blast radius via `gcloud asset analyze-iam-policy`; and restores least privilege by binding the four narrow roles and revoking `roles/editor`.',
+      verifiedScriptSnippet: `gcloud beta services identity create --service=discoveryengine.googleapis.com --project="\${PROJECT_ID}" --quiet
+gcloud run services add-iam-policy-binding salesforce-agent \\
+  --region="\${LOCATION}" --project="\${PROJECT_ID}" \\
+  --member="serviceAccount:service-\${PROJECT_NUMBER}@gcp-sa-discoveryengine.iam.gserviceaccount.com" \\
+  --role="roles/run.invoker" --quiet
+gcloud alpha agent-registry services create salesforce-agent \\
+  --location="\${LOCATION}" --project="\${PROJECT_ID}" \\
+  --agent-spec-type=a2a-agent-card \\
+  --agent-spec-content="\$(cat salesforce_card.json)" --quiet
+gcloud alpha agent-registry services create github-mcp \\
+  --location="\${LOCATION}" --project="\${PROJECT_ID}" \\
+  --mcp-server-spec-type=no-spec \\
+  --interfaces="protocolBinding=JSONRPC,url=https://api.githubcopilot.com/mcp/" --quiet`,
+      attemptsRequired: 1,
+      selfHealingDelta:
+        'Enabled `set -a` in Cloud Shell execution preambles so unexported bash variables are inherited by child Python processes, sanitized `--agent-spec-type=A2A`, `--agent-spec-file`, `--interface=`, and `protocol=JSONRPC` to exact `gcloud alpha agent-registry services create` flags, and guarded `gcloud auth print-identity-token` with fallback in Cloud Shell user sessions.',
+    },
+    tags: [
+      'apex014',
+      'fde',
+      'agent-registry',
+      'agent-topology',
+      'apphub',
+      'cloud-trace',
+      'opentelemetry',
+      'scc-ai-protection',
+      'policy-analyzer',
+      'least-privilege',
+    ],
+  },
 ];
 
 export const AGENT_LEARNINGS: AgentLearningEntry[] = [
@@ -607,6 +671,37 @@ export const AGENT_LEARNINGS: AgentLearningEntry[] = [
       'apex013',
     ],
   },
+  {
+    id: 'L-014',
+    date: '2026-10-12',
+    category: 'Multi-Agent Observability, Agent Registry & Security Posture',
+    title:
+      'Bash allexport (set -a) for Child Python Heredoc Subprocesses, Agent Registry CLI Flag Disambiguation, Cloud Shell Identity-Token Fallback & Quote-Mixed Raw String Newline Repair',
+    symptom:
+      'In `[FDE] Observe and Secure a Multi-Agent System: Challenge Lab` (APEX014), Task 2 Attempt 2 and Task 5 Attempt 1 failed with `ERROR: ... The user ... does not have permission to access Projects instance [None]` because `--project=None` was constructed by a child `python3 - << \'EOF\'` block reading `os.environ.get("PROJECT_ID")` after `PROJECT_ID="qwiklabs-gcp-..."` was assigned in bash without `export`; Task 4 Attempt 1 exited at `export TOKEN=$(gcloud auth print-identity-token)` with `ERROR: (gcloud.auth.print-identity-token) No identity token can be obtained from the current credentials`; Task 4 Attempt 2 failed with `SyntaxError: unterminated string literal` on a single-quoted raw string `r\'--agent-spec-type...\'` containing double quotes that was split across lines; Task 4 Attempt 3 failed with `Invalid choice: \'a2a\'. Valid choices are [a2a-agent-card, no-spec]` and `unrecognized arguments: --agent-spec-file`; and Task 5 Attempts 2–3 failed with `unrecognized arguments: --interface=... (did you mean \'--interfaces\'?)` and invalid key `protocol=JSONRPC` instead of `protocolBinding=JSONRPC`.',
+    rootCause:
+      '1. Synthesized bash scripts often assign shell variables (`PROJECT_ID="..."`, `LOCATION="us-central1"`) without the `export` keyword and then invoke an embedded `python3 - << \'EOF\'` script that calls `os.environ.get("PROJECT_ID")`. Without `set -a` (`allexport`) in the shell preamble, unexported shell variables are invisible to child Python processes and evaluate to `None` (`f"--project={project_id}"` -> `"--project=None"`).\n' +
+      '2. In Google Cloud Shell, default `authorized_user` credentials cannot mint an OIDC identity token via bare `gcloud auth print-identity-token` unless `--impersonate-service-account` is provided; under `set -euo pipefail`, `export TOKEN=$(gcloud auth print-identity-token)` aborts the script.\n' +
+      '3. `sanitizeSynthesizedShellScript` previously matched raw strings using `[^\\r\\n\'"]*`, which skipped single-quoted raw strings (`r\'...\'`) if they contained a double quote (`"`) on the same line.\n' +
+      '4. In `gcloud alpha agent-registry services create`, the lab instructions describe the flags in prose ("spec type indicating an A2A Agent Card", "pass the content of your downloaded `salesforce_card.json`", "interface specifying a `JSONRPC` protocol binding"), causing LLMs to guess `--agent-spec-type=A2A`, `--agent-spec-file=...`, `--interface=...`, or `protocol=JSONRPC` instead of the exact schema values `--agent-spec-type=a2a-agent-card`, `--agent-spec-content="$(cat ...)"`, `--interfaces="protocolBinding=JSONRPC,url=..."`.',
+    generalPrinciple:
+      '1. Always prepend `set -a;` (`allexport`) to the Cloud Shell script execution preamble so every bash variable assigned at the top level is automatically exported to child `python3` and `gcloud` subprocesses.\n' +
+      '2. Never call bare `gcloud auth print-identity-token` under `set -e` without a fallback (`gcloud auth print-identity-token 2>/dev/null || gcloud auth print-access-token 2>/dev/null || true`).\n' +
+      '3. Repair physical newlines inside single-quoted (`r\'...\'`) and double-quoted (`r"..."`) Python raw strings using separate quote-specific regexes so opposite-type quotes inside the literal do not block repair.\n' +
+      '4. Automatically sanitize `gcloud alpha agent-registry services create` flag hallucinations (`--agent-spec-type=A2A` -> `--agent-spec-type=a2a-agent-card`, `--agent-spec-file=...` -> `--agent-spec-content="$(cat ...)"`, `--interface=` -> `--interfaces=`, and `protocol=` -> `protocolBinding=`) in `sanitizeSynthesizedShellScript`.',
+    implementationInSkillsRunner:
+      '`server/macBridgeAgent.ts` (`execInStudentCloudShell`, `execInLocalStudentWorkspace`), `server/nativeChromeBridge.ts` (`execInStudentCloudShellBridge`), `server/geminiClient.ts` (`sanitizeSynthesizedShellScript` and Rule 11 item 9), and `shared/agentLearnings.ts` (`lab-fde-observe-secure-multiagent-apex014`, `L-014`).',
+    tags: [
+      'allexport',
+      'agent-registry',
+      'apphub',
+      'agent-topology',
+      'cloud-trace',
+      'telemetry',
+      'policy-analyzer',
+      'apex014',
+    ],
+  },
 ];
 
 export function renderAgentLearningsMarkdown(
@@ -636,7 +731,7 @@ export function renderAgentLearningsMarkdown(
     '> 1. **Course Curriculum & Domain Learnings** (`course_content`) — Core concepts, product capabilities, and architectures taught in courses.',
     '> 2. **Verified Quiz & Knowledge Check Bank** (`quiz_mastery`) — Verified questions, winning answers, eliminated distractors, and domain rules.',
     '> 3. **Verified Hands-On Lab Recipes & Self-Healing Deltas** (`lab_execution`) — Exact API/CLI/SDK implementations that passed Qwiklabs graders and how earlier attempt errors were resolved.',
-    '> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-013`) — Reusable patterns for building reliable autonomous agents.',
+    '> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-014`) — Reusable patterns for building reliable autonomous agents.',
     '',
     '---',
     '',
@@ -766,7 +861,7 @@ export function renderAgentLearningsMarkdown(
   }
 
   lines.push(
-    '## 4. Core Agent Engineering & Infrastructure Invariants (`L-001`..`L-013`)',
+    '## 4. Core Agent Engineering & Infrastructure Invariants (`L-001`..`L-014`)',
     '',
     '| ID | Date | Category | Title | Key Tags |',
     '| :--- | :--- | :--- | :--- | :--- |'
