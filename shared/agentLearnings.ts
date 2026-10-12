@@ -316,6 +316,65 @@ api_call("PATCH", f"{wc_url}?updateMask=uiSettings", {
       'gemini-enterprise',
     ],
   },
+  {
+    id: 'lab-fde-agent-identity-foundations-apex013',
+    timestamp: '2026-10-12T19:20:00.000Z',
+    stream: 'lab_execution',
+    courseOrLabTitle: '[FDE] Agent Identity Foundations: Challenge Lab (APEX013)',
+    moduleOrTaskTitle:
+      'Zero-Secret Enterprise Agent Authentication: Auth Manager Providers, SPIFFE Workload Principals vs. Cloud Run Service Accounts, McpToolset Header Providers & AuthenticatedFunctionTool',
+    sourceUrl: 'https://explore.qwiklabs.com/classrooms/21414/labs/115586',
+    summary:
+      'Eliminates hardcoded third-party credentials (GitHub PATs and Salesforce OAuth client secrets) from enterprise agents by storing them in Google Cloud Agent Identity Auth Manager (`authProviders`) and wiring ADK (`google-adk[gcp,agent-identity]`) across both Vertex AI Agent Runtime (`AGENT_IDENTITY` SPIFFE workload principals) and Cloud Run (IAM Service Accounts).',
+    conceptsAndCapabilities: [
+      'Two Runtimes, Two Identities, One Authorization Model: Vertex AI Agent Runtime agents deployed with `spec.identityType = "AGENT_IDENTITY"` receive a Google-managed SPIFFE workload principal (`principal://agents.global.org-${ORGANIZATION_ID}.system.id.goog/resources/aiplatform/projects/${PROJECT_NUMBER}/locations/${LOCATION}/reasoningEngines/${ENGINE_ID}`), whereas Cloud Run agents authenticate as their IAM Service Account (`serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com`). Both principals are authorized on their respective Auth Provider resource via `roles/agentidentity.user` (`Agent Identity User`).',
+      'Remote MCP Server Credential Delivery (`McpToolset` + `header_provider` in `github-agent`): Remote MCP servers cannot accept a credential object as a Python function argument; they require an HTTP `Authorization` header on every Streamable HTTP request. Calling `CredentialManager.register_auth_provider(GcpAuthProvider())` at import time and configuring `McpToolset(..., auth_scheme=GcpAuthProviderScheme(name=GITHUB_AUTH_PROVIDER_URI), header_provider=github_header_provider)` causes ADK to exchange the Auth Provider URI for an API key / token in `McpToolset.get_tools(readonly_context)` and invoke `github_header_provider(readonly_ctx)` to inject `{"Authorization": f"Bearer {token}"}` per request.',
+      'Python Function Tool Credential Delivery (`AuthenticatedFunctionTool` in `salesforce-agent`): Native Python tools receive the resolved credential directly via a `credential: AuthCredential` parameter when wrapped in `AuthenticatedFunctionTool(func=search_salesforce, auth_config=AuthConfig(auth_scheme=GcpAuthProviderScheme(name=SALESFORCE_AUTH_PROVIDER_URI)))`. Inside the function, `credential.oauth2.access_token` yields a fresh 2-legged OAuth access token minted by Auth Manager; because Auth Manager returns only the access token (not Salesforce’s `instance_url`), `SalesforceClient(domain=SALESFORCE_DOMAIN)` derives `self.instance_url = f"https://{self.domain}"` from the org’s My Domain.',
+      'Two-Phase Reasoning Engine Agent Identity Deployment (`deploy_with_identity.sh`): Vertex AI Agent Runtime rejects single-step `POST /v1beta1/.../reasoningEngines` requests that combine `spec.identityType = "AGENT_IDENTITY"` with `spec.sourceCodeSpec` inline source upload. Phase 1 (`POST`) creates a bare Reasoning Engine with `{"displayName": DISPLAY_NAME, "spec": {"identityType": "AGENT_IDENTITY"}}` (~5s) to mint `spec.effectiveIdentity` and bind IAM roles immediately; Phase 2 (`PATCH`) uploads `sourceCodeSpec.inlineSource.sourceArchive` and `deploymentSpec.env` with `spec.identityType` omitted from `updateMask`.',
+    ],
+    agentRulesAndTakeaways: [
+      'When creating a 2-Legged OAuth Auth Provider via `gcloud alpha agent-identity auth-providers create`, the exact flags are `--two-legged-oauth-client-id`, `--two-legged-oauth-client-secret`, and `--two-legged-oauth-token-url="https://${SF_DOMAIN}/services/oauth2/token"` (never `--two-legged-oauth-token-endpoint` or `--two-legged-oauth-token-uri`).',
+      'In labs where a setup script (`lab2_prereqs.sh`) pre-deployed `salesforce-agent` to Cloud Run and deleted `~/agents`, recover `SALESFORCE_DOMAIN`, `SALESFORCE_CLIENT_ID`, and `SALESFORCE_CLIENT_SECRET` directly from the live Cloud Run service (`gcloud run services describe salesforce-agent --region="${REGION}" --format=json`) if they are missing from local `.env` files.',
+      'When migrating a Cloud Run service from static `.env` secrets to Auth Manager (`SALESFORCE_AUTH_PROVIDER_URI`), note that `agents-cli deploy --update-env-vars` merges with existing Cloud Run environment variables; always run `gcloud run services update salesforce-agent --region="${REGION}" --update-env-vars="SALESFORCE_AUTH_PROVIDER_URI=projects/${PROJECT_ID}/locations/${REGION}/authProviders/salesforce-2lo-auth-provider,SALESFORCE_DOMAIN=${SF_DOMAIN}" --remove-env-vars="SALESFORCE_CLIENT_ID,SALESFORCE_CLIENT_SECRET" --no-iap --quiet` so legacy secret env vars are completely scrubbed.',
+      'Always grant `roles/agentidentity.user` on each Auth Provider to both the runtime principal (`principal://...` or `serviceAccount:...`) AND `user:${STUDENT_EMAIL}` so both deployed runtime calls and local Cloud Shell tests (`uv run pytest`) can exchange credentials.',
+    ],
+    labRecipe: {
+      servicesUsed: [
+        'agentidentity.googleapis.com',
+        'agentidentitycredentials.googleapis.com',
+        'aiplatform.googleapis.com (ReasoningEngine with AGENT_IDENTITY)',
+        'run.googleapis.com',
+        'google-adk[gcp,agent-identity] (GcpAuthProvider, GcpAuthProviderScheme, AuthenticatedFunctionTool)',
+      ],
+      verifiedScriptSummary:
+        'Enables Agent Identity APIs, creates `github-mcp-auth-provider` (API key) and `salesforce-2lo-auth-provider` (2LO OAuth), refactors `github-agent` to use `McpToolset` with `GcpAuthProviderScheme` + `github_header_provider` and deploys `github-agent-v2` via two-phase `deploy_with_identity.sh` with `principal://` IAM bindings, and refactors `salesforce-agent` to use `AuthenticatedFunctionTool` + `credential.oauth2.access_token` on Cloud Run with `SALESFORCE_CLIENT_ID`/`SALESFORCE_CLIENT_SECRET` removed.',
+      verifiedScriptSnippet: `CredentialManager.register_auth_provider(GcpAuthProvider())
+salesforce_auth_config = AuthConfig(
+    auth_scheme=GcpAuthProviderScheme(name=SALESFORCE_AUTH_PROVIDER_URI)
+)
+def search_salesforce(query: str, credential: AuthCredential) -> dict:
+    token = credential.oauth2.access_token
+    documents = _get_client().search_files(access_token=token, query=query.strip())
+    return {"status": "success", "query": query, "count": len(documents), "documents": documents}
+search_salesforce_tool = AuthenticatedFunctionTool(
+    func=search_salesforce, auth_config=salesforce_auth_config
+)`,
+      attemptsRequired: 1,
+      selfHealingDelta:
+        'Sanitized `--two-legged-oauth-token-endpoint` to `--two-legged-oauth-token-url`, extracted pre-configured Salesforce OAuth credentials from the existing Cloud Run revision when local `.env` had placeholders, deterministically constructed `SALESFORCE_AUTH_PROVIDER_URI`, and explicitly removed `SALESFORCE_CLIENT_ID` and `SALESFORCE_CLIENT_SECRET` from the Cloud Run service.',
+    },
+    tags: [
+      'apex013',
+      'fde',
+      'agent-identity',
+      'auth-providers',
+      'spiffe',
+      'mcp-toolset',
+      'authenticated-function-tool',
+      'oauth2',
+      'adk',
+    ],
+  },
 ];
 
 export const AGENT_LEARNINGS: AgentLearningEntry[] = [
@@ -517,6 +576,37 @@ export const AGENT_LEARNINGS: AgentLearningEntry[] = [
       'apex012',
     ],
   },
+  {
+    id: 'L-013',
+    date: '2026-10-12',
+    category: 'Vertex AI Agent Runtime & Python SDKs',
+    title:
+      'Agent Identity Auth Providers Flag Disambiguation, Two-Phase SPIFFE Provisioning, Pre-Deployed Cloud Run Credential Extraction & Legacy Secret Env Var Scrubbing',
+    symptom:
+      'In `[FDE] Agent Identity Foundations: Challenge Lab` (APEX013), Task 4 Attempt 1 failed with `ERROR: (gcloud.alpha.agent-identity.auth-providers.create) unrecognized arguments: --two-legged-oauth-token-endpoint=... (did you mean \'--two-legged-oauth-token-url\'?)`; local `~/agents` had been deleted by `lab2_prereqs.sh` after pre-deploying `salesforce-agent` to Cloud Run; Task 5 Attempt 1 wrote `SALESFORCE_AUTH_PROVIDER_URI=None` from an unexported Python env var; and `agents-cli deploy --update-env-vars` left legacy `SALESFORCE_CLIENT_ID` and `SALESFORCE_CLIENT_SECRET` environment variables attached to the Cloud Run service.',
+    rootCause:
+      '1. The lab instructions state in prose: "pass your `$SF_CLIENT_ID`, `$SF_CLIENT_SECRET`, and a token endpoint of `https://${SF_DOMAIN}/services/oauth2/token` as arguments to the corresponding parameters beginning with `--two-legged-oauth`". An LLM translating "token endpoint" literally guesses `--two-legged-oauth-token-endpoint` instead of the actual `gcloud` CLI flag `--two-legged-oauth-token-url`.\n' +
+      '2. `lab2_prereqs.sh` deploys `salesforce-agent` to Cloud Run with the student’s real `SALESFORCE_DOMAIN`, `SALESFORCE_CLIENT_ID`, and `SALESFORCE_CLIENT_SECRET` stored on the Cloud Run container spec and then executes `rm -rf ~/agents` to simulate a realistic FDE handoff.\n' +
+      '3. `agents-cli deploy --update-env-vars` merges new environment variables with existing Cloud Run container environment variables rather than replacing the entire map, leaving legacy plaintext secrets (`SALESFORCE_CLIENT_ID`, `SALESFORCE_CLIENT_SECRET`) on the service unless `--remove-env-vars` is explicitly called.\n' +
+      '4. Vertex AI Agent Runtime rejects single-step `POST /v1beta1/.../reasoningEngines` calls that set `spec.identityType = "AGENT_IDENTITY"` while simultaneously uploading `spec.sourceCodeSpec`.',
+    generalPrinciple:
+      '1. Sanitize known CLI flag synonyms (`--two-legged-oauth-token-endpoint` / `--two-legged-oauth-token-uri` -> `--two-legged-oauth-token-url`) in `sanitizeSynthesizedShellScript` and document exact `gcloud alpha agent-identity auth-providers create` flags in the synthesis system prompt.\n' +
+      '2. When a lab environment pre-deploys a Cloud Run service and deletes local starter directories, inspect the live Cloud Run service (`gcloud run services describe <svc> --region=<region> --format=json`) to recover pre-configured domain and OAuth credentials.\n' +
+      '3. When migrating a Cloud Run service from static `.env` secrets to Google Cloud Agent Identity Auth Manager (`GcpAuthProviderScheme`), always follow deployment with `gcloud run services update <svc> --update-env-vars="..." --remove-env-vars="SALESFORCE_CLIENT_ID,SALESFORCE_CLIENT_SECRET"` so legacy secrets are scrubbed from the revision spec.\n' +
+      '4. Provision `AGENT_IDENTITY` on Vertex AI Agent Runtime in two phases: Phase 1 `POST` with only `{"displayName": ..., "spec": {"identityType": "AGENT_IDENTITY"}}` to mint the `principal://agents.global.org-...` SPIFFE identity and bind IAM roles immediately, followed by Phase 2 `PATCH` with `sourceCodeSpec` and `deploymentSpec.env` (excluding `spec.identityType` from `updateMask`).',
+    implementationInSkillsRunner:
+      '`server/geminiClient.ts` (`sanitizeSynthesizedShellScript` and Rule 11 item 8) and `shared/agentLearnings.ts` (`lab-fde-agent-identity-foundations-apex013`, `L-013`).',
+    tags: [
+      'agent-identity',
+      'auth-providers',
+      'spiffe',
+      'oauth2',
+      'cloud-run',
+      'reasoning-engine',
+      'adk',
+      'apex013',
+    ],
+  },
 ];
 
 export function renderAgentLearningsMarkdown(
@@ -546,7 +636,7 @@ export function renderAgentLearningsMarkdown(
     '> 1. **Course Curriculum & Domain Learnings** (`course_content`) — Core concepts, product capabilities, and architectures taught in courses.',
     '> 2. **Verified Quiz & Knowledge Check Bank** (`quiz_mastery`) — Verified questions, winning answers, eliminated distractors, and domain rules.',
     '> 3. **Verified Hands-On Lab Recipes & Self-Healing Deltas** (`lab_execution`) — Exact API/CLI/SDK implementations that passed Qwiklabs graders and how earlier attempt errors were resolved.',
-    '> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-012`) — Reusable patterns for building reliable autonomous agents.',
+    '> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-013`) — Reusable patterns for building reliable autonomous agents.',
     '',
     '---',
     '',
@@ -676,7 +766,7 @@ export function renderAgentLearningsMarkdown(
   }
 
   lines.push(
-    '## 4. Core Agent Engineering & Infrastructure Invariants (`L-001`..`L-012`)',
+    '## 4. Core Agent Engineering & Infrastructure Invariants (`L-001`..`L-013`)',
     '',
     '| ID | Date | Category | Title | Key Tags |',
     '| :--- | :--- | :--- | :--- | :--- |'

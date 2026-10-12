@@ -1378,21 +1378,29 @@ async function runVerificationTests() {
     );
   }
   const sanitizedCmd = sanitizeSynthesizedShellScript(
-    'gcloud config set aiplatform/region us-central1\n  gcloud auth application-default login\npattern = r\'def capture_response_to_state\\b.*?(?=\ndef |\\Z)\'\ncallback_context.state[state_key] = "\n".join(text_parts)\necho ok'
+    'gcloud config set aiplatform/region us-central1\n  gcloud auth application-default login\ngcloud alpha agent-identity auth-providers create salesforce-2lo-auth-provider --two-legged-oauth-token-endpoint="https://example.my.salesforce.com/services/oauth2/token"\npattern = r\'def capture_response_to_state\\b.*?(?=\ndef |\\Z)\'\ncallback_context.state[state_key] = "\n".join(text_parts)\necho ok'
   );
   if (
     !sanitizedCmd.includes('gcloud config set ai/region us-central1') ||
     sanitizedCmd.includes('aiplatform/region') ||
+    !sanitizedCmd.includes('--two-legged-oauth-token-url="https://example.my.salesforce.com/services/oauth2/token"') ||
+    sanitizedCmd.includes('--two-legged-oauth-token-endpoint') ||
     /^\s*gcloud\s+auth\s+application-default\s+login/m.test(sanitizedCmd) ||
     !sanitizedCmd.includes("pattern = r'def capture_response_to_state\\b.*?(?=\\ndef |\\Z)'") ||
     !sanitizedCmd.includes('callback_context.state[state_key] = "\\n".join(text_parts)')
   ) {
     throw new Error(`sanitizeSynthesizedShellScript failed: ${sanitizedCmd}`);
   }
-  if (!mdLearnings.includes('L-012') || !mdLearnings.includes('APEX012')) {
-    throw new Error('Expected L-012 and APEX012 in renderAgentLearningsMarkdown output.');
+  if (
+    !mdLearnings.includes('L-012') ||
+    !mdLearnings.includes('APEX012') ||
+    !mdLearnings.includes('L-013') ||
+    !mdLearnings.includes('APEX013') ||
+    !mdLearnings.includes('AuthenticatedFunctionTool')
+  ) {
+    throw new Error('Expected L-012, APEX012, L-013, and APEX013 in renderAgentLearningsMarkdown output.');
   }
-  console.log('✓ L-012 single-pass JSON unescaping, single-line string newline repair, gcloud property sanitization & APEX012 learnings verified.');
+  console.log('✓ L-012 & L-013 sanitization, single-line string newline repair, Auth Provider flag repair & APEX012/APEX013 learnings verified.');
 
   await browser.close();
   console.log('✅ All verification tests passed!');
