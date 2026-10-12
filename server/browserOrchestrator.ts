@@ -1261,7 +1261,15 @@ export class LabBrowserOrchestrator {
         const stepNums = this.getTaskStepNumbers(t).filter(
           (sn) => sn - 1 >= 0 && sn - 1 < res.stepCompleteList!.length
         );
-        if (stepNums.length === 0) continue;
+        if (stepNums.length === 0) {
+          if (
+            (!t.checkProgressStepNumbers || t.checkProgressStepNumbers.length === 0) &&
+            (!t.checkProgressStepNumber || t.checkProgressStepNumber > res.stepCompleteList.length)
+          ) {
+            t.hasCheckProgress = false;
+          }
+          continue;
+        }
 
         let sumScore = 0;
         let hasScore = false;
@@ -1306,14 +1314,17 @@ export class LabBrowserOrchestrator {
           t.progressVerified = false;
         }
       }
-      // Also mark non-Check-Progress setup tasks as completed if a subsequent graded task is completed
+      // Also mark non-Check-Progress setup or trailing cleanup tasks as completed if graded tasks are completed
+      const allGradedComplete = res.stepCompleteList.every(Boolean);
       for (let i = 0; i < this.state.tasks.length; i++) {
         const curr = this.state.tasks[i];
         if (!curr.hasCheckProgress && !/\boptional\b/i.test(curr.title)) {
           const anyLaterCompleted = this.state.tasks
             .slice(i + 1)
             .some((later) => later.progressVerified || later.status === 'completed');
-          if (anyLaterCompleted) {
+          const isTrailingCleanup =
+            allGradedComplete && /\b(clean\s*up|teardown|destroy)\b/i.test(curr.title);
+          if (anyLaterCompleted || isTrailingCleanup) {
             curr.status = 'completed';
             for (const s of curr.steps) s.status = 'completed';
           }
@@ -2349,11 +2360,15 @@ export class LabBrowserOrchestrator {
         if (!task || task.status === 'completed' || task.status === 'skipped') continue;
 
         const hasAnyCommand = task.steps.some((s) => (s.commands || []).length > 0);
+        const isDestructiveCleanupTask =
+          !task.hasCheckProgress &&
+          /\b(clean\s*up|teardown|destroy\s+resources)\b/i.test(task.title);
         const isInformationalOrOptional =
           !task.hasCheckProgress &&
           ((!hasAnyCommand &&
             /\b(overview|introduction|scenario|objectives?)\b/i.test(task.title)) ||
-            /\boptional\b/i.test(task.title));
+            /\boptional\b/i.test(task.title) ||
+            isDestructiveCleanupTask);
         if (isInformationalOrOptional) {
           task.status = 'completed';
           for (const s of task.steps) s.status = 'completed';

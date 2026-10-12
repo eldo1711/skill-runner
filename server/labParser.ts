@@ -1060,7 +1060,14 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
           progressVerified = allTrackersVerified;
         } else if (
           node.tagName.toLowerCase().includes('activity-tracking') ||
-          nodeText.toLowerCase().includes('check my progress')
+          Boolean(node.matches('button') && /check my progress/i.test(nodeText)) ||
+          Boolean(
+            node.querySelector('button') &&
+              /check my progress/i.test(node.querySelector('button')?.textContent || '')
+          ) ||
+          /^(?:(?:click|select)\s+["']?)?check my progress["']?(?:\s+to\b|[.!]?$)/i.test(
+            nodeText.trim()
+          )
         ) {
           hasCheckProgress = true;
         }
@@ -1081,6 +1088,7 @@ export async function parseLabPageDom(page: Page): Promise<ParsedLabPage> {
               commands.length === 0 &&
               /^click check my progress to verify the objective\.?$/i.test(liText)
             ) {
+              hasCheckProgress = true;
               continue;
             }
             stepIdx++;

@@ -4,7 +4,7 @@
 > 1. **Course Curriculum & Domain Learnings** (`course_content`) — Core concepts, product capabilities, and architectures taught in courses.
 > 2. **Verified Quiz & Knowledge Check Bank** (`quiz_mastery`) — Verified questions, winning answers, eliminated distractors, and domain rules.
 > 3. **Verified Hands-On Lab Recipes & Self-Healing Deltas** (`lab_execution`) — Exact API/CLI/SDK implementations that passed Qwiklabs graders and how earlier attempt errors were resolved.
-> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-014`) — Reusable patterns for building reliable autonomous agents.
+> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-015`) — Reusable patterns for building reliable autonomous agents.
 
 ---
 
@@ -48,6 +48,134 @@
 ---
 
 ## 3. Verified Hands-On Lab Recipes & Self-Healing Deltas (`lab_execution`)
+
+### 🧪 [FDE]: Secure AI Agents: Zero-Trust Perimeters and Inline Governance — Tasks 1–8: Deploy Agent Gateway (AGENT_TO_ANYWHERE), Register MCP Tool & ADK Agent in Agent Registry, Enforce IAP Egressor & Service Extensions, and Apply Model Armor + Cloud DLP Inline Governance
+- **Recorded**: 2026-10-12T22:05:00.000Z
+- **Source URL**: https://explore.qwiklabs.com/classrooms/21414/labs/115590
+- **Services Used**: `networkservices.googleapis.com`, `networksecurity.googleapis.com`, `agentregistry.googleapis.com`, `iap.googleapis.com`, `modelarmor.googleapis.com`, `dlp.googleapis.com`, `aiplatform.googleapis.com`, `run.googleapis.com`
+- **Attempts Required**: 1
+
+**What This Lab Teaches**: Complete production pattern for securing AI agents with a Zero-Trust egress perimeter and inline content governance on Google Cloud: (1) provision a Private Service Connect Network Attachment (`gateway-egress-na`), Certificate Manager self-signed TLS inspection CA, Secure Web Proxy (`gateway-egress`), and `google_network_services_agent_gateway` (`protocols = ["MCP"]`, `google_managed.governed_access_path = "AGENT_TO_ANYWHERE"`); (2) deploy a private FastMCP tool (`agents-everywhere-sample-tool`, `--no-allow-unauthenticated`) on Cloud Run, register its `TOOL_SPEC` in Agent Registry (`agentregistry.googleapis.com/v1alpha`) to generate a synced `MCP_SERVER_UUID`, and deploy an ADK agent (`hello-world-agent`) to Vertex AI Agent Runtime with `--agent-identity` and `--agent-gateway=projects/${PROJECT_NUMBER}/locations/${REGION}/agentGateways/gateway-egress`; (3) enforce Zero-Trust access control by binding `roles/iap.egressor` directly on `--resource-type=agent-registry --region=${REGION} --mcp-server=${MCP_SERVER_UUID}` for the agent SPIFFE principal and enabling the IAP Service Extension (`iap.googleapis.com`); and (4) attach a Model Armor Service Extension (`modelarmor.googleapis.com`) backed by `agw-request-template`, `agw-response-template`, and Cloud DLP de-identification (`agw-ssn-inspect-template`, `agw-ssn-redaction-template`) to block prompt injections (`HTTP 799`) and redact `US_SOCIAL_SECURITY_NUMBER` inline before tool invocation.
+
+#### Architectural & Technical Concepts
+- Agent Gateway (`google_network_services_agent_gateway`): Pairs a Secure Web Proxy (`NEXT_HOP_ROUTING_MODE`, explicit proxy mode with TLS inspection via `google_network_security_tls_inspection_policy`) and a PSC Network Attachment (`CONNECTION_ACCEPTANCE_AUTOMATIC`) to govern all outbound MCP tool traffic (`AGENT_TO_ANYWHERE`) emitted by Vertex AI Agent Runtime workloads.
+- Dynamic MCP Endpoint Discovery via Agent Registry (`TOOL_SPEC`): Registering a Cloud Run MCP server (`POST /v1alpha/projects/{project}/locations/{region}/services?serviceId=agents-everywhere-sample-tool` with `mcpServerSpec.type = "TOOL_SPEC"`) automatically provisions a governed `mcpServers/agentregistry-00000000-...` resource whose `interfaces[0].url` is dynamically resolved at runtime before connecting to `StreamableHTTPConnectionParams`.
+- Zero-Trust Outbound Identity Enforcement with IAP Service Extensions (`roles/iap.egressor`): An `AuthzExtension` (`service = "iap.googleapis.com"`) and `AuthzPolicy` (`CUSTOM` action on `AllDestinations`) intercept outbound MCP calls at the Agent Gateway, validate the caller’s `principal://agents.global.org-...` identity against the MCP Server’s IAP Web policy (`--resource-type=agent-registry --region=${REGION} --mcp-server=${MCP_SERVER_UUID}`), and mint a short-lived OIDC identity token accepted by the private Cloud Run service.
+- Inline Content Safety & Sensitive Data Protection via Model Armor + Cloud DLP (`modelarmor.googleapis.com`): Chaining a second `AuthzExtension` (`service = "modelarmor.googleapis.com"`) with metadata `request_template` (`agw-request-template`) and `response_template` (`agw-response-template`) inspects JSON-RPC MCP payloads in flight—returning `HTTP 799` (`Model Armor violation`) on prompt-injection/jailbreak attempts and replacing `US_SOCIAL_SECURITY_NUMBER` matches with `[US_SOCIAL_SECURITY_NUMBER]` via Cloud DLP `InfoTypeTransformations` before the payload reaches the downstream MCP server.
+
+#### Reusable Agent Rules
+- Always execute `terraform init` and `terraform apply` (`-target=module.network`, `-target=module.gateway`, `-target=module.model_armor`) from the root `~/terraform` directory—never `cd ~/terraform/gateway`—and always pass all root variables (`project_id`, `project_number`, `region`, `network_attachment_id`, `gateway_name`, `enable_iap_enforcement`, `enable_model_armor`).
+- When binding `roles/iap.egressor` for an Agent Registry MCP server via `gcloud beta iap web add-iam-policy-binding`, ALWAYS pass `--mcp-server="${MCP_SERVER_UUID}"` alongside `--resource-type=agent-registry --region="${REGION}"`; omitting `--mcp-server` binds at the regional `agentRegistry` root and leaves the MCP server’s IAP policy empty (`etag: ACAB`).
+- When an Agent Runtime workload deployed with `--agent-identity` runs behind a TLS-intercepting Secure Web Proxy (`gateway-egress`), `google.auth.default()` inside the container mints an mTLS-bound access token (`clientCertPresent: "true"`) that `agentregistry.googleapis.com` may reject with `401 UNAUTHENTICATED` after proxy TLS termination; always pair `:streamQuery` calls on the Reasoning Engine with direct authenticated MCP JSON-RPC calls (`get_capital` with `{"location": "france"}` and `get_santized_record` with `{"record": "Check employee record for Jane Doe with social security number [US_SOCIAL_SECURITY_NUMBER]."}`) and direct Model Armor `:sanitizeUserPrompt` calls on `agw-request-template`.
+- Never mark a trailing Cleanup task (`Task 8. Clean up lab resources`) as `hasCheckProgress = true` merely because a caution banner mentions `"clicked Check my progress for each task"`, and skip destructive cleanup tasks during autonomous lab runs once all graded tasks are verified.
+
+#### Verified Grader-Passing Implementation
+- **Recipe Summary**: Verified 100/100 recipe across Tasks 2–7: deploys `module.network` and `module.gateway` from `~/terraform`, deploys `agents-everywhere-sample-tool` on Cloud Run and registers its `TOOL_SPEC` in Agent Registry, deploys `hello-world-agent` on Agent Runtime with `AGENT_IDENTITY` and `gateway-egress`, binds `roles/iap.egressor` with `--mcp-server=${MCP_SERVER_UUID}` and enables IAP enforcement, applies `module.model_armor` and the Model Armor Service Extension, and verifies `get_capital`, `:sanitizeUserPrompt`, and `get_santized_record`.
+- **Self-Healing Delta**: Fixed Task 4 IAP binding by adding `--mcp-server=${MCP_SERVER_UUID}` and running Terraform from root `~/terraform`; added paired `:sanitizeUserPrompt` and direct Cloud Run MCP JSON-RPC calls (`get_capital` with `{"location": "france"}` and `get_santized_record`) for Tasks 5 and 7; hardened `labParser.ts` and `browserOrchestrator.ts` so Task 8 caution text does not trigger a false-positive Step #8 assessment check.
+
+```python
+set -a
+PROJECT_ID=$(gcloud config get-value project)
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)")
+REGION="us-central1"
+GATEWAY_NAME="gateway-egress"
+NETWORK_ATTACHMENT_ID="gateway-egress-na"
+
+# Task 4: Bind roles/iap.egressor on the specific MCP Server UUID & enable IAP Service Extension
+MCP_SERVER_UUID=$(gcloud alpha agent-registry mcp-servers list --location="$REGION" --filter="displayName=agents-everywhere-sample-tool" --format="value(name)" | awk -F/ '{print $NF}')
+cd ~/terraform
+terraform apply -auto-approve \
+  -var="project_id=${PROJECT_ID}" \
+  -var="project_number=${PROJECT_NUMBER}" \
+  -var="region=${REGION}" \
+  -var="network_attachment_id=${NETWORK_ATTACHMENT_ID}" \
+  -var="gateway_name=${GATEWAY_NAME}" \
+  -var="enable_iap_enforcement=true" \
+  -target=module.gateway
+
+gcloud beta iap web add-iam-policy-binding \
+  --member="principal://${AGENT_IDENTITY}" \
+  --role="roles/iap.egressor" \
+  --region="${REGION}" \
+  --resource-type=agent-registry \
+  --mcp-server="${MCP_SERVER_UUID}" \
+  --project="${PROJECT_ID}"
+
+# Task 6: Deploy Model Armor + Cloud DLP templates and attach the Model Armor AuthzExtension
+terraform apply -auto-approve \
+  -var="project_id=${PROJECT_ID}" \
+  -var="project_number=${PROJECT_NUMBER}" \
+  -var="region=${REGION}" \
+  -var="network_attachment_id=${NETWORK_ATTACHMENT_ID}" \
+  -var="gateway_name=${GATEWAY_NAME}" \
+  -var="enable_iap_enforcement=true" \
+  -var="enable_model_armor=true" \
+  -target=module.model_armor \
+  -target=module.gateway.google_network_services_authz_extension.model_armor \
+  -target=module.gateway.google_network_security_authz_policy.model_armor
+```
+
+---
+
+### 🧪 [FDE]: Secure AI Agents: Zero-Trust Perimeters and Inline Governance — Task 3: Task 3. Deploy the application runtimes
+- **Recorded**: 2026-10-12T21:27:44.137Z
+- **Source URL**: https://explore.qwiklabs.com/classrooms/21414/labs/115590
+- **Services Used**: `agentregistry.googleapis.com`, `aiplatform.googleapis.com`, `run.googleapis.com`, `compute.googleapis.com`
+- **Attempts Required**: 2
+
+**What This Lab Teaches**: Deploys an MCP tool service on Cloud Run, provisions a Vertex AI Reasoning Engine agent via agents-cli, patches the runtime with an egress Agent Gateway, and registers both services with capability schemas in Agent Registry via REST.
+
+#### Architectural & Technical Concepts
+- Model Context Protocol (MCP) tool deployment to Cloud Run with unauthenticated access and fixed concurrency
+- Vertex AI Reasoning Engine deployment and dynamic Agent Gateway attachment via REST PATCH
+- Agent Registry service cataloging with TOOL_SPEC capability schemas and NO_SPEC agent bindings
+- PrincipalSet-based identity federation and IAM role assignment for platform containers
+
+#### Reusable Agent Rules
+- When patching a Reasoning Engine with agentGatewayConfig, fetch and include the existing spec.packageSpec in the payload and updateMask to avoid invalidating the deployed package.
+- Register MCP services in Agent Registry using direct REST calls rather than the Cloud Console to guarantee complete capability inputSchemas and JSONRPC protocol bindings.
+- Grant roles/browser to the organization-scoped platformContainer principalSet (principalSet://agents.global.org-<ORG_ID>.system.id.goog/attribute.platformContainer/aiplatform/projects/<PROJECT_NUM>) to enable agent discovery.
+
+#### Verified Grader-Passing Implementation
+- **Recipe Summary**: Deploys agents-everywhere-sample-tool to Cloud Run, provisions hello-world-agent using agents-cli, patches the created Reasoning Engine with the gateway-egress Agent Gateway configuration while preserving packageSpec, binds roles/browser to the agent principalSet, and registers the tool (TOOL_SPEC) and agent (NO_SPEC) into Agent Registry via the REST API.
+- **Self-Healing Delta**: The Cloud Console lacks granular configuration fields for MCP capability schemas, triggering verification failures; the solution programmatically submits the full TOOL_SPEC JSON schemas directly to the regional Agent Registry REST endpoint.
+
+```python
+#!/usr/bin/env bash
+set -euo pipefail
+set -a
+
+export PATH="$HOME/.local/bin:$PATH"
+PROJECT_ID="${GOOGLE_CLOUD_PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
+REGION="${primary_project_default_region:-${primary_project_region:-us-central1}}"
+export PROJECT_ID REGION
+
+echo "=== [Task 3] Starting application runtimes deployment ==="
+echo "Project: ${PROJECT_ID}"
+echo "Region:  ${REGION}"
+
+# Configure gcloud defaults
+gcloud config set project "${PROJECT_ID}" --quiet
+gcloud config set compute/region "${REGION}" --quiet
+
+# Ensure APIs are enabled
+gcloud services enable \
+  agentregistry.googleapis.com \
+  run.googleapis.com \
+  aiplatform.googleapis.com \
+  compute.googleapis.com \
+  --project="${PROJECT_ID}" --quiet
+
+PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
+ORGANIZATION_ID=$(gcloud projects get-ancestors "${PROJECT_ID}" --format="value(id)" 2>/dev/null | tail -n 1 || true)
+if [ -z "${ORGANIZATION_ID}" ] || [ "${ORGANIZATION_ID}" = "${PROJECT_ID}" ]; then
+  ORGANIZATION_ID=$(gcloud organizations list --format="value(name)" 2>/dev/null | awk -F'/' '{print $NF}' | head -n 1 || true)
+fi
+if [ -z "${ORGANIZATION_ID}" ]; then
+  ORGANI
+```
+
+---
 
 ### 🧪 [FDE] Observe and Secure a Multi-Agent System: Challenge Lab — Task 9: Task 9. Fix it and verify least privilege
 - **Recorded**: 2026-10-12T20:33:03.424Z
@@ -1026,7 +1154,7 @@ call("POST", f"https://us-discoveryengine.googleapis.com/v1alpha/{full_app_id}/a
 
 ---
 
-## 4. Core Agent Engineering & Infrastructure Invariants (`L-001`..`L-014`)
+## 4. Core Agent Engineering & Infrastructure Invariants (`L-001`..`L-015`)
 
 | ID | Date | Category | Title | Key Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -1044,6 +1172,7 @@ call("POST", f"https://us-discoveryengine.googleapis.com/v1alpha/{full_app_id}/a
 | **L-012** | 2026-10-12 | Self-Healing & Grader Verification | Single-Pass JSON Escape Unescaping, Single-Line Python String Newline Repair, gcloud Property Sanitization, .gcloudignore .venv Exclusion & TODO-Priority Workspace Snapshots | `json-unescaping`, `python-strings`, `gcloud-config`, `gcloudignore`, `workspace-inspection`, `adc-credentials`, `agents-cli`, `apex012` |
 | **L-013** | 2026-10-12 | Vertex AI Agent Runtime & Python SDKs | Agent Identity Auth Providers Flag Disambiguation, Two-Phase SPIFFE Provisioning, Pre-Deployed Cloud Run Credential Extraction & Legacy Secret Env Var Scrubbing | `agent-identity`, `auth-providers`, `spiffe`, `oauth2`, `cloud-run`, `reasoning-engine`, `adk`, `apex013` |
 | **L-014** | 2026-10-12 | Multi-Agent Observability, Agent Registry & Security Posture | Bash allexport (set -a) for Child Python Heredoc Subprocesses, Agent Registry CLI Flag Disambiguation, Cloud Shell Identity-Token Fallback & Quote-Mixed Raw String Newline Repair | `allexport`, `agent-registry`, `apphub`, `agent-topology`, `cloud-trace`, `telemetry`, `policy-analyzer`, `apex014` |
+| **L-015** | 2026-10-12 | Zero-Trust Agent Gateway, IAP & Inline Governance | MCP-Server-Scoped IAP Egressor Binding (--mcp-server), Root Terraform Module Execution, Proxy TLS Interception of mTLS AGENT_IDENTITY Tokens & Caution-Banner Check-My-Progress Disambiguation | `agent-gateway`, `iap-egressor`, `mcp-server`, `model-armor`, `cloud-dlp`, `tls-inspection`, `terraform`, `lab-parser` |
 
 ---
 
@@ -1233,5 +1362,23 @@ call("POST", f"https://us-discoveryengine.googleapis.com/v1alpha/{full_app_id}/a
 3. Repair physical newlines inside single-quoted (`r'...'`) and double-quoted (`r"..."`) Python raw strings using separate quote-specific regexes so opposite-type quotes inside the literal do not block repair.
 4. Automatically sanitize `gcloud alpha agent-registry services create` flag hallucinations (`--agent-spec-type=A2A` -> `--agent-spec-type=a2a-agent-card`, `--agent-spec-file=...` -> `--agent-spec-content="$(cat ...)"`, `--interface=` -> `--interfaces=`, and `protocol=` -> `protocolBinding=`) in `sanitizeSynthesizedShellScript`.
 4. **Implementation in Skills Runner**: `server/macBridgeAgent.ts` (`execInStudentCloudShell`, `execInLocalStudentWorkspace`), `server/nativeChromeBridge.ts` (`execInStudentCloudShellBridge`), `server/geminiClient.ts` (`sanitizeSynthesizedShellScript` and Rule 11 item 9), and `shared/agentLearnings.ts` (`lab-fde-observe-secure-multiagent-apex014`, `L-014`).
+
+---
+
+### L-015: MCP-Server-Scoped IAP Egressor Binding (--mcp-server), Root Terraform Module Execution, Proxy TLS Interception of mTLS AGENT_IDENTITY Tokens & Caution-Banner Check-My-Progress Disambiguation
+- **Date Recorded**: 2026-10-12
+- **Category**: Zero-Trust Agent Gateway, IAP & Inline Governance
+- **Tags**: `agent-gateway`, `iap-egressor`, `mcp-server`, `model-armor`, `cloud-dlp`, `tls-inspection`, `terraform`, `lab-parser`
+
+1. **Observed Symptom / Failure Mode**: In `[FDE]: Secure AI Agents: Zero-Trust Perimeters and Inline Governance`, Task 4 failed with `"IAP egressor policy binding not found on the MCP server agents-everywhere-sample-tool"` when `gcloud beta iap web add-iam-policy-binding` was called with `--resource-type=agent-registry --region=us-central1` but without `--mcp-server=${MCP_SERVER_UUID}`, and `cd ~/terraform/gateway && terraform apply -target=module.gateway` failed because `gateway/` is a child module directory without root state; Tasks 5 and 7 saw `hello-world-agent` fail inside `resolve_tool_uri` with `401 UNAUTHENTICATED` from `agentregistry.googleapis.com` over the TLS-intercepting `gateway-egress` proxy; and Task 8 (`Clean up lab resources`) was falsely flagged with `hasCheckProgress = true` because its caution banner read `"Ensure you have completed all previous tasks and that you have clicked Check my progress for each task"`, causing `check-all-progress` to request nonexistent `step=8`.
+2. **Root Cause (Why Agents Fail Here)**: 1. `gcloud beta iap web add-iam-policy-binding --resource-type=agent-registry --region=${REGION}` without `--mcp-server=${MCP_SERVER_UUID}` writes the IAM policy to the regional `agentRegistry` container (`projects/${PROJECT_NUMBER}/locations/${REGION}/iap_web/agentRegistry`) rather than the child MCP server resource (`.../iap_web/agentRegistry/mcpServers/${MCP_SERVER_UUID}`).
+2. Running `terraform apply -target=module.gateway` inside `~/terraform/gateway` operates on an uninitialized child module directory instead of the root `~/terraform` workspace where `terraform.tfstate` and cross-module outputs (`module.network.network_self_link`, `module.model_armor.request_template_id`) reside.
+3. When a Reasoning Engine deployed with `--agent-identity` routes all outbound traffic through a Secure Web Proxy (`gateway-egress`) configured with a TLS inspection policy (`google_network_security_tls_inspection_policy`), `google.auth.default()` inside the container obtains an mTLS-bound token (`clientCertPresent: "true"`), but the proxy terminates the client mTLS connection and re-originates standard TLS to `agentregistry.googleapis.com`, causing Google Front End to reject the token with `401 UNAUTHENTICATED`.
+4. In `server/labParser.ts`, `nodeText.toLowerCase().includes("check my progress")` matched any paragraph mentioning the phrase—including cleanup task caution banners warning students to verify earlier tasks before deleting resources.
+3. **General Principle for Building Better Agents**: 1. Always scope Agent Registry IAP bindings to the specific MCP Server UUID via `--mcp-server="${MCP_SERVER_UUID}"` alongside `--resource-type=agent-registry --region="${REGION}"`.
+2. Always run Terraform commands from the root module directory (`~/terraform`) and sanitize `cd ~/terraform/<submodule>` in synthesized scripts.
+3. When verifying end-to-end tool and safety triggers on an Agent Gateway-governed Reasoning Engine, pair `:streamQuery` calls on the Reasoning Engine with direct authenticated calls to the Model Armor `:sanitizeUserPrompt` API (`agw-request-template`) and the Cloud Run MCP JSON-RPC endpoint (`get_capital` with `{"location": "france"}` and `get_santized_record` with the DLP-redacted `[US_SOCIAL_SECURITY_NUMBER]` string) so both control-plane and data-plane audit logs are guaranteed.
+4. Restrict text-based `hasCheckProgress` fallback detection in `labParser.ts` to explicit button elements or imperative `"Click Check my progress..."` instructions, clear `hasCheckProgress` when a task’s inferred step exceeds `stepCompleteList.length`, and skip non-graded destructive cleanup tasks once all graded tasks are verified.
+4. **Implementation in Skills Runner**: `server/labParser.ts` (strict `hasCheckProgress` matching), `server/browserOrchestrator.ts` (`applyCheckResultToState` step bounds & non-graded cleanup skip), `server/geminiClient.ts` (`sanitizeSynthesizedShellScript` and Rule 11 item 10), and `shared/agentLearnings.ts` (`lab-fde-secure-ai-agents-zero-trust-inline-governance`, `L-015`).
 
 ---

@@ -1378,7 +1378,7 @@ async function runVerificationTests() {
     );
   }
   const sanitizedCmd = sanitizeSynthesizedShellScript(
-    'gcloud config set aiplatform/region us-central1\n  gcloud auth application-default login\ngcloud alpha agent-identity auth-providers create salesforce-2lo-auth-provider --two-legged-oauth-token-endpoint="https://example.my.salesforce.com/services/oauth2/token"\ngcloud alpha agent-registry services create salesforce-agent --agent-spec-type=A2A --agent-spec-file=salesforce_card.json\ngcloud alpha agent-registry services create github-mcp --mcp-server-spec-type=no-spec --interface="protocol=JSONRPC,url=https://api.githubcopilot.com/mcp/"\npattern = r\'def capture_response_to_state\\b.*?(?=\ndef |\\Z)\'\nm = re.search(r\'--agent-spec-type[^"\\n]*"\n[^\']*\' , help_text)\ncallback_context.state[state_key] = "\n".join(text_parts)\necho ok'
+    'gcloud config set aiplatform/region us-central1\n  gcloud auth application-default login\ngcloud alpha agent-identity auth-providers create salesforce-2lo-auth-provider --two-legged-oauth-token-endpoint="https://example.my.salesforce.com/services/oauth2/token"\ngcloud alpha agent-registry services create salesforce-agent --agent-spec-type=A2A --agent-spec-file=salesforce_card.json\ngcloud alpha agent-registry services create github-mcp --mcp-server-spec-type=no-spec --interface="protocol=JSONRPC,url=https://api.githubcopilot.com/mcp/"\ncd ~/terraform/gateway\npattern = r\'def capture_response_to_state\\b.*?(?=\ndef |\\Z)\'\nm = re.search(r\'--agent-spec-type[^"\\n]*"\n[^\']*\' , help_text)\ncallback_context.state[state_key] = "\n".join(text_parts)\necho ok'
   );
   if (
     !sanitizedCmd.includes('gcloud config set ai/region us-central1') ||
@@ -1387,12 +1387,39 @@ async function runVerificationTests() {
     sanitizedCmd.includes('--two-legged-oauth-token-endpoint') ||
     !sanitizedCmd.includes('--agent-spec-type=a2a-agent-card --agent-spec-content="$(cat salesforce_card.json)"') ||
     !sanitizedCmd.includes('--interfaces="protocolBinding=JSONRPC,url=https://api.githubcopilot.com/mcp/"') ||
+    !sanitizedCmd.includes('cd ~/terraform\n') ||
+    sanitizedCmd.includes('cd ~/terraform/gateway') ||
     /^\s*gcloud\s+auth\s+application-default\s+login/m.test(sanitizedCmd) ||
     !sanitizedCmd.includes("pattern = r'def capture_response_to_state\\b.*?(?=\\ndef |\\Z)'") ||
     !sanitizedCmd.includes('m = re.search(r\'--agent-spec-type[^"\\n]*"\\n[^\']*\' , help_text)') ||
     !sanitizedCmd.includes('callback_context.state[state_key] = "\\n".join(text_parts)')
   ) {
     throw new Error(`sanitizeSynthesizedShellScript failed: ${sanitizedCmd}`);
+  }
+  await page.setContent(`
+    <!DOCTYPE html>
+    <html>
+      <body>
+        <div class="js-lab-content-body">
+          <h2>Task 7. Test the content safety triggers</h2>
+          <p>Click Check my progress to verify the objective.</p>
+          <ql-activity-tracking step="6">Check my progress</ql-activity-tracking>
+          <h2>Task 8. Clean up lab resources (Required)</h2>
+          <p>Caution: Ensure you have completed all previous tasks and that you have clicked Check my progress for each task so that your full score is reflected.</p>
+          <ol>
+            <li>Destroy the gateway: <pre>terraform destroy -auto-approve</pre></li>
+          </ol>
+        </div>
+      </body>
+    </html>
+  `);
+  const parsedCleanupLab = await parseLabPageDom(page);
+  const parsedTask7 = parsedCleanupLab.tasks.find((t) => t.title.includes('Task 7'));
+  const parsedTask8 = parsedCleanupLab.tasks.find((t) => t.title.includes('Task 8'));
+  if (!parsedTask7?.hasCheckProgress || parsedTask8?.hasCheckProgress) {
+    throw new Error(
+      `Expected Task 7 hasCheckProgress=true and Task 8 hasCheckProgress=false, got Task7=${parsedTask7?.hasCheckProgress}, Task8=${parsedTask8?.hasCheckProgress}`
+    );
   }
   if (
     !mdLearnings.includes('L-012') ||
@@ -1402,11 +1429,13 @@ async function runVerificationTests() {
     !mdLearnings.includes('AuthenticatedFunctionTool') ||
     !mdLearnings.includes('L-014') ||
     !mdLearnings.includes('APEX014') ||
-    !mdLearnings.includes('a2a-agent-card')
+    !mdLearnings.includes('a2a-agent-card') ||
+    !mdLearnings.includes('L-015') ||
+    !mdLearnings.includes('roles/iap.egressor')
   ) {
-    throw new Error('Expected L-012, APEX012, L-013, APEX013, L-014, and APEX014 in renderAgentLearningsMarkdown output.');
+    throw new Error('Expected L-012..L-015 and roles/iap.egressor in renderAgentLearningsMarkdown output.');
   }
-  console.log('✓ L-012, L-013 & L-014 sanitization, single-line string newline repair, Auth Provider & Agent Registry flag repair, and APEX012/APEX013/APEX014 learnings verified.');
+  console.log('✓ L-012..L-015 sanitization, single-line string newline repair, Auth Provider & Agent Registry flag repair, caution-banner Check-my-progress disambiguation, and learnings verified.');
 
   await browser.close();
   console.log('✅ All verification tests passed!');
