@@ -4,7 +4,7 @@
 > 1. **Course Curriculum & Domain Learnings** (`course_content`) — Core concepts, product capabilities, and architectures taught in courses.
 > 2. **Verified Quiz & Knowledge Check Bank** (`quiz_mastery`) — Verified questions, winning answers, eliminated distractors, and domain rules.
 > 3. **Verified Hands-On Lab Recipes & Self-Healing Deltas** (`lab_execution`) — Exact API/CLI/SDK implementations that passed Qwiklabs graders and how earlier attempt errors were resolved.
-> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-011`) — Reusable patterns for building reliable autonomous agents.
+> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-012`) — Reusable patterns for building reliable autonomous agents.
 
 ---
 
@@ -48,6 +48,98 @@
 ---
 
 ## 3. Verified Hands-On Lab Recipes & Self-Healing Deltas (`lab_execution`)
+
+### 🧪 [FDE] Build Enterprise Agents (APEX012) — Multi-Agent Enterprise Architecture: ADK 2.0 Workflow Graph, A2A v1.0/v0.3 Interop, GKE Vector Search, MCP Toolsets & Vertex AI Memory Bank
+- **Recorded**: 2026-10-12T16:45:00.000Z
+- **Source URL**: https://explore.qwiklabs.com/classrooms/21414/labs/115585
+- **Services Used**: `agents-cli (agent-starter-pack)`, `Google ADK 2.0 (Workflow, JoinNode, RemoteA2aAgent, McpToolset)`, `LangGraph (StateGraph + A2A Starlette)`, `GKE Autopilot + BigQuery VECTOR_SEARCH (text-embedding-004)`, `Cloud Run`, `Vertex AI Agent Runtime & Memory Bank`, `Gemini Enterprise (Discovery Engine)`
+- **Attempts Required**: 1
+
+**What This Lab Teaches**: End-to-end architecture and verified implementation recipes for building, deploying, and orchestrating heterogeneous enterprise agents across Cloud Run, GKE Autopilot, Vertex AI Agent Runtime, and Gemini Enterprise.
+
+#### Architectural & Technical Concepts
+- A2A Protocol Interoperability: ADK 2.0 agents expose A2A v1.0 (`protocol_version="1.0"`, requiring `RemoteA2aAgent(..., use_legacy=False)`), whereas LangGraph agents using `a2a-sdk` default to A2A v0.3 unless `AgentCard.additional_interfaces` advertises both `1.0` and `0.3` and `CleanQueryRemoteA2aAgent` strips context prefixes.
+- ADK 2.0 Parallel Graph Orchestration (`Workflow` + `JoinNode`): Fan-out from an intake node (`edges=[("intake", ("github_agent", "stackexchange_agent", "bq_agent"))]`) requires a `JoinNode(name="merge")` before downstream synthesis so the synthesizer receives all parallel specialist outputs in `ctx.state` via `after_agent_callback=capture_response_to_state(...)`.
+- Cross-Runtime Authentication (`GoogleADCAuth`): When a root orchestrator on Vertex AI Agent Runtime invokes private Cloud Run specialists, an `httpx.Auth` subclass (`GoogleADCAuth`) must mint target-audience OIDC ID tokens (`id_token.fetch_id_token(Request(), audience=origin)`) on every request.
+- External GKE LoadBalancer for A2A Discovery: `agents-cli create bq-agent -a adk -d gke` scaffolds `service.tf` with `"cloud.google.com/load-balancer-type" = "Internal"`. Removing that annotation provisions an external LoadBalancer IP so Vertex AI Agent Runtime can fetch `http://<EXTERNAL_IP>:8080/a2a/app/.well-known/agent-card.json`.
+- User-Scoped Memory Isolation in Vertex AI Memory Bank: `PreloadMemoryTool()` retrieves user memories at turn start and `generate_memories_callback` persists memories via `agent_engines.memories.generate(...)` at turn end, while `_user_scoped_request_converter` and `user_id_meta_provider` propagate `user_id` across A2A boundaries.
+
+#### Reusable Agent Rules
+- Preserve existing non-placeholder secrets (`GITHUB_PERSONAL_ACCESS_TOKEN`, `SALESFORCE_CLIENT_ID`, `SALESFORCE_CLIENT_SECRET`, `SALESFORCE_DOMAIN`) in `.env` files before appending or updating deployment URLs.
+- Prioritize `.env` files and `TODO`-containing source files during workspace inspection so large Terraform/reference trees do not crowd out the actual code files requiring edits.
+- Provision `~/.config/gcloud/application_default_credentials.json` from `credentials.db` in non-interactive Cloud Shell SSH sessions so `google.auth.default()` and `agents-cli publish gemini-enterprise` succeed without interactive login.
+
+#### Verified Grader-Passing Implementation
+- **Recipe Summary**: Implements GitHub MCP specialist (`McpToolset` + `StreamableHTTPConnectionParams`), Stack Exchange LangGraph specialist (`StateGraph` + dual `1.0`/`0.3` `AgentInterface`), GKE BigQuery specialist (`find_similar_bugs` with `VECTOR_SEARCH` and external LoadBalancer `service.tf`), ADK 2.0 `Workflow` root orchestrator with `JoinNode` and `GoogleADCAuth`, Salesforce 2-legged OAuth specialist, and `VertexAiMemoryBankService` integration.
+- **Self-Healing Delta**: Fixed sequential JSON string unescaping (`\\n` -> `\<NEWLINE>`) with single-pass regex token unescaping, added `gcloud config set aiplatform/region` -> `ai/region` sanitization, sorted `.env` and `TODO` files to top priority in workspace snapshots, and patched `service.tf` to expose an external GKE LoadBalancer IP.
+---
+
+### 🧪 [FDE] Build Enterprise Agents — Task 1: Task 1. Set up your environment
+- **Recorded**: 2026-10-12T16:17:27.316Z
+- **Source URL**: https://explore.qwiklabs.com/classrooms/21414/labs/115585
+- **Services Used**: `discoveryengine.googleapis.com`, `storage.googleapis.com`, `cloudresourcemanager.googleapis.com`, `Cloud Shell`
+- **Attempts Required**: 1
+
+**What This Lab Teaches**: Configured the Cloud Shell environment (project/region, lab code download, uv-installed google-agents-cli), then created the Vertex AI Search datastore 'code-manuals-datastore' via the Discovery Engine REST API and kicked off an async GCS document import with a retry loop, passing the grader on the first attempt.
+
+#### Architectural & Technical Concepts
+- Vertex AI Search (Discovery Engine) datastore creation via REST: POST .../locations/global/collections/default_collection/dataStores?dataStoreId=<id> with GENERIC vertical, SOLUTION_TYPE_SEARCH and CONTENT_REQUIRED
+- Asynchronous unstructured document ingestion from GCS using documents:import on branches/0 with dataSchema 'content' and INCREMENTAL reconciliation (returns a long-running operation)
+- Eventual consistency of newly provisioned datastores: import may return 403 PERMISSION_DENIED until background provisioning finishes
+- Python client libraries need Application Default Credentials, which are separate from gcloud CLI auth; agents-cli is installed as a uv tool under ~/.local/bin
+
+#### Reusable Agent Rules
+- Wrap the documents:import call in a retry loop (about 10 attempts, 10s sleep, fresh access token each time) and treat HTTP 200 as success; a 403 right after datastore creation is transient.
+- Always send the 'X-Goog-User-Project: ${PROJECT_ID}' header on discoveryengine.googleapis.com curl calls to avoid quota-project errors with user credentials, and run 'gcloud services enable discoveryengine.googleapis.com' first, idempotently with '|| true'.
+- Resolve PROJECT_ID from GOOGLE_CLOUD_PROJECT or 'gcloud config get-value project' before falling back to a hardcoded ID. Build the GCS URI as gs://${PROJECT_ID}-bucket/code_manuals/* with careful quote splicing inside the JSON body.
+- Install the CLI with 'export PATH=$HOME/.local/bin:$PATH; uv tool install google-agents-cli --force'. Bootstrap uv via astral install.sh if missing, and guard the interactive-only steps ('cloudshell workspace', ADC login) so the script never fails non-interactively.
+
+#### Verified Grader-Passing Implementation
+- **Recipe Summary**: The bash script (set -euo pipefail) resolves PROJECT_ID and REGION, sets the gcloud project and enables the Discovery Engine API. It copies gs://${PROJECT_ID}-bucket/agents to $HOME and settings.json to ~/.vscode, then installs uv and google-agents-cli via 'uv tool install --force' with upgrade and pip fallbacks. Next it POSTs to the dataStores endpoint with dataStoreId=code-manuals-datastore and body {displayName:'Code manuals', industryVertical:'GENERIC', solutionTypes:['SOLUTION_TYPE_SEARCH'], contentConfig:'CONTENT_REQUIRED'}, capturing the HTTP code with curl -w. Finally it POSTs documents:import on branches/0 with {reconciliationMode:'INCREMENTAL', gcsSource:{inputUris:['gs://PROJECT-bucket/code_manuals/*'], dataSchema:'content'}}, retrying up to 10 times every 10s until HTTP 200. The grader checks that the datastore exists and that the import has been initiated; it does not wait for ingestion to complete.
+- **Self-Healing Delta**: The script anticipated the transient 403 PERMISSION_DENIED on import while the new datastore was still provisioning, and retried with a refreshed token until HTTP 200. It also added the X-Goog-User-Project header to the import call, enabled the API idempotently, and made the interactive or optional steps non-fatal. Together these let the grader pass on the first attempt.
+
+```python
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 1. Resolve Project ID and Region
+PROJECT_ID="${GOOGLE_CLOUD_PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
+REGION="${GOOGLE_CLOUD_REGION:-us-central1}"
+
+if [ -z "${PROJECT_ID}" ]; then
+  PROJECT_ID="qwiklabs-gcp-01-f3169fe6b6e0"
+fi
+
+echo "Using PROJECT_ID: ${PROJECT_ID}"
+echo "Using REGION: ${REGION}"
+
+gcloud config set project "${PROJECT_ID}" --quiet
+
+# Enable Discovery Engine API if not already enabled
+gcloud services enable discoveryengine.googleapis.com --project="${PROJECT_ID}" --quiet || true
+
+# 2. Download lab starter files
+cd "${HOME}"
+if [ ! -d "${HOME}/agents" ]; then
+  echo "Downloading agents starter files from bucket..."
+  gcloud storage cp -r "gs://${PROJECT_ID}-bucket/agents" . || echo "Agents directory copy completed."
+fi
+
+mkdir -p "${HOME}/.vscode"
+gcloud storage cp -r "gs://${PROJECT_ID}-bucket/settings.json" "${HOME}/.vscode/" || true
+
+# 3. Ensure uv and agents-cli are installed
+export PATH="${HOME}/.local/bin:${PATH}"
+if ! command -v uv &>/dev/null; then
+  echo "Installing uv package manager..."
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  export PATH="${HOME}/.local/bin:${PATH}"
+fi
+
+echo "Installing goo
+```
+
+---
 
 ### 🧪 Explore the Deep Research Agent — Task 2. Use the Deep Research agent
 - **Recorded**: 2026-10-10T20:15:30.000Z
@@ -192,7 +284,7 @@ call("POST", f"https://us-discoveryengine.googleapis.com/v1alpha/{full_app_id}/a
 
 ---
 
-## 4. Core Agent Engineering & Infrastructure Invariants (`L-001`..`L-011`)
+## 4. Core Agent Engineering & Infrastructure Invariants (`L-001`..`L-012`)
 
 | ID | Date | Category | Title | Key Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -207,6 +299,7 @@ call("POST", f"https://us-discoveryengine.googleapis.com/v1alpha/{full_app_id}/a
 | **L-009** | 2026-10-09 | Course & Embedded Lab Orchestration | Detecting and Running Hands-On Labs Embedded Inside Multi-Module Courses | `course-mode`, `embedded-lab`, `mode-switching`, `dom-detection` |
 | **L-010** | 2026-10-08 | DOM, Shadow DOM & Quiz Grading | Idempotent Quiz Option Selection & Cross-Attempt Elimination Memory | `quiz`, `shadow-dom`, `rise-360`, `idempotency`, `self-healing` |
 | **L-011** | 2026-10-10 | Self-Healing & Grader Verification | Distinguishing Cloud API Chat Prompts from CLI Agent Prompts in Step Surface Classification | `lab-parser`, `surface-classification`, `plaintext-prompts`, `agents` |
+| **L-012** | 2026-10-12 | Self-Healing & Grader Verification | Single-Pass JSON Escape Unescaping, gcloud Property Sanitization, TODO-Priority Workspace Snapshots & Non-Interactive ADC Provisioning | `json-unescaping`, `gcloud-config`, `workspace-inspection`, `adc-credentials`, `agents-cli`, `apex012` |
 
 ---
 
@@ -339,5 +432,23 @@ call("POST", f"https://us-discoveryengine.googleapis.com/v1alpha/{full_app_id}/a
 2. **Root Cause (Why Agents Fail Here)**: `classifySurface` treated any `plaintext` code block mentioning `prompt` or `agent` as an Antigravity (`agy`) CLI instruction, even when the lab was testing a web-based Discovery Engine or Vertex AI agent.
 3. **General Principle for Building Better Agents**: Scope tool-specific surface classifiers (`antigravity`) strictly to explicit signals for that tool (`antigravity`, `agy`, `code assist`, `cloud editor`, `workstation`), while extracting conversational prompts (`<ql-code-block language="plaintext">`) as structured step inputs for API-driven agent synthesis.
 4. **Implementation in Skills Runner**: `server/labParser.ts` scopes `antigravity` classification to explicit Antigravity/Cloud Editor signals and extracts conversational prompts for Discovery Engine / Vertex AI agent synthesis.
+
+---
+
+### L-012: Single-Pass JSON Escape Unescaping, gcloud Property Sanitization, TODO-Priority Workspace Snapshots & Non-Interactive ADC Provisioning
+- **Date Recorded**: 2026-10-12
+- **Category**: Self-Healing & Grader Verification
+- **Tags**: `json-unescaping`, `gcloud-config`, `workspace-inspection`, `adc-credentials`, `agents-cli`, `apex012`
+
+1. **Observed Symptom / Failure Mode**: In `[FDE] Build Enterprise Agents` (APEX012) Task 2, Attempt 1 failed with a Python `SyntaxError: unterminated string literal` because `\\n` inside a synthesized Python regex was turned into `\<NEWLINE>`; Attempt 2 failed with `ERROR: (gcloud.config.set) Section [aiplatform] has no property [region]`; and `inspectStudentCloudShellWorkspace` exhausted its 55KB snapshot budget on `code-assistant/deployment/terraform/*` before reaching `github-agent/app/agent.py`.
+2. **Root Cause (Why Agents Fail Here)**: 1. Sequential `.replace(/\\n/g, "\n").replace(/\\\\/g, "\\")` in `extractJsonStringField` matches the second `\` + `n` inside `\\n` first, corrupting escaped backslashes into literal newlines whenever `JSON.parse` falls back on unescaped regex escapes in LLM output.
+2. LLMs frequently hallucinate `gcloud config set aiplatform/region` instead of the valid `gcloud config set ai/region`, which immediately aborts `set -euo pipefail` scripts.
+3. Alphabetical directory traversal in multi-agent repos visits `code-assistant/deployment/terraform/*` before `github-agent/app/agent.py`, starving downstream agents of the exact `# TODO` stubs they need to edit.
+4. Fresh Cloud Shell SSH sessions have user credentials in `~/.config/gcloud/credentials.db` (`authorized_user` JSON) but no `~/.config/gcloud/application_default_credentials.json`, causing `google.auth.default()` and `agents-cli publish gemini-enterprise` to fail unless ADC is materialized.
+3. **General Principle for Building Better Agents**: 1. Never chain `.replace(/\\n/g, ...)` before `.replace(/\\\\/g, ...)` when unescaping JSON strings; repair invalid JSON escapes before `JSON.parse` and use a single-pass regex `/\\(u[0-9a-fA-F]{4}|.)/g` in any fallback parser.
+2. Sanitize known CLI property hallucinations (`aiplatform/region` -> `ai/region`) and strip interactive `gcloud auth login` commands before executing under `set -euo pipefail`.
+3. Sort workspace file snapshots by actionable signal: Priority 0 (`.env`), Priority 1 (files containing `TODO`), Priority 2 (`app/*.py`, `scripts/*.py`), Priority 3 (`pyproject.toml`), and Priority 4 (`deployment/terraform/*`, `tests/*`).
+4. Automatically extract `authorized_user` JSON from `credentials.db` into `~/.config/gcloud/application_default_credentials.json` and export `GOOGLE_APPLICATION_CREDENTIALS` in non-interactive Cloud Shell sessions.
+4. **Implementation in Skills Runner**: `server/geminiClient.ts` (`extractJsonStringField`, `sanitizeSynthesizedShellScript`, Rule 11), `server/nativeChromeBridge.ts` (`inspectStudentCloudShellWorkspace`, `execInStudentCloudShellBridge`), and `server/macBridgeAgent.ts` (`extractAuthorizedUserAdcB64`).
 
 ---

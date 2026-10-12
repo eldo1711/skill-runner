@@ -2,10 +2,12 @@ import { chromium } from 'playwright';
 import { parseGssKnowledgeCheckHtml, parseLabPageDom } from './labParser.js';
 import {
   distillQuizMasteryLearning,
+  extractJsonStringField,
   formatAutonomousAntigravityPrompt,
   getModelGardenEntries,
   interpolateLabVariables,
   resolveLatestGeminiModel,
+  sanitizeSynthesizedShellScript,
   solveCourseQuizQuestions,
   synthesizeTaskShellScript,
   transformAgyLaunchCommand,
@@ -1281,6 +1283,7 @@ async function runVerificationTests() {
   }
 
   const mdLearnings = renderAgentLearningsMarkdown(allKb);
+  fsMod.writeFileSync(pathMod.resolve(process.cwd(), 'AGENT_LEARNINGS.md'), mdLearnings, 'utf8');
   if (
     !mdLearnings.includes('L-001') ||
     !mdLearnings.includes('L-004') ||
@@ -1360,6 +1363,34 @@ async function runVerificationTests() {
     throw new Error('Deep Research Task 2 synthesis failed multi-turn deep_research checks.');
   }
   console.log('✓ Cumulative Agent Learnings, 3-Stream Knowledge Memorialization & Deep Research Agent synthesis verified.');
+
+  // 18. Verify L-012 single-pass JSON string unescaping (\\n preservation) and gcloud property sanitization
+  const rawMalformedJson =
+    '{"script": "python3 - << \'EOF\'\\nimport re\\ns = re.sub(r\'\\\\s+\', \' \', \'a\\\\nb\')\\nEOF\\n", "summary": "Test"}';
+  const extractedScript = extractJsonStringField(rawMalformedJson, 'script');
+  if (
+    !extractedScript ||
+    !extractedScript.includes("r'\\s+'") ||
+    !extractedScript.includes("'a\\nb'")
+  ) {
+    throw new Error(
+      `extractJsonStringField corrupted \\\\n or \\s+ in fallback JSON string: ${JSON.stringify(extractedScript)}`
+    );
+  }
+  const sanitizedCmd = sanitizeSynthesizedShellScript(
+    'gcloud config set aiplatform/region us-central1\n  gcloud auth application-default login\necho ok'
+  );
+  if (
+    !sanitizedCmd.includes('gcloud config set ai/region us-central1') ||
+    sanitizedCmd.includes('aiplatform/region') ||
+    /^\s*gcloud\s+auth\s+application-default\s+login/m.test(sanitizedCmd)
+  ) {
+    throw new Error(`sanitizeSynthesizedShellScript failed: ${sanitizedCmd}`);
+  }
+  if (!mdLearnings.includes('L-012') || !mdLearnings.includes('APEX012')) {
+    throw new Error('Expected L-012 and APEX012 in renderAgentLearningsMarkdown output.');
+  }
+  console.log('✓ L-012 single-pass JSON unescaping, gcloud property sanitization & APEX012 learnings verified.');
 
   await browser.close();
   console.log('✅ All verification tests passed!');

@@ -1602,7 +1602,7 @@ export async function execInStudentCloudShellBridge(
         command,
         timeoutMs,
       },
-      timeoutMs + 15000
+      timeoutMs + 30000
     );
     return {
       ok: Boolean(execRes?.ok),
@@ -1709,6 +1709,23 @@ export async function execInStudentCloudShellBridge(
     }).catch(() => {});
   }
 
+  let adcB64 = '';
+  try {
+    const dbPath = path.join(activeConfigDir, 'credentials.db');
+    if (fs.existsSync(dbPath)) {
+      const { stdout: adcOut } = await execFileAsync(
+        'sqlite3',
+        [dbPath, 'SELECT value FROM credentials LIMIT 1;'],
+        { timeout: 4000 }
+      );
+      if (adcOut && adcOut.trim().startsWith('{')) {
+        adcB64 = Buffer.from(adcOut.trim(), 'utf8').toString('base64');
+      }
+    }
+  } catch {
+    // Ignore sqlite3 extraction error
+  }
+
   ensureCleanSshWrapperDir();
   const cleanEnv: NodeJS.ProcessEnv = {
     ...process.env,
@@ -1723,7 +1740,10 @@ export async function execInStudentCloudShellBridge(
     const driveExport = hostAccessToken
       ? `export DRIVE_ACCESS_TOKEN="${hostAccessToken}"; `
       : '';
-    const envPrefix = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1; export PYTHONUNBUFFERED=1; ${projExport}${driveExport}`;
+    const adcExport = adcB64
+      ? `mkdir -p "$HOME/.config/gcloud"; echo "${adcB64}" | base64 -d > "$HOME/.config/gcloud/application_default_credentials.json" 2>/dev/null || true; chmod 600 "$HOME/.config/gcloud/application_default_credentials.json" 2>/dev/null || true; export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/application_default_credentials.json"; `
+      : '';
+    const envPrefix = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1; export PYTHONUNBUFFERED=1; ${projExport}${driveExport}${adcExport}`;
     const fullScript = `${envPrefix}\n${command}`;
     const b64Script = Buffer.from(fullScript, 'utf8').toString('base64');
     const remoteCmd = `echo ${b64Script} | base64 -d > /tmp/ql_cmd_$$.sh && bash /tmp/ql_cmd_$$.sh < /dev/null; _ec=$?; rm -f /tmp/ql_cmd_$$.sh; exit $_ec`;
@@ -3190,23 +3210,46 @@ if proj:
         pass
 
 exts = (".py", ".json", ".yaml", ".yml", ".tf", ".tfvars", ".sh", ".sql", ".env", ".md", "requirements.txt", "Dockerfile", "Makefile", "pyproject.toml")
+def _file_priority(rel_p):
+    bname = os.path.basename(rel_p)
+    is_test_or_tf = "/tests/" in f"/{rel_p}" or "/deployment/terraform/" in f"/{rel_p}" or "/references/" in f"/{rel_p}"
+    if bname == ".env" or bname.startswith(".env"):
+        return (0, rel_p)
+    full_p = os.path.join(home, rel_p)
+    try:
+        if not is_test_or_tf and os.path.getsize(full_p) <= 24000:
+            with open(full_p, "r", errors="replace") as _fh:
+                if "TODO" in _fh.read():
+                    return (1, rel_p)
+    except Exception:
+        pass
+    if not is_test_or_tf and (rel_p.endswith(".py") or bname in {"agents-cli-manifest.yaml", "pyproject.toml", "Dockerfile", "requirements.txt", "eval_config.json"}):
+        return (2, rel_p)
+    if not is_test_or_tf:
+        return (3, rel_p)
+    return (4, rel_p)
+
+prioritized_files = sorted(
+    [p for p in files_found if any(p.endswith(ext) for ext in exts)],
+    key=_file_priority,
+)
 total_bytes = 0
 print("\\n=== KEY WORKSPACE FILE CONTENTS ===")
-for rel_p in files_found:
-    if rel_p in {"package-lock.json", "uv.lock", "poetry.lock", "README-cloudshell.txt"} or rel_p.endswith(".tfstate") or rel_p.endswith(".tfstate.backup"):
+for rel_p in prioritized_files:
+    bname = os.path.basename(rel_p)
+    if bname in {"package-lock.json", "uv.lock", "poetry.lock", "README-cloudshell.txt"} or rel_p.endswith(".tfstate") or rel_p.endswith(".tfstate.backup"):
         continue
-    if any(rel_p.endswith(ext) for ext in exts):
-        full_p = os.path.join(home, rel_p)
-        try:
-            sz = os.path.getsize(full_p)
-            if sz > 0 and sz <= 24000 and total_bytes < 55000:
-                with open(full_p, "r", errors="replace") as fh:
-                    content = fh.read()
-                print(f"\\n--- FILE: ~/{rel_p} ({sz} bytes) ---")
-                print(content)
-                total_bytes += len(content)
-        except Exception:
-            pass
+    full_p = os.path.join(home, rel_p)
+    try:
+        sz = os.path.getsize(full_p)
+        if sz > 0 and sz <= 24000 and total_bytes < 72000:
+            with open(full_p, "r", errors="replace") as fh:
+                content = fh.read()
+            print(f"\\n--- FILE: ~/{rel_p} ({sz} bytes) ---")
+            print(content)
+            total_bytes += len(content)
+    except Exception:
+        pass
 
 local_ipynbs = [os.path.join(home, p) for p in files_found if p.endswith(".ipynb")] + glob.glob("/tmp/*.ipynb")
 for g_line in gcs_lines:
@@ -3273,6 +3316,17 @@ if adk_bins:
             cmd_str = " ".join(sub)
             out = subprocess.check_output([adk_bin] + sub, text=True, stderr=subprocess.STDOUT, timeout=8)
             print(f"$ adk {cmd_str}\\n{out.strip()}")
+        except Exception:
+            pass
+
+acli_bin = os.path.join(home, ".local", "bin", "agents-cli")
+if os.path.exists(acli_bin):
+    print(f"\\n=== AGENTS-CLI HELP ({acli_bin}) ===")
+    for sub in [["--help"], ["create", "--help"], ["deploy", "--help"], ["publish", "gemini-enterprise", "--help"]]:
+        try:
+            cmd_str = " ".join(sub)
+            out = subprocess.check_output([acli_bin] + sub, text=True, stderr=subprocess.STDOUT, timeout=8)
+            print(f"$ agents-cli {cmd_str}\\n{out.strip()[:1800]}")
         except Exception:
             pass
 

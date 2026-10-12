@@ -5008,6 +5008,34 @@ ${combinedText}
       6. Because \`service-<project_number>@gcp-sa-aiplatform-re.iam.gserviceaccount.com\` is provisioned by Vertex AI when \`CreateReasoningEngine\` is first called, grant its IAM roles (\`roles/agentregistry.viewer\`, \`roles/discoveryengine.viewer\`, \`roles/bigquery.admin\`, \`roles/aiplatform.user\`, \`roles/serviceusage.serviceUsageConsumer\`) in a background loop during \`agents-cli deploy\` AND again after \`agents-cli deploy\` completes.
       7. When modifying \`# TODO\` comments in Python files, replace the ENTIRE comment line (e.g. \`# TODO Task 5: Define the Workflow Graph Edges.\`) rather than a prefix substring so trailing comment text never corrupts Python syntax.
       8. When verifying an ADK 2.0 \`Workflow\` (e.g. Task 5 "Orchestrate and Verify the System"), ALWAYS call \`find_similar_bugs("<diagnostic_query>")\` directly first, run \`InMemoryRunner(agent=root_agent, app_name="support_agent")\` from a file \`/tmp/verify_workflow.py\`, AND launch \`adk web --port 8000\` in the background and submit the test queries via \`http://127.0.0.1:8000/run_sse\`.
+    - **Enterprise Multi-Agent Systems Across Runtimes (\`~/agents\`: ADK + \`McpToolset\`, LangGraph over A2A \`1.0\`/\`0.3\`, GKE \`bq-agent\`, \`Workflow\` \`JoinNode\`, and \`VertexAiMemoryBankService\`)**:
+      1. **Preserve Existing User-Entered \`.env\` Secrets (\`GITHUB_PERSONAL_ACCESS_TOKEN\`, \`SALESFORCE_CLIENT_ID\`, \`SALESFORCE_CLIENT_SECRET\`, \`SALESFORCE_DOMAIN\`)**: NEVER blindly overwrite an existing non-placeholder token in \`~/agents/github-agent/.env\` or \`~/agents/salesforce-agent/.env\` with \`PASTE_YOUR_TOKEN\`. Inspect the existing \`.env\` file first (\`EXISTING_TOKEN=$(grep '^GITHUB_PERSONAL_ACCESS_TOKEN=' .env 2>/dev/null | cut -d= -f2-)\`) and preserve any non-empty value that does not contain \`PASTE_\`.
+      2. **gcloud Config & Non-Interactive ADC**: Use \`gcloud config set ai/region <region>\` (NEVER \`gcloud config set aiplatform/region\`, which fails with \`Section "aiplatform" does not exist\`). Never run \`gcloud auth login\` or \`gcloud auth application-default login\` inside scripts (\`GOOGLE_APPLICATION_CREDENTIALS\` is already pre-provisioned in \`~/.config/gcloud/application_default_credentials.json\`).
+      3. **GitHub Specialist (\`~/agents/github-agent/app/agent.py\`)**: Wire \`github_mcp_toolset = McpToolset(connection_params=StreamableHTTPConnectionParams(url=GITHUB_MCP_URL, headers={"Authorization": f"Bearer {GITHUB_TOKEN}"}), tool_filter=GITHUB_TOOL_FILTER)\` when \`GITHUB_TOKEN\` is set (else \`None\`). Deploy with \`agents-cli deploy --project "$PROJECT_ID" --no-confirm-project\` (or poll \`agents-cli deploy --status\` until \`SUCCEEDED\`), discover the ReasoningEngine ID, and persist \`GITHUB_ENGINE_URL="https://\${REGION}-aiplatform.googleapis.com/reasoningEngines/v1/projects/\${PROJECT_ID}/locations/\${REGION}/reasoningEngines/\${GITHUB_ENGINE_ID}"\` and \`GITHUB_AGENT_URL="\${GITHUB_ENGINE_URL}/api/a2a/app/.well-known/agent-card.json"\` to \`~/.bashrc\`.
+      4. **LangGraph Stack Exchange Specialist (\`~/agents/stackexchange-agent\`)**:
+         - In \`app/agent.py\`, build the graph with \`return StateGraph(State).add_node("search", search).add_edge(START, "search").add_edge("search", END).compile()\`.
+         - In \`app/server.py\`, advertise BOTH A2A 1.0 and 0.3 in \`supported_interfaces=[AgentInterface(url=rpc_url, protocol_binding="JSONRPC", protocol_version="1.0"), AgentInterface(url=rpc_url, protocol_binding="JSONRPC", protocol_version="0.3")]\`.
+         - Build with \`gcloud builds submit --tag "\${REGION}-docker.pkg.dev/\${PROJECT_ID}/agents/stackexchange-agent:latest" --project "\${PROJECT_ID}"\`, deploy to Cloud Run \`stackexchange-agent\` (\`--allow-unauthenticated --port 8080\`), update \`--update-env-vars "PUBLIC_URL=\${SE_URL}"\`, and persist \`STACKEXCHANGE_AGENT_URL="\${SE_URL}/.well-known/agent-card.json"\` to \`~/.bashrc\`.
+      5. **BigQuery Vector Search Specialist on GKE (\`~/agents/bq-agent\`)**:
+         - NEVER launch interactive \`agy\` to generate \`bq-agent\`. Instead:
+           a) Install \`terraform\` if needed and remove Cloud Shell's stub \`sudo rm -f /usr/local/bin/terraform\`.
+           b) Scaffold non-interactively: \`cd ~/agents && [ ! -d bq-agent ] && agents-cli create bq-agent -a adk -d gke --region "\${REGION}" --cicd-runner skip --session-type in_memory -y -s\`.
+           c) **CRITICAL External GKE LoadBalancer Fix**: The default \`bq-agent/deployment/terraform/single-project/service.tf\` includes \`annotations = { "cloud.google.com/load-balancer-type" = "Internal" }\` on \`kubernetes_service_v1.app\`. You MUST remove that \`annotations\` block from \`service.tf\` BEFORE running \`agents-cli deploy\` so GKE provisions an **external/public** LoadBalancer IP reachable by Agent Runtime!
+           d) Add \`"google-cloud-bigquery"\` to \`bq-agent/pyproject.toml\` (\`uv add google-cloud-bigquery\`) and write \`bq-agent/app/agent.py\` with \`find_similar_bugs(query: str) -> str\` that embeds \`query\` using \`genai.Client(vertexai=True, project=PROJECT_ID, location="us-central1").models.embed_content(model="text-embedding-004", contents=query)\` and runs \`VECTOR_SEARCH(TABLE \\\`code_assist_bugs.known_bugs\\\`, 'description_embedding', (SELECT @query_embedding AS embedding), top_k => 3, distance_type => 'COSINE')\` via \`bigquery.Client(project=PROJECT_ID)\`, returning \`bug_id\`, \`title\`, \`description\`, \`resolution\`, and \`distance\`.
+           e) Run \`agents-cli deploy --project "\${PROJECT_ID}" --no-confirm-project\` (retrying once if Kubernetes provider returns \`Unauthorized\` right after cluster creation), grant \`bq-agent-app@\${PROJECT_ID}.iam.gserviceaccount.com\` \`roles/bigquery.jobUser\` and \`roles/bigquery.dataViewer\`, get the external IP via \`kubectl get svc bq-agent -n bq-agent -o jsonpath='{.status.loadBalancer.ingress[0].ip}'\`, and persist \`BQ_AGENT_URL="http://\${EXTERNAL_IP}:8080/a2a/app/.well-known/agent-card.json"\` to \`~/.bashrc\`.
+      6. **Root Orchestrator Workflow (\`~/agents/code-assistant\`)**:
+         - \`app/callbacks.py\`: \`ctx.state[key] = text or f"({ctx.agent_name} returned no findings)"\` and \`return None\`.
+         - \`app/auth.py\`: \`self._creds.before_request(self._auth_req, request.method, str(request.url), headers)\`.
+         - \`app/agent.py\`:
+           - \`github_agent = RemoteA2aAgent(name="github_agent", description="...", agent_card=GITHUB_AGENT_URL, httpx_client=google_authed_client(), use_legacy=False, after_agent_callback=capture_response_to_state("github_findings"))\`
+           - \`stackexchange_agent = CleanQueryRemoteA2aAgent(name="stackexchange_agent", description="...", agent_card=STACKEXCHANGE_AGENT_URL, after_agent_callback=capture_response_to_state("stackexchange_findings"))\`
+           - \`edges=[("START", "query_extractor"), ("query_extractor", ("bug_db_agent", "manual_search_agent", "salesforce_agent", "github_agent", "stackexchange_agent")), (("bug_db_agent", "manual_search_agent", "salesforce_agent", "github_agent", "stackexchange_agent"), "merge"), ("merge", "synthesizer")]\`
+      7. **Salesforce Specialist & Vertex AI Memory Bank (\`~/agents/salesforce-agent\` & \`~/agents/code-assistant/app/app_utils/a2a.py\`)**:
+         - \`salesforce-agent/app/salesforce_client.py\`: \`resp = httpx.post(f"https://{self.domain}/services/oauth2/token", data={"grant_type": "client_credentials", "client_id": self.client_id, "client_secret": self.client_secret}, timeout=_TIMEOUT_SECONDS); resp.raise_for_status(); payload = resp.json()\`.
+         - \`salesforce-agent/app/app_utils/a2a.py\`: \`run_request = convert_a2a_request_to_agent_run_request(request, part_converter)\`.
+         - \`salesforce-agent/app/agent.py\`: In \`generate_memories_callback\`, call \`await ctx.add_session_to_memory()\`; add \`PreloadMemoryTool()\` to \`tools=[search_salesforce, fetch_record_details, PreloadMemoryTool()]\` and set \`after_agent_callback=generate_memories_callback\` on \`root_agent\`.
+         - \`code-assistant/app/app_utils/a2a.py\`: In \`user_id_meta_provider\`, return \`{"user_id": ctx.user_id}\`.
+         - \`salesforce-agent/scripts/create_memory_bank.py\`: List \`client.agent_engines.list()\`, reuse any engine whose \`getattr(ae.api_resource, "display_name", "") == DISPLAY_NAME\`, else \`ae = client.agent_engines.create(config={"display_name": DISPLAY_NAME})\`, extract \`mb_id = ae.api_resource.name.split("/")[-1]\`, and print \`mb_id\`.
     - **CRITICAL Dependency Version Compatibility for \`AdkApp\` on Agent Runtime**: Google Cloud Shell pre-installs \`google-cloud-aiplatform==1.165.1\` alongside an older \`google-adk==1.14.1\`. Because \`google-cloud-aiplatform>=1.165.1\` passes \`auto_create_session=True\` to \`google.adk.runners.Runner()\`, deploying with \`google-adk<1.30.0\` causes the ReasoningEngine container to crash at startup with \`TypeError: Runner.__init__() got an unexpected keyword argument 'auto_create_session'\`. Always upgrade BOTH packages (\`pip install --upgrade "google-cloud-aiplatform[agent_engines,adk]" "google-adk>=1.30.0" cloudpickle pydantic\`) before calling \`agent_engines.create(...)\` and pin the exact upgraded versions in \`requirements=[...]\`.
     - In \`config\` passed to \`client.agent_engines.create(agent=..., config=config)\`, \`"identity_type"\` MUST be the enum \`types.IdentityType.AGENT_IDENTITY\` (NEVER a list \`[types.IdentityType.AGENT_IDENTITY]\`). Many starter \`deploy.py\` files use bracketed placeholders like \`"identity_type": [IDENTITY_TYPE]\` — always replace the entire \`[IDENTITY_TYPE]\` including its brackets with \`types.IdentityType.AGENT_IDENTITY\`.
     - \`ae.api_resource\` returned by \`client.agent_engines.list()\` is a Pydantic v2 \`BaseModel\` (\`ae.api_resource.model_dump()\`), NOT a protobuf message (never call \`google.protobuf.json_format.MessageToDict(ae.api_resource)\`).
@@ -5075,42 +5103,6 @@ ${combinedText}
     return false;
   };
 
-  const extractJsonStringField = (text: string, fieldName: string): string | undefined => {
-    const keyIdx = text.indexOf(`"${fieldName}"`);
-    if (keyIdx === -1) return undefined;
-    const colonIdx = text.indexOf(':', keyIdx + fieldName.length + 2);
-    if (colonIdx === -1) return undefined;
-    const quoteIdx = text.indexOf('"', colonIdx + 1);
-    if (quoteIdx === -1) return undefined;
-    let rawChars = '';
-    let i = quoteIdx + 1;
-    let closedQuote = false;
-    while (i < text.length) {
-      const ch = text[i];
-      if (ch === '\\') {
-        rawChars += text.slice(i, i + 2);
-        i += 2;
-      } else if (ch === '"') {
-        closedQuote = true;
-        break;
-      } else {
-        rawChars += ch;
-        i += 1;
-      }
-    }
-    if (!rawChars || !closedQuote) return undefined;
-    try {
-      return JSON.parse(`"${rawChars}"`);
-    } catch {
-      return rawChars
-        .replace(/\\n/g, '\n')
-        .replace(/\\r/g, '\r')
-        .replace(/\\t/g, '\t')
-        .replace(/\\"/g, '"')
-        .replace(/\\\\/g, '\\');
-    }
-  };
-
   const parseSynthesisResponse = (rawText: string): { script?: string; summary?: string } | null => {
     const cleaned = (rawText || '')
       .replace(/^```(?:json)?\s*/i, '')
@@ -5146,8 +5138,10 @@ ${combinedText}
         const parsedOpus = parseSynthesisResponse(opusText);
         if (parsedOpus?.script && typeof parsedOpus.script === 'string' && parsedOpus.script.trim()) {
           return {
-            script: transformAgyLaunchCommand(
-              interpolateLabVariables(parsedOpus.script.trim(), credentials)
+            script: sanitizeSynthesizedShellScript(
+              transformAgyLaunchCommand(
+                interpolateLabVariables(parsedOpus.script.trim(), credentials)
+              )
             ),
             summary:
               parsedOpus.summary || `Synthesized Cloud Shell automation for Task #${task.number}`,
@@ -5200,8 +5194,10 @@ ${combinedText}
           const parsed = parseSynthesisResponse(response.text || '');
           if (parsed?.script && typeof parsed.script === 'string' && parsed.script.trim()) {
             return {
-              script: transformAgyLaunchCommand(
-                interpolateLabVariables(parsed.script.trim(), credentials)
+              script: sanitizeSynthesizedShellScript(
+                transformAgyLaunchCommand(
+                  interpolateLabVariables(parsed.script.trim(), credentials)
+                )
               ),
               summary:
                 parsed.summary || `Synthesized Cloud Shell automation for Task #${task.number}`,
@@ -5256,8 +5252,10 @@ ${combinedText}
                 const parsed = parseSynthesisResponse(text);
                 if (parsed?.script && typeof parsed.script === 'string' && parsed.script.trim()) {
                   return {
-                    script: transformAgyLaunchCommand(
-                      interpolateLabVariables(parsed.script.trim(), credentials)
+                    script: sanitizeSynthesizedShellScript(
+                      transformAgyLaunchCommand(
+                        interpolateLabVariables(parsed.script.trim(), credentials)
+                      )
                     ),
                     summary:
                       parsed.summary || `Synthesized Cloud Shell automation for Task #${task.number}`,
@@ -5936,5 +5934,89 @@ Return ONLY valid JSON matching:
   };
 }
 
+export function extractJsonStringField(text: string, fieldName: string): string | undefined {
+  const keyIdx = text.indexOf(`"${fieldName}"`);
+  if (keyIdx === -1) return undefined;
+  const colonIdx = text.indexOf(':', keyIdx + fieldName.length + 2);
+  if (colonIdx === -1) return undefined;
+  const quoteIdx = text.indexOf('"', colonIdx + 1);
+  if (quoteIdx === -1) return undefined;
+  let rawChars = '';
+  let i = quoteIdx + 1;
+  let closedQuote = false;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '\\') {
+      rawChars += text.slice(i, i + 2);
+      i += 2;
+    } else if (ch === '"') {
+      closedQuote = true;
+      break;
+    } else {
+      rawChars += ch;
+      i += 1;
+    }
+  }
+  if (!rawChars || !closedQuote) return undefined;
+  try {
+    return JSON.parse(`"${rawChars}"`);
+  } catch {
+    try {
+      const repairedJsonChars = rawChars.replace(
+        /\\(\\|["\\/bfnrt]|u[0-9a-fA-F]{4}|.)/g,
+        (m, esc) => {
+          if (
+            esc === '\\' ||
+            esc === '"' ||
+            esc === '/' ||
+            esc === 'b' ||
+            esc === 'f' ||
+            esc === 'n' ||
+            esc === 'r' ||
+            esc === 't' ||
+            /^u[0-9a-fA-F]{4}$/.test(esc)
+          ) {
+            return m;
+          }
+          return '\\\\' + esc;
+        }
+      );
+      return JSON.parse(`"${repairedJsonChars}"`);
+    } catch {
+      return rawChars.replace(/\\(\\|["/bfnrt]|u[0-9a-fA-F]{4}|.)/g, (_m, esc) => {
+        switch (esc) {
+          case '\\':
+            return '\\';
+          case '"':
+            return '"';
+          case '/':
+            return '/';
+          case 'b':
+            return '\b';
+          case 'f':
+            return '\f';
+          case 'n':
+            return '\n';
+          case 'r':
+            return '\r';
+          case 't':
+            return '\t';
+          default:
+            if (esc.startsWith('u') && esc.length === 5) {
+              return String.fromCharCode(parseInt(esc.slice(1), 16));
+            }
+            return '\\' + esc;
+        }
+      });
+    }
+  }
+}
 
-
+export function sanitizeSynthesizedShellScript(rawScript: string): string {
+  return rawScript
+    .replace(/\bgcloud\s+config\s+set\s+aiplatform\/region\b/g, 'gcloud config set ai/region')
+    .replace(
+      /^[ \t]*gcloud\s+auth\s+(?:application-default\s+)?login\b[^\n]*$/gm,
+      '# [skills-runner] gcloud & ADC credentials are pre-provisioned non-interactively'
+    );
+}

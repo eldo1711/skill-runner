@@ -2460,10 +2460,36 @@ end tell
   return checkStudentGcloudAuth(username, projectId);
 }
 
+async function extractAuthorizedUserAdcB64(configDir) {
+  if (!configDir) return '';
+  try {
+    const dbPath = path.join(configDir, 'credentials.db');
+    if (fs.existsSync(dbPath)) {
+      const { stdout } = await execFileAsync(
+        'sqlite3',
+        [dbPath, 'SELECT value FROM credentials LIMIT 1;'],
+        { timeout: 4000 }
+      );
+      if (stdout && stdout.trim().startsWith('{')) {
+        const adcFile = path.join(configDir, 'application_default_credentials.json');
+        try {
+          fs.writeFileSync(adcFile, stdout.trim(), { mode: 0o600 });
+        } catch {}
+        return Buffer.from(stdout.trim(), 'utf8').toString('base64');
+      }
+    }
+  } catch {
+    // Ignore sqlite3 extraction error
+  }
+  return '';
+}
+
 async function execInLocalStudentWorkspace(authStatus, projectId, command, timeoutMs = 180000) {
   const safeProj = String(projectId || 'default').replace(/[^a-zA-Z0-9_.-]/g, '_');
   const workspaceDir = path.join(SNAPSHOT_DIR, 'workspaces', safeProj);
   fs.mkdirSync(workspaceDir, { recursive: true });
+  await extractAuthorizedUserAdcB64(authStatus.configDir);
+  const adcFile = path.join(authStatus.configDir, 'application_default_credentials.json');
 
   const defaultCertFile = fs.existsSync('/etc/ssl/cert.pem') ? '/etc/ssl/cert.pem' : '';
   const env = {
@@ -2478,6 +2504,7 @@ async function execInLocalStudentWorkspace(authStatus, projectId, command, timeo
     DEVSHELL_PROJECT_ID: projectId || '',
     CLOUDSDK_CORE_PROJECT: projectId || '',
     DRIVE_ACCESS_TOKEN: authStatus.accessToken || '',
+    ...(fs.existsSync(adcFile) ? { GOOGLE_APPLICATION_CREDENTIALS: adcFile } : {}),
     PATH: `${SSH_BIN_DIR}:${process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'}`,
   };
 
@@ -2522,13 +2549,17 @@ async function execInStudentCloudShell(username, projectId, command, timeoutMs =
   }
 
   try {
+    const adcB64 = await extractAuthorizedUserAdcB64(authStatus.configDir);
     const driveExport = authStatus.accessToken
       ? `export DRIVE_ACCESS_TOKEN="${authStatus.accessToken}"; `
       : '';
     const projExport = projectId
       ? `export GOOGLE_CLOUD_PROJECT="${projectId}"; export DEVSHELL_PROJECT_ID="${projectId}"; export CLOUDSDK_CORE_PROJECT="${projectId}"; gcloud config set project "${projectId}" --quiet >/dev/null 2>&1 || true; `
       : '';
-    const envPrefix = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1; export PYTHONUNBUFFERED=1; ${projExport}${driveExport}`;
+    const adcExport = adcB64
+      ? `mkdir -p "$HOME/.config/gcloud"; echo "${adcB64}" | base64 -d > "$HOME/.config/gcloud/application_default_credentials.json" 2>/dev/null || true; chmod 600 "$HOME/.config/gcloud/application_default_credentials.json" 2>/dev/null || true; export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/application_default_credentials.json"; `
+      : '';
+    const envPrefix = `export CLOUDSDK_CORE_DISABLE_PROMPTS=1; export PYTHONUNBUFFERED=1; ${projExport}${driveExport}${adcExport}`;
     const fullScript = `${envPrefix}\n${command}`;
     const b64Script = Buffer.from(fullScript, 'utf8').toString('base64');
     const remoteCmd = `echo ${b64Script} | base64 -d > /tmp/ql_cmd_$$.sh && bash /tmp/ql_cmd_$$.sh < /dev/null; _ec=$?; rm -f /tmp/ql_cmd_$$.sh; exit $_ec`;

@@ -263,6 +263,58 @@ api_call("PATCH", f"{wc_url}?updateMask=uiSettings", {
     ],
     tags: ['quiz-mastery', 'gemini-enterprise', 'grounding', 'security', 'partner-skills'],
   },
+  {
+    id: 'lab-fde-build-enterprise-agents-apex012',
+    timestamp: '2026-10-12T16:45:00.000Z',
+    stream: 'lab_execution',
+    courseOrLabTitle: '[FDE] Build Enterprise Agents (APEX012)',
+    moduleOrTaskTitle:
+      'Multi-Agent Enterprise Architecture: ADK 2.0 Workflow Graph, A2A v1.0/v0.3 Interop, GKE Vector Search, MCP Toolsets & Vertex AI Memory Bank',
+    sourceUrl: 'https://explore.qwiklabs.com/classrooms/21414/labs/115585',
+    summary:
+      'End-to-end architecture and verified implementation recipes for building, deploying, and orchestrating heterogeneous enterprise agents across Cloud Run, GKE Autopilot, Vertex AI Agent Runtime, and Gemini Enterprise.',
+    conceptsAndCapabilities: [
+      'A2A Protocol Interoperability: ADK 2.0 agents expose A2A v1.0 (`protocol_version="1.0"`, requiring `RemoteA2aAgent(..., use_legacy=False)`), whereas LangGraph agents using `a2a-sdk` default to A2A v0.3 unless `AgentCard.additional_interfaces` advertises both `1.0` and `0.3` and `CleanQueryRemoteA2aAgent` strips context prefixes.',
+      'ADK 2.0 Parallel Graph Orchestration (`Workflow` + `JoinNode`): Fan-out from an intake node (`edges=[("intake", ("github_agent", "stackexchange_agent", "bq_agent"))]`) requires a `JoinNode(name="merge")` before downstream synthesis so the synthesizer receives all parallel specialist outputs in `ctx.state` via `after_agent_callback=capture_response_to_state(...)`.',
+      'Cross-Runtime Authentication (`GoogleADCAuth`): When a root orchestrator on Vertex AI Agent Runtime invokes private Cloud Run specialists, an `httpx.Auth` subclass (`GoogleADCAuth`) must mint target-audience OIDC ID tokens (`id_token.fetch_id_token(Request(), audience=origin)`) on every request.',
+      'External GKE LoadBalancer for A2A Discovery: `agents-cli create bq-agent -a adk -d gke` scaffolds `service.tf` with `"cloud.google.com/load-balancer-type" = "Internal"`. Removing that annotation provisions an external LoadBalancer IP so Vertex AI Agent Runtime can fetch `http://<EXTERNAL_IP>:8080/a2a/app/.well-known/agent-card.json`.',
+      'User-Scoped Memory Isolation in Vertex AI Memory Bank: `PreloadMemoryTool()` retrieves user memories at turn start and `generate_memories_callback` persists memories via `agent_engines.memories.generate(...)` at turn end, while `_user_scoped_request_converter` and `user_id_meta_provider` propagate `user_id` across A2A boundaries.',
+    ],
+    agentRulesAndTakeaways: [
+      'Preserve existing non-placeholder secrets (`GITHUB_PERSONAL_ACCESS_TOKEN`, `SALESFORCE_CLIENT_ID`, `SALESFORCE_CLIENT_SECRET`, `SALESFORCE_DOMAIN`) in `.env` files before appending or updating deployment URLs.',
+      'Prioritize `.env` files and `TODO`-containing source files during workspace inspection so large Terraform/reference trees do not crowd out the actual code files requiring edits.',
+      'Provision `~/.config/gcloud/application_default_credentials.json` from `credentials.db` in non-interactive Cloud Shell SSH sessions so `google.auth.default()` and `agents-cli publish gemini-enterprise` succeed without interactive login.',
+    ],
+    labRecipe: {
+      servicesUsed: [
+        'agents-cli (agent-starter-pack)',
+        'Google ADK 2.0 (Workflow, JoinNode, RemoteA2aAgent, McpToolset)',
+        'LangGraph (StateGraph + A2A Starlette)',
+        'GKE Autopilot + BigQuery VECTOR_SEARCH (text-embedding-004)',
+        'Cloud Run',
+        'Vertex AI Agent Runtime & Memory Bank',
+        'Gemini Enterprise (Discovery Engine)',
+      ],
+      verifiedScriptSummary:
+        'Implements GitHub MCP specialist (`McpToolset` + `StreamableHTTPConnectionParams`), Stack Exchange LangGraph specialist (`StateGraph` + dual `1.0`/`0.3` `AgentInterface`), GKE BigQuery specialist (`find_similar_bugs` with `VECTOR_SEARCH` and external LoadBalancer `service.tf`), ADK 2.0 `Workflow` root orchestrator with `JoinNode` and `GoogleADCAuth`, Salesforce 2-legged OAuth specialist, and `VertexAiMemoryBankService` integration.',
+      selfHealingDelta:
+        'Fixed sequential JSON string unescaping (`\\\\n` -> `\\<NEWLINE>`) with single-pass regex token unescaping, added `gcloud config set aiplatform/region` -> `ai/region` sanitization, sorted `.env` and `TODO` files to top priority in workspace snapshots, and patched `service.tf` to expose an external GKE LoadBalancer IP.',
+      attemptsRequired: 1,
+    },
+    tags: [
+      'apex012',
+      'fde',
+      'enterprise-agents',
+      'adk',
+      'a2a',
+      'langgraph',
+      'gke',
+      'bigquery-vector-search',
+      'mcp',
+      'memory-bank',
+      'gemini-enterprise',
+    ],
+  },
 ];
 
 export const AGENT_LEARNINGS: AgentLearningEntry[] = [
@@ -431,6 +483,35 @@ export const AGENT_LEARNINGS: AgentLearningEntry[] = [
       '`server/labParser.ts` scopes `antigravity` classification to explicit Antigravity/Cloud Editor signals and extracts conversational prompts for Discovery Engine / Vertex AI agent synthesis.',
     tags: ['lab-parser', 'surface-classification', 'plaintext-prompts', 'agents'],
   },
+  {
+    id: 'L-012',
+    date: '2026-10-12',
+    category: 'Self-Healing & Grader Verification',
+    title:
+      'Single-Pass JSON Escape Unescaping, gcloud Property Sanitization, TODO-Priority Workspace Snapshots & Non-Interactive ADC Provisioning',
+    symptom:
+      'In `[FDE] Build Enterprise Agents` (APEX012) Task 2, Attempt 1 failed with a Python `SyntaxError: unterminated string literal` because `\\\\n` inside a synthesized Python regex was turned into `\\<NEWLINE>`; Attempt 2 failed with `ERROR: (gcloud.config.set) Section [aiplatform] has no property [region]`; and `inspectStudentCloudShellWorkspace` exhausted its 55KB snapshot budget on `code-assistant/deployment/terraform/*` before reaching `github-agent/app/agent.py`.',
+    rootCause:
+      '1. Sequential `.replace(/\\\\n/g, "\\n").replace(/\\\\\\\\/g, "\\\\")` in `extractJsonStringField` matches the second `\\` + `n` inside `\\\\n` first, corrupting escaped backslashes into literal newlines whenever `JSON.parse` falls back on unescaped regex escapes in LLM output.\n' +
+      '2. LLMs frequently hallucinate `gcloud config set aiplatform/region` instead of the valid `gcloud config set ai/region`, which immediately aborts `set -euo pipefail` scripts.\n' +
+      '3. Alphabetical directory traversal in multi-agent repos visits `code-assistant/deployment/terraform/*` before `github-agent/app/agent.py`, starving downstream agents of the exact `# TODO` stubs they need to edit.\n' +
+      '4. Fresh Cloud Shell SSH sessions have user credentials in `~/.config/gcloud/credentials.db` (`authorized_user` JSON) but no `~/.config/gcloud/application_default_credentials.json`, causing `google.auth.default()` and `agents-cli publish gemini-enterprise` to fail unless ADC is materialized.',
+    generalPrinciple:
+      '1. Never chain `.replace(/\\\\n/g, ...)` before `.replace(/\\\\\\\\/g, ...)` when unescaping JSON strings; repair invalid JSON escapes before `JSON.parse` and use a single-pass regex `/\\\\(u[0-9a-fA-F]{4}|.)/g` in any fallback parser.\n' +
+      '2. Sanitize known CLI property hallucinations (`aiplatform/region` -> `ai/region`) and strip interactive `gcloud auth login` commands before executing under `set -euo pipefail`.\n' +
+      '3. Sort workspace file snapshots by actionable signal: Priority 0 (`.env`), Priority 1 (files containing `TODO`), Priority 2 (`app/*.py`, `scripts/*.py`), Priority 3 (`pyproject.toml`), and Priority 4 (`deployment/terraform/*`, `tests/*`).\n' +
+      '4. Automatically extract `authorized_user` JSON from `credentials.db` into `~/.config/gcloud/application_default_credentials.json` and export `GOOGLE_APPLICATION_CREDENTIALS` in non-interactive Cloud Shell sessions.',
+    implementationInSkillsRunner:
+      '`server/geminiClient.ts` (`extractJsonStringField`, `sanitizeSynthesizedShellScript`, Rule 11), `server/nativeChromeBridge.ts` (`inspectStudentCloudShellWorkspace`, `execInStudentCloudShellBridge`), and `server/macBridgeAgent.ts` (`extractAuthorizedUserAdcB64`).',
+    tags: [
+      'json-unescaping',
+      'gcloud-config',
+      'workspace-inspection',
+      'adc-credentials',
+      'agents-cli',
+      'apex012',
+    ],
+  },
 ];
 
 export function renderAgentLearningsMarkdown(
@@ -460,7 +541,7 @@ export function renderAgentLearningsMarkdown(
     '> 1. **Course Curriculum & Domain Learnings** (`course_content`) — Core concepts, product capabilities, and architectures taught in courses.',
     '> 2. **Verified Quiz & Knowledge Check Bank** (`quiz_mastery`) — Verified questions, winning answers, eliminated distractors, and domain rules.',
     '> 3. **Verified Hands-On Lab Recipes & Self-Healing Deltas** (`lab_execution`) — Exact API/CLI/SDK implementations that passed Qwiklabs graders and how earlier attempt errors were resolved.',
-    '> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-011`) — Reusable patterns for building reliable autonomous agents.',
+    '> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-012`) — Reusable patterns for building reliable autonomous agents.',
     '',
     '---',
     '',
@@ -590,7 +671,7 @@ export function renderAgentLearningsMarkdown(
   }
 
   lines.push(
-    '## 4. Core Agent Engineering & Infrastructure Invariants (`L-001`..`L-011`)',
+    '## 4. Core Agent Engineering & Infrastructure Invariants (`L-001`..`L-012`)',
     '',
     '| ID | Date | Category | Title | Key Tags |',
     '| :--- | :--- | :--- | :--- | :--- |'
