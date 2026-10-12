@@ -49,6 +49,207 @@
 
 ## 3. Verified Hands-On Lab Recipes & Self-Healing Deltas (`lab_execution`)
 
+### 🧪 [FDE] Build Enterprise Agents — Task 5: Task 5. Orchestrate the specialists in a graph workflow
+- **Recorded**: 2026-10-12T17:32:52.727Z
+- **Source URL**: https://explore.qwiklabs.com/classrooms/21414/labs/115585
+- **Services Used**: `aiplatform.googleapis.com`, `run.googleapis.com`, `container.googleapis.com`, `discoveryengine.googleapis.com`, `developerknowledge.googleapis.com`, `iamcredentials.googleapis.com`
+- **Attempts Required**: 4
+
+**What This Lab Teaches**: Task 5 was solved with a non-interactive bash script that resolved the specialist A2A agent URLs from earlier deployments, wrote ~/agents/code-assistant/.env, used a heredoc Python patcher to complete callbacks.py, auth.py and the agent.py graph workflow, and published the using-developer-knowledge-mcp skill to the Skill Registry, which the grader checked.
+
+#### Architectural & Technical Concepts
+- An ADK 2.0 Workflow graph fans out in parallel to RemoteA2aAgent specialist nodes, a merge node joins their results, and an LlmAgent synthesizer produces one cited answer.
+- RemoteA2aAgent has no output_key, so an after_agent_callback (capture_response_to_state) copies the last text reply authored by the agent into callback_context.state[state_key]. The synthesizer then reads it with {state_key?}.
+- A custom httpx.Auth (GoogleADCAuth) attaches Google ADC OAuth2 bearer tokens via creds.before_request(auth_request, method, url, headers). This authenticates A2A calls to the Agent Runtime (Reasoning Engine) github_agent.
+- Specialists are discovered across runtimes by agent-card URL: Agent Runtime (reasoningEngines .../api/a2a/app/.well-known/agent-card.json), Cloud Run (status.url + /.well-known/agent-card.json) and a GKE LoadBalancer (http://IP:8080/a2a/app/.well-known/agent-card.json).
+
+#### Reusable Agent Rules
+- Never embed multi-line regex patterns inline in bash, for example via python -c or partial heredocs. Write the patcher with cat << 'EOF' > /tmp/patch.py (quoted delimiter) and run it as a file. Unterminated string literals in regex patterns caused the earlier failures.
+- Implement _apply with: headers = dict(request.headers); self._creds.before_request(self._auth_req, request.method, str(request.url), headers); request.headers.update(headers).
+- For github_agent, use RemoteA2aAgent(name=..., agent_card=GITHUB_AGENT_URL, httpx_client=google_authed_client(), use_legacy=False, after_agent_callback=capture_response_to_state('github_findings')). Non-ADK specialists such as stackexchange keep the default legacy mode.
+- The grader for this step checked that the using-developer-knowledge-mcp skill was published to the Skill Registry (SKILL_REGISTRY_LOCATION=us-central1), not only the code patches. Always include the publish step, and make URL discovery idempotent with || true fallbacks to ~/.bashrc exports.
+
+#### Verified Grader-Passing Implementation
+- **Recipe Summary**: The passing script ran in five steps. (1) It discovered GITHUB_AGENT_URL with `gcloud ai reasoning-engines list --region=us-central1`, STACKEXCHANGE_AGENT_URL with `gcloud run services describe stackexchange-agent`, and BQ_AGENT_URL with `gcloud container clusters get-credentials` plus `kubectl get svc bq-agent -n bq-agent`, falling back to ~/.bashrc exports. (2) It wrote .env with the project, GOOGLE_CLOUD_LOCATION=global, GOOGLE_GENAI_USE_VERTEXAI=True, MODEL, DATASTORE_ID, DEVELOPER_KNOWLEDGE_MCP_URL, SKILL_REGISTRY_LOCATION and the specialist URLs (SALESFORCE_AGENT_URL as a placeholder). (3) It ran a file-based Python patcher. In callbacks.py, the patcher iterates reversed(session.events) for author==agent_name, joins the text parts and stores them in state[state_key]. In auth.py, it adds the before_request header injection. In agent.py, it defines the github, stackexchange and bq RemoteA2aAgents with capture callbacks and wires the Workflow edges query_extractor -> parallel specialists plus manual_search_agent -> merge -> synthesizer. (4) It tested locally. (5) It published the using-developer-knowledge-mcp skill to the Skill Registry.
+- **Self-Healing Delta**: Three earlier attempts failed. Two died on Python SyntaxErrors (unterminated string literal) from regex patterns containing newlines that were split across shell-quoted inline Python. The third was cut off during URL discovery before patching ran. All three left the Skill Registry publish step undone. The fix was to move all patching into a quoted-heredoc file script using re.DOTALL with lookahead patterns and safe append fallbacks, and to make the skill publish explicit.
+
+```python
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+PROJECT_ID="${GOOGLE_CLOUD_PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
+REGION="us-central1"
+
+echo "=================================================="
+echo "Task 5: Orchestrate specialists in graph workflow"
+echo "Project: ${PROJECT_ID}, Region: ${REGION}"
+echo "=================================================="
+
+# 1. Resolve specialist URLs from previous deployments if not currently in environment
+if [ -z "${GITHUB_AGENT_URL:-}" ]; then
+  GITHUB_RE_ID=$(gcloud ai reasoning-engines list --region="${REGION}" --project="${PROJECT_ID}" --format="value(name)" 2>/dev/null | head -n1 || true)
+  if [ -n "${GITHUB_RE_ID}" ]; then
+    GITHUB_AGENT_URL="https://${REGION}-aiplatform.googleapis.com/reasoningEngines/v1/${GITHUB_RE_ID}/api/a2a/app/.well-known/agent-card.json"
+  fi
+fi
+
+if [ -z "${STACKEXCHANGE_AGENT_URL:-}" ]; then
+  SE_URL=$(gcloud run services describe stackexchange-agent --region="${REGION}" --project="${PROJECT_ID}" --format="value(status.url)" 2>/dev/null || true)
+  if [ -n "${SE_URL}" ]; then
+    STACKEXCHANGE_AGENT_URL="${SE_URL}/.well-known/agent-card.json"
+  fi
+fi
+
+if [ -z "${BQ_AG
+```
+
+---
+
+### 🧪 [FDE] Build Enterprise Agents — Task 4: Task 4. Generate the Bug DB agent with Antigravity and deploy to GKE
+- **Recorded**: 2026-10-12T17:25:09.070Z
+- **Source URL**: https://explore.qwiklabs.com/classrooms/21414/labs/115585
+- **Services Used**: `container.googleapis.com`, `artifactregistry.googleapis.com`, `cloudbuild.googleapis.com`, `bigquery.googleapis.com`, `aiplatform.googleapis.com`, `iam.googleapis.com`
+- **Attempts Required**: 2
+
+**What This Lab Teaches**: Scaffolded the bq-agent ADK project non-interactively with agents-cli (adk template, GKE target), replaced its tools with a BigQuery VECTOR_SEARCH tool that embeds queries with text-embedding-004, and removed the internal LoadBalancer annotation from the Terraform. It then deployed the agent to GKE and created the bq-agent-app service account with BigQuery and Workload Identity bindings, which satisfied the grader's service-account check.
+
+#### Architectural & Technical Concepts
+- Semantic incident search: the user's error is embedded with the same model (text-embedding-004, 768 dimensions) used to seed the table, and BigQuery VECTOR_SEARCH with COSINE distance and top_k returns the nearest past incidents.
+- Generating an ADK agent from a specification: agents-cli create plus scaffold enhance produce Dockerfile, Terraform and deploy assets, so a precise prompt or script can stand in for interactive Antigravity vibecoding.
+- GKE as a third A2A runtime, provisioned by Terraform, using Workload Identity so the Kubernetes service account acts as a Google service account (bq-agent-app) with BigQuery and Vertex AI access.
+- Exposing the service through an external LoadBalancer so the root agent can reach the A2A card from outside the cluster.
+
+#### Reusable Agent Rules
+- Scaffold non-interactively with: agents-cli create bq-agent -a adk -d gke --region us-central1 --cicd-runner skip --session-type in_memory -y -s. Then run agents-cli scaffold enhance if no Dockerfile exists.
+- Delete the Cloud Shell stub at /usr/local/bin/terraform, then apt-install the real HashiCorp terraform before deploying.
+- Patch .tf files line by line in a quoted heredoc Python script (for example, drop every line containing cloud.google.com/load-balancer-type). Do not use complex inline regex in python - <<stdin, which caused an unterminated-string SyntaxError.
+- The grader checks for a service account named bq-agent-app. Create it if missing and grant it roles/bigquery.dataViewer, roles/bigquery.jobUser and roles/aiplatform.user. Also bind roles/iam.workloadIdentityUser for serviceAccount:PROJECT.svc.id.goog[NAMESPACE/KSA] and annotate the Kubernetes service account.
+
+#### Verified Grader-Passing Implementation
+- **Recipe Summary**: The winning script runs these steps in order:
+1. Sets the project and region, and sets ai/region in gcloud config.
+2. Swaps the terraform stub for the real binary.
+3. Enables the container, artifactregistry, cloudbuild, bigquery and aiplatform APIs.
+4. Scaffolds ~/agents/bq-agent via agents-cli create (adk, gke) and runs scaffold enhance.
+5. Strips the internal load-balancer-type annotation from the Terraform so the Service becomes an external LoadBalancer.
+6. Writes app/tools.py. Its find_similar_bugs function embeds the query with genai embed_content(model='text-embedding-004'), falling back to vertexai TextEmbeddingModel. It runs a parameterized VECTOR_SEARCH over code_assist_bugs.known_bugs.description_embedding with top_k=3 and COSINE distance, and returns bug_id, title, description, resolution and distance.
+7. Writes app/agent.py: an ADK Agent named bq_agent on gemini-2.5-flash, instructed to cite bug_ids and never invent incidents.
+8. Deploys to GKE with agents-cli/Terraform.
+9. Creates the bq-agent-app service account with BigQuery job/data roles, Vertex AI user, and Workload Identity bindings.
+- **Self-Healing Delta**: The first attempt failed on two counts. The grader reported 'Unknown service account' because the bq-agent-app Google service account did not exist, and an inline Python regex patch crashed with a SyntaxError. The fix was to write the patch script to a file through a quoted heredoc that uses simple line filtering, and to explicitly create bq-agent-app with BigQuery and Workload Identity IAM bindings. The external LoadBalancer patch ensured the deployed agent was reachable.
+
+```python
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+export PROJECT_ID="${GOOGLE_CLOUD_PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
+export REGION="us-central1"
+
+echo "=== [TASK 4] Configuring Environment ==="
+gcloud config set project "${PROJECT_ID}" --quiet
+gcloud config set compute/region "${REGION}" --quiet
+gcloud config set ai/region "${REGION}" --quiet
+
+# Ensure Cloud Shell's terraform stub script is removed
+if [ -f /usr/local/bin/terraform ]; then
+  sudo rm -f /usr/local/bin/terraform
+fi
+
+# Ensure terraform is installed
+if ! command -v terraform &>/dev/null; then
+  echo "Installing Terraform..."
+  sudo apt update && sudo apt install -y terraform
+fi
+terraform -version
+
+# Ensure required APIs are enabled
+gcloud services enable \
+  container.googleapis.com \
+  artifactregistry.googleapis.com \
+  cloudbuild.googleapis.com \
+  bigquery.googleapis.com \
+  aiplatform.googleapis.com \
+  --project="${PROJECT_ID}" --quiet || true
+
+mkdir -p ~/agents
+cd ~/agents
+
+# Scaffold bq-agent if missing
+if [ ! -d "bq-agent" ]; then
+  echo "Scaffolding bq-agent project..."
+  agents-cli create bq-agent -a adk -d gke --region "${REGION}" --cicd-runner skip --sessio
+```
+
+---
+
+### 🧪 [FDE] Build Enterprise Agents — Task 3: Task 3. Add a LangGraph specialist over A2A
+- **Recorded**: 2026-10-12T17:03:31.031Z
+- **Source URL**: https://explore.qwiklabs.com/classrooms/21414/labs/115585
+- **Services Used**: `run.googleapis.com`, `cloudbuild.googleapis.com`, `artifactregistry.googleapis.com`
+- **Attempts Required**: 2
+
+**What This Lab Teaches**: Patched the LangGraph StackExchange agent (search node wired START->search->END) and its a2a-sdk server (dual 1.0/0.3 JSONRPC AgentInterfaces), then built it with Cloud Build into Artifact Registry and deployed it to Cloud Run as stackexchange-agent, verified by fetching the public /.well-known/agent-card.json.
+
+#### Architectural & Technical Concepts
+- A2A interoperability: a non-ADK LangGraph graph exposed through an a2a-sdk server is consumed by an ADK orchestrator purely through its agent card.
+- Dual-version agent card: the a2a-sdk 1.x server advertises supported_interfaces for protocol_version 1.0 and 0.3 so ADK's pinned 0.3 client can still parse the endpoint.
+- A deterministic LangGraph node (plain-code Stack Exchange search, no LLM) used as an agent step in StateGraph with START/END edges.
+- Self-hosted A2A server on Cloud Run: container build via Cloud Build, Artifact Registry image, public HTTPS service, and a PUBLIC_URL env var so the card advertises a reachable URL.
+
+#### Reusable Agent Rules
+- The grader checks that Cloud Run service 'stackexchange-agent' exists in us-central1. Any failure before `gcloud run deploy` (for example a broken patch step) leaves the service missing and fails the check, so run code edits as a heredoc'd Python file (cat << 'EOF' > /tmp/patch.py) and validate them before building.
+- Do not embed regex literals containing escape sequences like [^\n] inside bash-piped `python3 - <<EOF` with interpolation. The newline escape got expanded and produced 'unterminated string literal'. Use a quoted heredoc delimiter ('EOF') written to a file.
+- Use this exact deploy sequence: `gcloud builds submit --tag ${REGION}-docker.pkg.dev/${PROJECT_ID}/agents/stackexchange-agent:latest`, then `gcloud run deploy stackexchange-agent --image ... --region us-central1 --allow-unauthenticated --port 8080 --quiet`, then `gcloud run services update --set-env-vars PUBLIC_URL=$(describe --format='value(status.url)')`.
+- For idempotency, enable run/cloudbuild/artifactregistry APIs and create the 'agents' Docker repo if missing before building. Derive PROJECT_ID from GOOGLE_CLOUD_PROJECT or gcloud config, and persist STACKEXCHANGE_AGENT_URL to ~/.bashrc for later tasks.
+
+#### Verified Grader-Passing Implementation
+- **Recipe Summary**: The passing bash script did the following:
+1. Set PROJECT_ID and REGION=us-central1.
+2. Enabled the Cloud Run, Cloud Build and Artifact Registry APIs, and ensured the 'agents' Docker repository exists.
+3. Wrote a Python patcher via a quoted heredoc.
+   - In agent.py it ensures START/END are imported from langgraph.graph and replaces the TODO with `graph.add_node("search", search)`, `add_edge(START, "search")` and `add_edge("search", END)`.
+   - In server.py it ensures AgentInterface is imported from a2a.types and replaces the empty supported_interfaces with two `AgentInterface(url=rpc_url, protocol_binding="JSONRPC", ...)` entries, one with protocol_version '1.0' and one with '0.3'.
+4. Built and pushed the image with `gcloud builds submit`.
+5. Deployed to Cloud Run with `--allow-unauthenticated --port 8080`.
+6. Read status.url and set the PUBLIC_URL env var on the service.
+7. Persisted STACKEXCHANGE_AGENT_URL to ~/.bashrc and curled the agent card to confirm the skill and both interfaces.
+- **Self-Healing Delta**: The first attempt crashed in the inline Python patch with a SyntaxError (unterminated regex string from [^\n] inside a bash heredoc), so build and deploy never ran and the grader reported the Cloud Run service did not exist. The fix was to write the patcher to /tmp via `cat << 'EOF'`, which disables shell expansion. The rewritten patcher also uses robust regex fallbacks for the TODO and supported_interfaces, plus pre-flight API enablement and repo creation so the deploy always completes.
+
+```python
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PROJECT_ID="${GOOGLE_CLOUD_PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
+export REGION="us-central1"
+gcloud config set project "${PROJECT_ID}"
+
+echo "==> Ensuring required services are enabled..."
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com --project="${PROJECT_ID}" --quiet
+
+echo "==> Ensuring Artifact Registry repository exists..."
+gcloud artifacts repositories describe agents --location="${REGION}" --project="${PROJECT_ID}" &>/dev/null || \
+gcloud artifacts repositories create agents --repository-format=docker --location="${REGION}" --description="Agents repository" --project="${PROJECT_ID}" --quiet || true
+
+echo "==> Patching agent.py and server.py..."
+cat << 'EOF' > /tmp/patch_stackexchange.py
+import os
+import re
+import sys
+
+agent_path = os.path.expanduser("~/agents/stackexchange-agent/app/agent.py")
+server_path = os.path.expanduser("~/agents/stackexchange-agent/app/server.py")
+
+if not os.path.exists(agent_path) or not os.path.exists(server_path):
+    print(f"Error: Starter files not found at {agent_path} or {server_path}")
+    sys.exit(1)
+
+with open(agent_path, "r"
+```
+
+---
+
 ### 🧪 [FDE] Build Enterprise Agents (APEX012) — Multi-Agent Enterprise Architecture: ADK 2.0 Workflow Graph, A2A v1.0/v0.3 Interop, GKE Vector Search, MCP Toolsets & Vertex AI Memory Bank
 - **Recorded**: 2026-10-12T16:45:00.000Z
 - **Source URL**: https://explore.qwiklabs.com/classrooms/21414/labs/115585
@@ -299,7 +500,7 @@ call("POST", f"https://us-discoveryengine.googleapis.com/v1alpha/{full_app_id}/a
 | **L-009** | 2026-10-09 | Course & Embedded Lab Orchestration | Detecting and Running Hands-On Labs Embedded Inside Multi-Module Courses | `course-mode`, `embedded-lab`, `mode-switching`, `dom-detection` |
 | **L-010** | 2026-10-08 | DOM, Shadow DOM & Quiz Grading | Idempotent Quiz Option Selection & Cross-Attempt Elimination Memory | `quiz`, `shadow-dom`, `rise-360`, `idempotency`, `self-healing` |
 | **L-011** | 2026-10-10 | Self-Healing & Grader Verification | Distinguishing Cloud API Chat Prompts from CLI Agent Prompts in Step Surface Classification | `lab-parser`, `surface-classification`, `plaintext-prompts`, `agents` |
-| **L-012** | 2026-10-12 | Self-Healing & Grader Verification | Single-Pass JSON Escape Unescaping, gcloud Property Sanitization, TODO-Priority Workspace Snapshots & Non-Interactive ADC Provisioning | `json-unescaping`, `gcloud-config`, `workspace-inspection`, `adc-credentials`, `agents-cli`, `apex012` |
+| **L-012** | 2026-10-12 | Self-Healing & Grader Verification | Single-Pass JSON Escape Unescaping, Single-Line Python String Newline Repair, gcloud Property Sanitization, .gcloudignore .venv Exclusion & TODO-Priority Workspace Snapshots | `json-unescaping`, `python-strings`, `gcloud-config`, `gcloudignore`, `workspace-inspection`, `adc-credentials`, `agents-cli`, `apex012` |
 
 ---
 
@@ -435,20 +636,23 @@ call("POST", f"https://us-discoveryengine.googleapis.com/v1alpha/{full_app_id}/a
 
 ---
 
-### L-012: Single-Pass JSON Escape Unescaping, gcloud Property Sanitization, TODO-Priority Workspace Snapshots & Non-Interactive ADC Provisioning
+### L-012: Single-Pass JSON Escape Unescaping, Single-Line Python String Newline Repair, gcloud Property Sanitization, .gcloudignore .venv Exclusion & TODO-Priority Workspace Snapshots
 - **Date Recorded**: 2026-10-12
 - **Category**: Self-Healing & Grader Verification
-- **Tags**: `json-unescaping`, `gcloud-config`, `workspace-inspection`, `adc-credentials`, `agents-cli`, `apex012`
+- **Tags**: `json-unescaping`, `python-strings`, `gcloud-config`, `gcloudignore`, `workspace-inspection`, `adc-credentials`, `agents-cli`, `apex012`
 
-1. **Observed Symptom / Failure Mode**: In `[FDE] Build Enterprise Agents` (APEX012) Task 2, Attempt 1 failed with a Python `SyntaxError: unterminated string literal` because `\\n` inside a synthesized Python regex was turned into `\<NEWLINE>`; Attempt 2 failed with `ERROR: (gcloud.config.set) Section [aiplatform] has no property [region]`; and `inspectStudentCloudShellWorkspace` exhausted its 55KB snapshot budget on `code-assistant/deployment/terraform/*` before reaching `github-agent/app/agent.py`.
-2. **Root Cause (Why Agents Fail Here)**: 1. Sequential `.replace(/\\n/g, "\n").replace(/\\\\/g, "\\")` in `extractJsonStringField` matches the second `\` + `n` inside `\\n` first, corrupting escaped backslashes into literal newlines whenever `JSON.parse` falls back on unescaped regex escapes in LLM output.
+1. **Observed Symptom / Failure Mode**: In `[FDE] Build Enterprise Agents` (APEX012), Task 2 Attempt 1 failed with `SyntaxError: unterminated string literal` because `\\n` inside a synthesized Python regex was turned into `\<NEWLINE>`; Task 5 Attempts 3–4 had `r'def ...(?=
+'` and `"\n".join(...)` split across lines by `JSON.parse`; Task 2 Attempt 2 failed with `ERROR: (gcloud.config.set) Section [aiplatform] has no property [region]`; `gcloud builds submit` archived 23,787 `.venv` files (734 MiB); and `inspectStudentCloudShellWorkspace` exhausted its 55KB snapshot budget on `code-assistant/deployment/terraform/*` before reaching `github-agent/app/agent.py`.
+2. **Root Cause (Why Agents Fail Here)**: 1. Sequential `.replace(/\\n/g, "\n").replace(/\\\\/g, "\\")` in `extractJsonStringField` matches the second `\` + `n` inside `\\n` first, corrupting escaped backslashes into literal newlines whenever `JSON.parse` falls back on unescaped regex escapes in LLM output. Additionally, even when `JSON.parse` succeeds, if the LLM writes a single backslash `\n` inside a single-line Python string or regex (`"\n".join(...)`, `r'...\n...'`, `[^\n]`), `JSON.parse` decodes it into a physical newline character (`0x0A`), which is always a `SyntaxError` in Python single-line strings.
 2. LLMs frequently hallucinate `gcloud config set aiplatform/region` instead of the valid `gcloud config set ai/region`, which immediately aborts `set -euo pipefail` scripts.
-3. Alphabetical directory traversal in multi-agent repos visits `code-assistant/deployment/terraform/*` before `github-agent/app/agent.py`, starving downstream agents of the exact `# TODO` stubs they need to edit.
-4. Fresh Cloud Shell SSH sessions have user credentials in `~/.config/gcloud/credentials.db` (`authorized_user` JSON) but no `~/.config/gcloud/application_default_credentials.json`, causing `google.auth.default()` and `agents-cli publish gemini-enterprise` to fail unless ADC is materialized.
-3. **General Principle for Building Better Agents**: 1. Never chain `.replace(/\\n/g, ...)` before `.replace(/\\\\/g, ...)` when unescaping JSON strings; repair invalid JSON escapes before `JSON.parse` and use a single-pass regex `/\\(u[0-9a-fA-F]{4}|.)/g` in any fallback parser.
+3. Running `uv sync` or `uv run pytest` creates a 734 MiB `.venv/` directory inside the agent folder; without `.gcloudignore` excluding `.venv/`, `gcloud builds submit` tars and uploads 23,787 files instead of 17 files (~600 KiB).
+4. Alphabetical directory traversal in multi-agent repos visits `code-assistant/deployment/terraform/*` before `github-agent/app/agent.py`, starving downstream agents of the exact `# TODO` stubs they need to edit.
+5. Fresh Cloud Shell SSH sessions have user credentials in `~/.config/gcloud/credentials.db` (`authorized_user` JSON) but no `~/.config/gcloud/application_default_credentials.json`, causing `google.auth.default()` and `agents-cli publish gemini-enterprise` to fail unless ADC is materialized.
+3. **General Principle for Building Better Agents**: 1. Never chain `.replace(/\\n/g, ...)` before `.replace(/\\\\/g, ...)` when unescaping JSON strings; use a single-pass regex `/\\(u[0-9a-fA-F]{4}|.)/g` in any fallback parser, and post-process decoded scripts in `sanitizeSynthesizedShellScript` to repair physical newlines inside single-line Python raw strings (`r'...'`, `r"..."`), character classes (`[^\n]`), and delimiter strings (`"\n".join(...)`).
 2. Sanitize known CLI property hallucinations (`aiplatform/region` -> `ai/region`) and strip interactive `gcloud auth login` commands before executing under `set -euo pipefail`.
-3. Sort workspace file snapshots by actionable signal: Priority 0 (`.env`), Priority 1 (files containing `TODO`), Priority 2 (`app/*.py`, `scripts/*.py`), Priority 3 (`pyproject.toml`), and Priority 4 (`deployment/terraform/*`, `tests/*`).
-4. Automatically extract `authorized_user` JSON from `credentials.db` into `~/.config/gcloud/application_default_credentials.json` and export `GOOGLE_APPLICATION_CREDENTIALS` in non-interactive Cloud Shell sessions.
+3. Always write `.gcloudignore` excluding `.venv/`, `__pycache__/`, `.pytest_cache/`, and `tests/` before running `gcloud builds submit` in Python `uv` projects.
+4. Sort workspace file snapshots by actionable signal: Priority 0 (`.env`), Priority 1 (files containing `TODO`), Priority 2 (`app/*.py`, `scripts/*.py`), Priority 3 (`pyproject.toml`), and Priority 4 (`deployment/terraform/*`, `tests/*`).
+5. Automatically extract `authorized_user` JSON from `credentials.db` into `~/.config/gcloud/application_default_credentials.json` and export `GOOGLE_APPLICATION_CREDENTIALS` in non-interactive Cloud Shell sessions.
 4. **Implementation in Skills Runner**: `server/geminiClient.ts` (`extractJsonStringField`, `sanitizeSynthesizedShellScript`, Rule 11), `server/nativeChromeBridge.ts` (`inspectStudentCloudShellWorkspace`, `execInStudentCloudShellBridge`), and `server/macBridgeAgent.ts` (`extractAuthorizedUserAdcB64`).
 
 ---
