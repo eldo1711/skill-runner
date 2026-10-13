@@ -1431,11 +1431,13 @@ async function runVerificationTests() {
     !mdLearnings.includes('APEX014') ||
     !mdLearnings.includes('a2a-agent-card') ||
     !mdLearnings.includes('L-015') ||
-    !mdLearnings.includes('roles/iap.egressor')
+    !mdLearnings.includes('roles/iap.egressor') ||
+    !mdLearnings.includes('L-016') ||
+    !mdLearnings.includes('flood-zone-flagging,monthly-tax-holding,neighboring-flood-risk')
   ) {
-    throw new Error('Expected L-012..L-015 and roles/iap.egressor in renderAgentLearningsMarkdown output.');
+    throw new Error('Expected L-012..L-016, roles/iap.egressor, and flood-zone-flagging,monthly-tax-holding,neighboring-flood-risk in renderAgentLearningsMarkdown output.');
   }
-  console.log('✓ L-012..L-015 sanitization, single-line string newline repair, Auth Provider & Agent Registry flag repair, caution-banner Check-my-progress disambiguation, and learnings verified.');
+  console.log('✓ L-012..L-016 sanitization, single-line string newline repair, Auth Provider & Agent Registry flag repair, caution-banner Check-my-progress disambiguation, and learnings verified.');
 
   await browser.close();
   console.log('✅ All verification tests passed!');

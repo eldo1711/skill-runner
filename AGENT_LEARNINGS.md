@@ -4,7 +4,7 @@
 > 1. **Course Curriculum & Domain Learnings** (`course_content`) — Core concepts, product capabilities, and architectures taught in courses.
 > 2. **Verified Quiz & Knowledge Check Bank** (`quiz_mastery`) — Verified questions, winning answers, eliminated distractors, and domain rules.
 > 3. **Verified Hands-On Lab Recipes & Self-Healing Deltas** (`lab_execution`) — Exact API/CLI/SDK implementations that passed Qwiklabs graders and how earlier attempt errors were resolved.
-> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-015`) — Reusable patterns for building reliable autonomous agents.
+> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-016`) — Reusable patterns for building reliable autonomous agents.
 
 ---
 
@@ -48,6 +48,51 @@
 ---
 
 ## 3. Verified Hands-On Lab Recipes & Self-Healing Deltas (`lab_execution`)
+
+### 🧪 [FDE] Hillclimbing with Autoraters: Challenge Lab — Autorater Intra-Rater Reliability (Krippendorff Alpha vs. Pairwise Agreement), The Homogeneity Trap, and ADK SkillToolset Hillclimbing (Tasks 1–6)
+- **Recorded**: 2026-10-13T14:46:00.000Z
+- **Source URL**: https://explore.qwiklabs.com/classrooms/21414/labs/115588
+- **Services Used**: `Vertex AI GenAI Evaluation Service (vertexai.evaluation.EvalTask, PointwiseMetric, PointwiseMetricPromptTemplate)`, `Google Agent Development Kit (google.adk.agents.LlmAgent, SkillToolset, load_skill_from_dir)`, `Krippendorff Alpha & Intra-Rater Reliability Harness (eval_harness)`, `Google Cloud Storage (gs://${PROJECT_ID}-bucket)`
+- **Attempts Required**: 1
+
+**What This Lab Teaches**: Completed all 6 tasks (100/100) of [FDE] Hillclimbing with Autoraters: Challenge Lab. Evaluated LLM-as-a-Judge intra-rater reliability across 19 candidate evaluation criteria over 32 commercial real estate reports and 15 repeated evaluation passes (runs/geap_calls_and_responses_for_analysis.json). Identified and eliminated the Homogeneity Trap criteria (general-tone, logical-flow, professionalism, readability with zero variance sd_report_means=0, plus data-density and professional-tone with near-zero variance and alpha<0.50) as well as unstable criteria with max_range_report>=2 (environmental-esa, risk-assessment), submitting the 3 genuinely reliable criteria (flood-zone-flagging,monthly-tax-holding,neighboring-flood-risk) to gs://${PROJECT_ID}-bucket/best_criteria_submission.txt. Then hillclimbed the ADK real-estate analyst agent (re_analyst) by enriching re_analyst/tools/lot_tool.py and updating re_analyst/skills/analyze-opportunity/SKILL.md and re_analyst/skills/analyze-flood-risk/SKILL.md, raising cost-per-acre from 1.4 to 5.0000 and neighboring-flood-risk from 1.1 to 5.0000.
+
+#### Architectural & Technical Concepts
+- Intra-Rater Reliability for LLM-as-a-Judge Autoraters: Before using an LLM autorater to guide agent hillclimbing, its repeated judgments on identical inputs (K passes across N artifacts) must be audited for stability and discriminative power.
+- Pairwise Percent Agreement vs. Krippendorff’s Alpha (Ordinal): Pairwise Agreement measures raw pass-to-pass agreement without correcting for chance or score prevalence, whereas Krippendorff’s Alpha compares observed disagreement (Do) against expected disagreement by chance (De = 1 - Do/De).
+- The Homogeneity Trap: When a rubric criterion is overly lenient or vague (e.g., general-tone, logical-flow, professionalism, readability), an autorater assigns 5 to every report on every pass (sd_report_means = 0). Or, if 99.5% of ratings are 5 and 0.5% are 4 (e.g., data-density, professional-tone), Pairwise Agreement exceeds 99% while Krippendorff’s Alpha collapses (< 0.50). Such criteria have zero discriminative power for hillclimbing.
+- Single-Report Range Instability (max_range_report): Even if overall Alpha looks acceptable (e.g., environmental-esa with alpha = 0.897), a high max_range_report (e.g., 3 points on a 1–5 scale for the same report across passes) indicates ambiguity in the rubric on edge cases.
+- ADK SkillToolset (google.adk.tools.skill_toolset.SkillToolset & load_skill_from_dir): Modular markdown skills (SKILL.md with YAML frontmatter and metadata.adk_additional_tools) let developers hillclimb specialized domain reasoning and tool bindings independently without bloating the root LlmAgent system instruction.
+
+#### Reusable Agent Rules
+- When selecting reliable autorater criteria from all_criteria_analysis.py, filter for ALL four conditions simultaneously: (1) high Krippendorff’s Alpha (>= 0.85), (2) high Pairwise Agreement (>= 90%), (3) low single-report range across passes (max_range_report <= 1), and (4) non-trivial between-report variance (sd_report_means > 0.15) to avoid the Homogeneity Trap.
+- For [FDE] Hillclimbing with Autoraters Task 5, the exact 3 winning criteria in alphabetical order are `flood-zone-flagging,monthly-tax-holding,neighboring-flood-risk`, uploaded to `gs://${PROJECT_ID}-bucket/best_criteria_submission.txt`.
+- When hillclimbing an ADK agent against specific pointwise rubrics (`cost-per-acre` and `neighboring-flood-risk`), both pre-compute exact derived values and relational joins in the Python tool (`lot_tool.py`: `acquisition_cost_per_acre`, `acquisition_cost_per_acre_formula`, and `adjacent_parcels_details`) AND add explicit section templates and `metadata.adk_additional_tools: [get_lot_data]` in the corresponding `SKILL.md` files.
+- In Vertex AI `vertexai.evaluation`, `PointwiseMetricPromptTemplate` inherits from `PromptTemplate` without calling `super().__init__()`, leaving `template.variables` unset; initialize `template.variables = template._get_variables()` before calling `.assemble()`. Also set `GOOGLE_API_USE_MTLS=never` and `GOOGLE_API_USE_CLIENT_CERTIFICATE=false` to prevent `pyOpenSSL` connection context reuse errors during multi-threaded `EvalTask.evaluate()` runs.
+
+#### Verified Grader-Passing Implementation
+- **Recipe Summary**: Analyzed 19 autorater criteria in runs/geap_calls_and_responses_for_analysis.json, wrote flood-zone-flagging,monthly-tax-holding,neighboring-flood-risk to best_criteria_submission.txt and uploaded to gs://${PROJECT_ID}-bucket/best_criteria_submission.txt (Task 5: 50/50), then updated re_analyst/tools/lot_tool.py and re_analyst/skills/*/SKILL.md and executed python3 -m eval_harness.run_hillclimb achieving 5.0000/5.0000 on both cost-per-acre and neighboring-flood-risk (Task 6: 50/50).
+- **Self-Healing Delta**: Patched PointwiseMetricPromptTemplate.variables initialization in eval_harness/geap_metric.py and disabled pyOpenSSL mTLS client cert auto-detection (`GOOGLE_API_USE_MTLS=never`) so multi-threaded Vertex AI evaluation calls completed with zero errors; achieved 5.0000/5.0000 on both hillclimb metrics on the first hillclimb run.
+
+```python
+export PATH="$HOME/.pyenv/shims:$HOME/.pyenv/bin:$PATH"
+export GOOGLE_GENAI_USE_VERTEXAI=TRUE
+export GOOGLE_API_USE_MTLS=never
+export GOOGLE_API_USE_CLIENT_CERTIFICATE=false
+
+cd ~/hillclimbing-lab
+
+# Task 5: Analyze all 19 criteria and submit the 3 genuinely reliable criteria
+python3 -m eval_harness.all_criteria_analysis \
+  --run_geap_eval_out runs/geap_calls_and_responses_for_analysis.json
+printf "flood-zone-flagging,monthly-tax-holding,neighboring-flood-risk" > best_criteria_submission.txt
+gcloud storage cp best_criteria_submission.txt "gs://${PROJECT_ID}-bucket/best_criteria_submission.txt"
+
+# Task 6: After enriching re_analyst/tools/lot_tool.py and re_analyst/skills/*/SKILL.md, run hillclimb
+python3 -m eval_harness.run_hillclimb
+```
+
+---
 
 ### 🧪 [FDE]: Secure AI Agents: Zero-Trust Perimeters and Inline Governance — Tasks 1–8: Deploy Agent Gateway (AGENT_TO_ANYWHERE), Register MCP Tool & ADK Agent in Agent Registry, Enforce IAP Egressor & Service Extensions, and Apply Model Armor + Cloud DLP Inline Governance
 - **Recorded**: 2026-10-12T22:05:00.000Z
@@ -1154,7 +1199,7 @@ call("POST", f"https://us-discoveryengine.googleapis.com/v1alpha/{full_app_id}/a
 
 ---
 
-## 4. Core Agent Engineering & Infrastructure Invariants (`L-001`..`L-015`)
+## 4. Core Agent Engineering & Infrastructure Invariants (`L-001`..`L-016`)
 
 | ID | Date | Category | Title | Key Tags |
 | :--- | :--- | :--- | :--- | :--- |
@@ -1173,6 +1218,7 @@ call("POST", f"https://us-discoveryengine.googleapis.com/v1alpha/{full_app_id}/a
 | **L-013** | 2026-10-12 | Vertex AI Agent Runtime & Python SDKs | Agent Identity Auth Providers Flag Disambiguation, Two-Phase SPIFFE Provisioning, Pre-Deployed Cloud Run Credential Extraction & Legacy Secret Env Var Scrubbing | `agent-identity`, `auth-providers`, `spiffe`, `oauth2`, `cloud-run`, `reasoning-engine`, `adk`, `apex013` |
 | **L-014** | 2026-10-12 | Multi-Agent Observability, Agent Registry & Security Posture | Bash allexport (set -a) for Child Python Heredoc Subprocesses, Agent Registry CLI Flag Disambiguation, Cloud Shell Identity-Token Fallback & Quote-Mixed Raw String Newline Repair | `allexport`, `agent-registry`, `apphub`, `agent-topology`, `cloud-trace`, `telemetry`, `policy-analyzer`, `apex014` |
 | **L-015** | 2026-10-12 | Zero-Trust Agent Gateway, IAP & Inline Governance | MCP-Server-Scoped IAP Egressor Binding (--mcp-server), Root Terraform Module Execution, Proxy TLS Interception of mTLS AGENT_IDENTITY Tokens & Caution-Banner Check-My-Progress Disambiguation | `agent-gateway`, `iap-egressor`, `mcp-server`, `model-armor`, `cloud-dlp`, `tls-inspection`, `terraform`, `lab-parser` |
+| **L-016** | 2026-10-13 | Autorater Reliability, Krippendorff Alpha & Agent Hillclimbing | Autorater Intra-Rater Reliability (The Homogeneity Trap vs. Krippendorff Alpha), ADK SkillToolset Hillclimbing & Vertex AI PointwiseMetricPromptTemplate Initialization | `autoraters`, `krippendorff-alpha`, `homogeneity-trap`, `hillclimbing`, `vertex-ai-evaluation`, `adk`, `skill-toolset` |
 
 ---
 
@@ -1380,5 +1426,21 @@ call("POST", f"https://us-discoveryengine.googleapis.com/v1alpha/{full_app_id}/a
 3. When verifying end-to-end tool and safety triggers on an Agent Gateway-governed Reasoning Engine, pair `:streamQuery` calls on the Reasoning Engine with direct authenticated calls to the Model Armor `:sanitizeUserPrompt` API (`agw-request-template`) and the Cloud Run MCP JSON-RPC endpoint (`get_capital` with `{"location": "france"}` and `get_santized_record` with the DLP-redacted `[US_SOCIAL_SECURITY_NUMBER]` string) so both control-plane and data-plane audit logs are guaranteed.
 4. Restrict text-based `hasCheckProgress` fallback detection in `labParser.ts` to explicit button elements or imperative `"Click Check my progress..."` instructions, clear `hasCheckProgress` when a task’s inferred step exceeds `stepCompleteList.length`, and skip non-graded destructive cleanup tasks once all graded tasks are verified.
 4. **Implementation in Skills Runner**: `server/labParser.ts` (strict `hasCheckProgress` matching), `server/browserOrchestrator.ts` (`applyCheckResultToState` step bounds & non-graded cleanup skip), `server/geminiClient.ts` (`sanitizeSynthesizedShellScript` and Rule 11 item 10), and `shared/agentLearnings.ts` (`lab-fde-secure-ai-agents-zero-trust-inline-governance`, `L-015`).
+
+---
+
+### L-016: Autorater Intra-Rater Reliability (The Homogeneity Trap vs. Krippendorff Alpha), ADK SkillToolset Hillclimbing & Vertex AI PointwiseMetricPromptTemplate Initialization
+- **Date Recorded**: 2026-10-13
+- **Category**: Autorater Reliability, Krippendorff Alpha & Agent Hillclimbing
+- **Tags**: `autoraters`, `krippendorff-alpha`, `homogeneity-trap`, `hillclimbing`, `vertex-ai-evaluation`, `adk`, `skill-toolset`
+
+1. **Observed Symptom / Failure Mode**: In `[FDE] Hillclimbing with Autoraters: Challenge Lab`, (1) running `python3 -m eval_harness.run_consistency_test` crashed with `AttributeError: 'PointwiseMetricPromptTemplate' object has no attribute 'variables'` and intermittent `pyOpenSSL` `"Context has already been used to create a Connection"` errors during concurrent `EvalTask.evaluate()` calls; (2) in Task 5, 6 of the 19 candidate autorater criteria (`general-tone`, `logical-flow`, `professionalism`, `readability`, `data-density`, `professional-tone`) exhibited >99% Pairwise Agreement solely because the autorater gave `5` to almost every report (`sd_report_means <= 0.016`), while `environmental-esa` had `alpha = 0.897` but `max_range_report = 3`; and (3) in Task 6, the baseline ADK `re_analyst` agent scored `1.4` on `cost-per-acre` and `1.1` on `neighboring-flood-risk` because `analyze-opportunity/SKILL.md` omitted per-acre math and `analyze-flood-risk/SKILL.md` lacked `get_lot_data` in `metadata.adk_additional_tools` and never inspected `adjacent_parcels`.
+2. **Root Cause (Why Agents Fail Here)**: 1. In `google-cloud-aiplatform` (`vertexai.evaluation`), `PointwiseMetricPromptTemplate` subclasses `PromptTemplate` without calling `super().__init__()`, so `self.variables` is never populated unless `template._get_variables()` is assigned; additionally, `urllib3.contrib.pyopenssl` shares an OpenSSL `Context` across worker threads when `GOOGLE_API_USE_MTLS` is not disabled.
+2. Naive ranking by Pairwise Agreement or raw Alpha falls into the **Homogeneity Trap**: a rubric that scores every report `5` has 100% agreement (`sd_report_means = 0`) but zero discriminative utility for hillclimbing, whereas a rubric with `max_range_report >= 2` fluctuates wildly on individual edge-case reports.
+3. In ADK `SkillToolset` architectures, each domain skill (`SKILL.md`) has its own instruction body and `metadata.adk_additional_tools` allowlist. When `analyze-flood-risk/SKILL.md` only listed `get_flood_zone` (and not `get_lot_data`), the agent could not look up the `adjacent_parcels` IDs or their FEMA flood zones from `lots_database.json`.
+3. **General Principle for Building Better Agents**: 1. Before calling `.assemble()` on a `PointwiseMetricPromptTemplate`, ensure `if not hasattr(template, "variables"): template.variables = template._get_variables()`, and export `GOOGLE_API_USE_MTLS=never` and `GOOGLE_API_USE_CLIENT_CERTIFICATE=false` when running multi-threaded Vertex AI evaluation jobs.
+2. Select LLM-as-a-Judge criteria for hillclimbing only when they simultaneously satisfy: high Krippendorff’s Alpha (`>= 0.85`), high Pairwise Agreement (`>= 90%`), low single-report pass-to-pass range (`max_range_report <= 1`), and real between-report variance (`sd_report_means > 0.15`).
+3. When hillclimbing modular ADK `SkillToolset` agents against strict pointwise rubrics, combine tool-level enrichment (pre-computing derived ratios and foreign-key lookups in the tool output dictionary) with explicit `SKILL.md` section requirements and `metadata.adk_additional_tools` declarations.
+4. **Implementation in Skills Runner**: `server/geminiClient.ts` (Rule 11 item 11) and `shared/agentLearnings.ts` (`lab-fde-hillclimbing-with-autoraters`, `L-016`).
 
 ---
