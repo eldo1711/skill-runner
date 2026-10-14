@@ -1433,11 +1433,13 @@ async function runVerificationTests() {
     !mdLearnings.includes('L-015') ||
     !mdLearnings.includes('roles/iap.egressor') ||
     !mdLearnings.includes('L-016') ||
-    !mdLearnings.includes('flood-zone-flagging,monthly-tax-holding,neighboring-flood-risk')
+    !mdLearnings.includes('flood-zone-flagging,monthly-tax-holding,neighboring-flood-risk') ||
+    !mdLearnings.includes('L-017') ||
+    !mdLearnings.includes('code_assistant-docs-engine')
   ) {
-    throw new Error('Expected L-012..L-016, roles/iap.egressor, and flood-zone-flagging,monthly-tax-holding,neighboring-flood-risk in renderAgentLearningsMarkdown output.');
+    throw new Error('Expected L-012..L-017, roles/iap.egressor, flood-zone-flagging,monthly-tax-holding,neighboring-flood-risk, and code_assistant-docs-engine in renderAgentLearningsMarkdown output.');
   }
-  console.log('✓ L-012..L-016 sanitization, single-line string newline repair, Auth Provider & Agent Registry flag repair, caution-banner Check-my-progress disambiguation, and learnings verified.');
+  console.log('✓ L-012..L-017 sanitization, single-line string newline repair, Auth Provider & Agent Registry flag repair, caution-banner Check-my-progress disambiguation, and learnings verified.');
 
   await browser.close();
   console.log('✅ All verification tests passed!');

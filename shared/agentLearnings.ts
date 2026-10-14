@@ -9,6 +9,7 @@ export interface AgentLearningEntry {
     | 'Multi-Agent Observability, Agent Registry & Security Posture'
     | 'Zero-Trust Agent Gateway, IAP & Inline Governance'
     | 'Autorater Reliability, Krippendorff Alpha & Agent Hillclimbing'
+    | 'Multi-Agent Cost/Token Optimization, Model Tiering & Semantic Caching'
     | 'Course & Embedded Lab Orchestration'
     | 'DOM, Shadow DOM & Quiz Grading'
     | 'Self-Healing & Grader Verification';
@@ -595,6 +596,71 @@ python3 -m eval_harness.run_hillclimb`,
       'skill-toolset',
     ],
   },
+  {
+    id: 'lab-fde-cost-token-estimation-analysis-optimization',
+    timestamp: '2026-10-14T15:14:00.000Z',
+    stream: 'lab_execution',
+    courseOrLabTitle: '[FDE] Cost/token Estimation, Analysis, and Optimization: Challenge Lab',
+    moduleOrTaskTitle:
+      'Multi-Agent Cost Attribution Ledger, Model Tiering, Context & Semantic Caching, Thinking-Level Reduction, and Held-Out Cost/Quality Optimization (Tasks 1–5)',
+    sourceUrl: 'https://explore.qwiklabs.com/classrooms/21414/labs/115591',
+    summary:
+      'Completed all 5 tasks (100/100) of [FDE] Cost/token Estimation, Analysis, and Optimization: Challenge Lab. Provisioned the managed Agent Search data store (code_assistant-docs) and search engine (code_assistant-docs-engine) in Discovery Engine via vais.ensure (Task 4: 30/30), then optimized the multi-agent Code Assistant Agent (Coordinator + DocsAgent + CommunityAgent) in Part 6: Final challenge (Cell 51) by pairing a Flash Coordinator at LOW thinking with Flash-Lite sub-agents (DocsAgent and CommunityAgent) and top_k=2, achieving $0.011527/query (<= $0.0135 budget) and 0.9062 quality (>= 0.90 floor) on the 16 held-out queries and uploading final_metrics.json to gs://${PROJECT_ID}-metrics-result/results/final_metrics.json (Task 5: 70/70).',
+    conceptsAndCapabilities: [
+      'Per-Event Multi-Agent Cost Attribution (UsageLedger): A single user query in an ADK Coordinator + AgentTool architecture triggers 6 model calls (Coordinator open + close, DocsAgent tool-call + answer, CommunityAgent tool-call + answer) plus 1 managed Agent Search query ($1.50/1k queries) and 1 embedding call ($0.15/1M tokens). Thought (reasoning) tokens are billed at the model output rate.',
+      'Model Selection & Asymmetric Sub-Agent Tiering (Lever 1): Tiering the Coordinator from Pro to Flash cuts cost by 25–40% at equal quality, whereas putting Flash-Lite in the Coordinator seat at HIGH thinking causes erratic cost/quality variability. However, sub-agents (DocsAgent, CommunityAgent) perform bounded single-tool lookup-and-summarize tasks with zero thought tokens, making them ideal candidates for Flash-Lite (6x cheaper per token than Flash).',
+      'Explicit vs. Implicit Context Caching & Semantic Response Caching (Lever 2): Explicit Vertex AI context caches (client.caches.create) cut cached prefix input token cost by 90% when the stable prefix exceeds the 4,096-token minimum. Semantic response caches embed incoming queries and serve cosine-similar repeats (>= threshold) for the cost of a single embedding call.',
+      'Reasoning & Retrieval Token Reduction (Lever 3): Lowering Coordinator thinking_level from HIGH to LOW collapses thought_tokens (which bill at output token rates) without hurting answer quality on grounded Q&A, while trimming retrieval top_k from 3 to 2 reduces sub-agent prompt input tokens.',
+    ],
+    agentRulesAndTakeaways: [
+      'When executing code_assistant_cost_optimization.ipynb on generative-ai-jupyterlab, skip the ungraded 15-query intermediate measurement cells (Cells 21, 24, 27, 33, 36, which take ~35 minutes) and run only the setup & demo cells (8, 9, 11, 13, 14, 16, 17, 19, 30, 43, 45, 47, 50) plus the patched Final Challenge (Cell 51) and GCS upload cell (Cell 52).',
+      'Never patch multi-line Python dictionary assignments (such as MY_MODELS = {"coordinator": None, ...}) using line-by-line regex splitting on "=", which leaves trailing dictionary keys dangling; replace the entire MY_MODELS..MY_MAXOUT block as a single contiguous block.',
+      'To pass Part 6: Final challenge ($0.0135/query budget and 0.90 quality floor), set coordinator to Flash, docs and community sub-agents to Flash-Lite, embedding to gemini-embedding-001, MY_THINKING = "LOW", MY_TOPK = 2, and MY_MAXOUT = None.',
+      'When terminating a background script over gcloud compute ssh --command="...", always bracket-escape the pgrep pattern (pgrep -f \'[r]un_lab_notebook.py\') so pgrep does not match the SSH bash -c command line itself and exit with code 255.',
+    ],
+    labRecipe: {
+      servicesUsed: [
+        'Vertex AI Workbench (generative-ai-jupyterlab)',
+        'Google Cloud Discovery Engine / Agent Search (code_assistant-docs, code_assistant-docs-engine)',
+        'Google Agent Development Kit (google.adk.agents.Agent, AgentTool, FunctionTool)',
+        'Vertex AI GenAI Evaluation Service (vertexai.evaluation.EvalTask, PointwiseMetric)',
+        'Google Cloud Storage (gs://${PROJECT_ID}-metrics-result/results/final_metrics.json)',
+      ],
+      verifiedScriptSummary:
+        'Provisioned code_assistant-docs and code_assistant-docs-engine via vais.ensure (Cell 16, Task 4: 30/30), patched Cell 51 with Coordinator on Flash (LOW thinking), DocsAgent and CommunityAgent on Flash-Lite, and top_k=2, evaluated the 16 held-out queries achieving cost_per_query=0.011527 and quality=0.9062 (passed=True), and executed Cell 52 to upload final_metrics.json to gs://${PROJECT_ID}-metrics-result/results/final_metrics.json (Task 5: 70/70).',
+      verifiedScriptSnippet: `FLASH_MODEL = TIERED_MODELS["coordinator"]
+LITE_MODEL  = LITE_MODELS["coordinator"]
+EMBED_MODEL = MODELS["embedding"]
+
+MY_MODELS = {
+    "coordinator": FLASH_MODEL,
+    "docs":        LITE_MODEL,
+    "community":   LITE_MODEL,
+    "embedding":   EMBED_MODEL,
+}
+MY_THINKING = "LOW"
+MY_TOPK     = 2
+MY_MAXOUT   = None
+
+coord, ledger = build(MY_MODELS, thinking_level=MY_THINKING, max_output_tokens=MY_MAXOUT, top_k=MY_TOPK)
+cap, _ = measure(coordinator=coord, items=holdout, qid_holder=qid, ledger=ledger,
+                 project=PROJECT, location=EVAL_LOCATION, label="final challenge submission")
+res = check_challenge_pass(cap["cost_per_query"], cap["quality"], budget=BUDGET, quality_floor=QUALITY_FLOOR)`,
+      attemptsRequired: 1,
+      selfHealingDelta:
+        'Replaced sequential execution of all 58 cells (~40 min) and broken line-by-line MY_MODELS regex patching with selective setup execution (Cells 8..19, 30, 43..50) and full-block MY_MODELS replacement in Cell 51 + Cell 52.',
+    },
+    tags: [
+      'fde',
+      'cost-optimization',
+      'token-estimation',
+      'model-tiering',
+      'context-caching',
+      'semantic-cache',
+      'agent-search',
+      'adk',
+    ],
+  },
 ];
 
 export const AGENT_LEARNINGS: AgentLearningEntry[] = [
@@ -917,6 +983,36 @@ export const AGENT_LEARNINGS: AgentLearningEntry[] = [
       'skill-toolset',
     ],
   },
+  {
+    id: 'L-017',
+    date: '2026-10-14',
+    category: 'Multi-Agent Cost/Token Optimization, Model Tiering & Semantic Caching',
+    title:
+      'Asymmetric Sub-Agent Model Tiering for Cost/Quality Pareto Optimization, Selective Notebook Cell Execution, Multi-Line Dict Patching & pgrep Self-Match Prevention',
+    symptom:
+      'In `[FDE] Cost/token Estimation, Analysis, and Optimization: Challenge Lab`, (1) sequentially running all 58 cells of `code_assistant_cost_optimization.ipynb` on `generative-ai-jupyterlab` took 35+ minutes because five ungraded intermediate measurement cells (`Cells 21, 24, 27, 33, 36`) each run 15 multi-agent queries + Vertex AI evaluation; (2) a line-by-line regex patcher splitting on `"="` corrupted the 4-line `MY_MODELS = {"coordinator": None, ...}` dictionary in Cell 51; (3) tiering only the Coordinator to Flash at `LOW` thinking left `cost_per_query` around `$0.0180` (exceeding the `$0.0135` budget); and (4) running `gcloud compute ssh ... --command="sudo kill -9 $(pgrep -f \'/tmp/run_lab_notebook.py\')"` exited with SSH code `255` because `pgrep -f` matched the remote `bash -c` command string itself.',
+    rootCause:
+      '1. The notebook includes five ungraded teaching experiments (`Cells 21, 24, 27, 33, 36`) that evaluate 15 queries each (75 multi-agent trajectories + 75 LLM judge calls), whereas the Qwiklabs graders for Task 4 and Task 5 only inspect the Discovery Engine resources (`code_assistant-docs`, `code_assistant-docs-engine` from Cell 16) and `gs://${PROJECT_ID}-metrics-result/results/final_metrics.json` (generated by Cell 51 + Cell 52 on the 16 held-out queries).\n' +
+      '2. Line-by-line TODO replacement that splits on `"="` treats the opening line of a multi-line dictionary literal (`MY_MODELS = {"coordinator": None, # TODO...`) as a scalar assignment, leaving subsequent dictionary keys dangling.\n' +
+      '3. Once the Coordinator is tiered to Flash (`$1.50/$9.00` per 1M tokens) with `thinking_level="LOW"`, the two sub-agents (`DocsAgent` and `CommunityAgent`, which make 4 model calls per query) account for nearly half the remaining model cost if left on Flash. Because sub-agents only execute a single lookup tool and summarize results with zero thought tokens, tiering them to Flash-Lite (`$0.25/$1.50` per 1M tokens — 6x cheaper) slashes sub-agent spend by 83% without degrading synthesis quality.\n' +
+      '4. `pgrep -f pattern` searches the full command line of every process, including the parent `bash -c "... pgrep -f pattern ..."` spawned by `sshd`.',
+    generalPrinciple:
+      '1. In notebook-based labs with long ungraded benchmark cells, execute only the setup/dependency cells (`Cells 8, 9, 11, 13, 14, 16, 50`) and the graded challenge/submission cells (`Cells 51, 52`).\n' +
+      '2. Always patch multi-line Python configuration blocks (`MY_MODELS` .. `MY_MAXOUT`) using a single multi-line regex (`re.DOTALL`) rather than line-by-line `"="` splitting.\n' +
+      '3. In multi-agent Coordinator + `AgentTool` architectures, pair a reliable reasoning model on the Coordinator (Flash at `LOW` thinking) with budget-tier models (Flash-Lite) on retrieval/summarization sub-agents and a trimmed `top_k=2` to hit strict cost-per-query budgets (`$0.0115 <= $0.0135`) while holding quality above `0.90` (`0.9062`).\n' +
+      '4. Always bracket-escape the first character of a `pgrep -f` pattern (`pgrep -f \'[r]un_lab_notebook.py\'`) when invoking `kill` inside an SSH command string.',
+    implementationInSkillsRunner:
+      '`server/geminiClient.ts` (Rule 11 item 12) and `shared/agentLearnings.ts` (`lab-fde-cost-token-estimation-analysis-optimization`, `L-017`).',
+    tags: [
+      'cost-optimization',
+      'model-tiering',
+      'sub-agents',
+      'thinking-level',
+      'agent-search',
+      'jupyter-workbench',
+      'pgrep',
+    ],
+  },
 ];
 
 export function renderAgentLearningsMarkdown(
@@ -946,7 +1042,7 @@ export function renderAgentLearningsMarkdown(
     '> 1. **Course Curriculum & Domain Learnings** (`course_content`) — Core concepts, product capabilities, and architectures taught in courses.',
     '> 2. **Verified Quiz & Knowledge Check Bank** (`quiz_mastery`) — Verified questions, winning answers, eliminated distractors, and domain rules.',
     '> 3. **Verified Hands-On Lab Recipes & Self-Healing Deltas** (`lab_execution`) — Exact API/CLI/SDK implementations that passed Qwiklabs graders and how earlier attempt errors were resolved.',
-    '> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-016`) — Reusable patterns for building reliable autonomous agents.',
+    '> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-017`) — Reusable patterns for building reliable autonomous agents.',
     '',
     '---',
     '',
@@ -1076,7 +1172,7 @@ export function renderAgentLearningsMarkdown(
   }
 
   lines.push(
-    '## 4. Core Agent Engineering & Infrastructure Invariants (`L-001`..`L-016`)',
+    '## 4. Core Agent Engineering & Infrastructure Invariants (`L-001`..`L-017`)',
     '',
     '| ID | Date | Category | Title | Key Tags |',
     '| :--- | :--- | :--- | :--- | :--- |'
