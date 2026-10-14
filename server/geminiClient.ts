@@ -4957,7 +4957,9 @@ ${combinedText}
      4. \`PATCH .../locations/global/userStores/default_user_store?updateMask=defaultLicenseConfig,enableLicenseAutoRegister,enableExpiredLicenseAutoUpdate\` with \`{"defaultLicenseConfig": lc_name, "enableLicenseAutoRegister": True, "enableExpiredLicenseAutoUpdate": True}\`.
      5. \`POST .../locations/global/userStores/default_user_store:batchUpdateUserLicenses\` with \`{"inlineSource": {"userLicenses": [{"userPrincipal": "<student_email>", "licenseConfig": lc_name}], "updateMask": "licenseConfig"}}\`.
    - **People via Custom Connector**: \`POST .../collections/default_collection/dataStores?dataStoreId=<id>\` with \`{"displayName": "<id>", "industryVertical": "GENERIC", "contentConfig": "THIRD_PARTY_IDENTITY_PEOPLE", "solutionTypes": ["SOLUTION_TYPE_SEARCH"], "aclEnabled": False}\`, then import NDJSON via \`POST .../dataStores/<id>/branches/0/documents:import\` with \`{"gcsSource": {"inputUris": ["gs://..."], "dataSchema": "document"}, "reconciliationMode": "FULL", "autoGenerateIds": False}\`.
-   - **Google Workspace Connectors (\`google_drive\`, \`google_mail\`, \`google_calendar\`)**: \`POST .../locations/global:setUpDataConnector\` with \`{"collectionId": "<name>-1", "collectionDisplayName": "<name>", "dataConnector": {"dataSource": "<type>", "entities": [{"entityName": "<type>"}], "bapConfig": {"supportedConnectorModes": ["ACTIONS"], "enabledActions": [...]}}}\`. NEVER set \`actionConfig: {"createBapConnection": True}\` or \`connectorModes\` on first-party Workspace connectors (causes 500 INTERNAL).
+   - **Google Workspace Connectors (\`google_drive\`, \`google_mail\`, \`google_calendar\`)**:
+     - For **Federated Search + Actions** (e.g., \`cymbal-gdrive-connector\` with \`mode 'FEDERATED'\`): Call \`POST .../locations/global:setUpDataConnectorV2?collectionId=<name>&collectionDisplayName=<name>\` with \`{"dataSource": "<type>", "connectorModes": ["FEDERATED", "ACTIONS"], "entities": [{"entityName": "<type>"}], "bapConfig": {"supportedConnectorModes": ["ACTIONS"], "enabledActions": [...]}}\`. **CRITICAL**: \`"FEDERATED"\` belongs ONLY in top-level \`connectorModes\` (\`["FEDERATED", "ACTIONS"]\`), NEVER inside \`bapConfig.supportedConnectorModes\` (which only accepts \`["DATA_INGESTION", "ACTIONS", "END_USER_AUTHENTICATION"]\` and rejects \`"FEDERATED"\` with HTTP 400). Always include \`"entities": [{"entityName": "<type>"}]\` (omitting \`entities\` fails with \`\`<type>\` Data Connector must only have exactly 1 entity\`).
+     - For Actions-only Workspace connectors: \`POST .../locations/global:setUpDataConnector\` with \`{"collectionId": "<name>-1", "collectionDisplayName": "<name>", "dataConnector": {"dataSource": "<type>", "entities": [{"entityName": "<type>"}], "bapConfig": {"supportedConnectorModes": ["ACTIONS"], "enabledActions": [...]}}}\`.
      - \`google_drive\` actions: \`["copy_file", "create_file", "download_file_content", "get_file_metadata", "get_file_permissions", "list_recent_files", "list_shared_drives", "read_file_content", "search_files", "share_file", "trash_file", "update_file"]\`
      - \`google_mail\` actions: \`["send_message"]\` (or \`["create_draft", "reply_all_message", "reply_message", "search_messages", "send_draft", "send_message"]\`)
      - \`google_calendar\` actions: \`["create_event", "delete_event", "get_event", "list_calendars", "list_events", "respond_to_event", "search_events", "suggest_time", "update_event"]\`
@@ -5132,6 +5134,84 @@ ${combinedText}
                MY_MAXOUT   = None
                \`\`\`
              - Run Cell 51 (\`measure\` on the 16 held-out queries in \`holdout\`) and Cell 52 to write \`/home/jupyter/final_metrics.json\` (\`{"cost_per_query": ..., "quality": ..., "budget": 0.0135, "quality_floor": 0.9, "passed": true}\`) and upload it to \`gs://\${PROJECT_ID}-metrics-result/results/final_metrics.json\`.
+       13. **Add Google Drive with Sensitive Data Protection to Gemini Enterprise (\`cymbal-ge-app\`, \`cymbal-gdrive-connector\`, \`cepf-drive-policy\`, \`dlp.googleapis.com/v2/.../contentPolicies\`, \`dataProtectionPolicy\`, \`notebooklmConfig\`)**:
+           - **Task 1 (Configure Gemini Enterprise App \`cymbal-ge-app\` & Google Identity)**:
+             - Configure Google Identity (\`GSUITE\`) via \`PATCH https://discoveryengine.googleapis.com/v1alpha/projects/\${PROJECT_ID}/locations/global/aclConfig\` with \`{"idpConfig": {"idpType": "GSUITE"}}\` (NO \`updateMask\` query parameter).
+             - Create engine \`cymbal-ge-app\` via \`POST https://discoveryengine.googleapis.com/v1alpha/projects/\${PROJECT_ID}/locations/global/collections/default_collection/engines?engineId=cymbal-ge-app\` with \`{"displayName": "cymbal-ge-app", "solutionType": "SOLUTION_TYPE_SEARCH", "industryVertical": "GENERIC", "appType": "APP_TYPE_INTRANET", "commonConfig": {"companyName": "Cymbal Group"}, "searchEngineConfig": {"searchTier": "SEARCH_TIER_ENTERPRISE", "searchAddOns": ["SEARCH_ADD_ON_LLM"]}}\`.
+           - **Task 2 & Task 3 (Set Up Federated Google Drive Connector \`cymbal-gdrive-connector\` & Link Data Store to \`cymbal-ge-app\`)**:
+             - Create the Federated + Actions Google Drive connector via \`POST https://discoveryengine.googleapis.com/v1alpha/projects/\${PROJECT_ID}/locations/global:setUpDataConnectorV2?collectionId=cymbal-gdrive-connector&collectionDisplayName=cymbal-gdrive-connector\` with:
+               \`\`\`json
+               {
+                 "dataSource": "google_drive",
+                 "connectorModes": ["FEDERATED", "ACTIONS"],
+                 "entities": [{"entityName": "google_drive"}],
+                 "bapConfig": {
+                   "supportedConnectorModes": ["ACTIONS"],
+                   "enabledActions": [
+                     "copy_file", "create_file", "download_file_content", "get_file_metadata",
+                     "get_file_permissions", "list_recent_files", "list_shared_drives",
+                     "read_file_content", "search_files", "share_file", "trash_file", "update_file"
+                   ]
+                 }
+               }
+               \`\`\`
+               **CRITICAL**: \`"FEDERATED"\` MUST be placed in top-level \`connectorModes: ["FEDERATED", "ACTIONS"]\` (NEVER in \`bapConfig.supportedConnectorModes\`, which only accepts \`["DATA_INGESTION", "ACTIONS", "END_USER_AUTHENTICATION"]\`). Calling \`setUpDataConnectorV2\` with \`connectorModes: ["FEDERATED", "ACTIONS"]\` and \`entities: [{"entityName": "google_drive"}]\` immediately sets \`state: "ACTIVE"\` and \`actionState: "ACTIVE"\`.
+             - Ensure the Google Drive dataStore (\`cymbal-gdrive-connector\` or \`cymbal-gdrive-connector_google_drive\`) is linked in \`cymbal-ge-app\` (\`dataStoreIds\`). Note: Discovery Engine rejects \`PATCH .../engines/cymbal-ge-app?updateMask=dataStoreIds\` on a single-datastore engine (\`Engines with a single data store cannot add or remove data stores\`), so if \`cymbal-ge-app\` was created without the data store linked, recreate \`cymbal-ge-app\` with \`"dataStoreIds": ["cymbal-gdrive-connector"]\`.
+           - **Task 4 (Create Sensitive Data Protection Content Policy \`cepf-drive-policy\` in Cloud DLP v2 API)**:
+             - **CRITICAL**: Sensitive Data Protection Content Policies live on the **Cloud DLP v2 API** (\`https://dlp.googleapis.com/v2/projects/\${PROJECT_ID}/locations/global/contentPolicies\`), NOT on \`discoveryengine.googleapis.com\` and NOT under \`inspectTemplates\`!
+             - Enable \`dlp.googleapis.com\` and call \`POST https://dlp.googleapis.com/v2/projects/\${PROJECT_ID}/locations/global/contentPolicies\` with:
+               \`\`\`json
+               {
+                 "contentPolicyId": "cepf-drive-policy",
+                 "contentPolicy": {
+                   "displayName": "cepf-drive-policy",
+                   "defaultAction": {"returnVerdict": "ALLOW"},
+                   "inspectConfig": {
+                     "infoTypes": [
+                       {"name": "CREDIT_CARD_NUMBER"},
+                       {"name": "CREDIT_CARD_DATA"}
+                     ],
+                     "customInfoTypes": [
+                       {
+                         "infoType": {"name": "confidential"},
+                         "likelihood": "VERY_LIKELY",
+                         "fileLabelInfoType": {
+                           "googleDriveLabel": {
+                             "labelId": "OiQWm4osiQYvIPl6oW6sZqALpOoNtv8zCP7RNNEbbFcb"
+                           }
+                         }
+                       }
+                     ]
+                   },
+                   "rules": [
+                     {
+                       "conditions": [
+                         {
+                           "infoTypeCondition": {
+                             "infoTypes": {
+                               "infoTypeNames": [
+                                 "confidential",
+                                 "CREDIT_CARD_NUMBER",
+                                 "CREDIT_CARD_DATA"
+                               ]
+                             }
+                           }
+                         }
+                       ],
+                       "action": {"returnVerdict": "BLOCK"}
+                     }
+                   ]
+                 }
+               }
+               \`\`\`
+               Note: In \`inspectConfig.infoTypes\`, each item is \`{"name": "<INFO_TYPE>"}\`, whereas in \`rules[].conditions[].infoTypeCondition.infoTypes\`, the field is \`"infoTypeNames": ["confidential", "CREDIT_CARD_NUMBER", "CREDIT_CARD_DATA"]\`.
+           - **Task 5 (Attach \`cepf-drive-policy\` to the Google Drive Connector & Grant DLP User Role)**:
+             - Grant \`roles/dlp.user\` to \`serviceAccount:service-\${PROJECT_NUMBER}@gcp-sa-discoveryengine.iam.gserviceaccount.com\` on \`\${PROJECT_ID}\`.
+             - Attach \`dataProtectionPolicy\` to the Google Drive \`DataConnector\` via \`PATCH https://discoveryengine.googleapis.com/v1alpha/projects/\${PROJECT_ID}/locations/global/collections/cymbal-gdrive-connector/dataConnector?updateMask=dataProtectionPolicy\` (and on any other Google Drive collection such as \`cymbal-gdrive-connector-1\`) with:
+               \`{"dataProtectionPolicy": {"sensitiveDataProtectionPolicy": {"policy": "projects/\${PROJECT_ID}/locations/global/contentPolicies/cepf-drive-policy"}}}\`.
+           - **Task 6 (Apply \`cepf-drive-policy\` to Assistant and Gemini Notebook)**:
+             1. **Assistant**: \`PATCH https://discoveryengine.googleapis.com/v1alpha/projects/\${PROJECT_ID}/locations/global/collections/default_collection/engines/cymbal-ge-app/assistants/default_assistant?updateMask=customerPolicy\` with \`{"customerPolicy": {"dataProtectionPolicy": {"sensitiveDataProtectionPolicy": {"policy": "projects/\${PROJECT_ID}/locations/global/contentPolicies/cepf-drive-policy"}}}}\` (\`customerPolicy\` is on \`assistants/default_assistant\`, NEVER on \`engines/cymbal-ge-app\`).
+             2. **Gemini Notebook (NotebookLM)**: \`PATCH https://discoveryengine.googleapis.com/v1alpha/projects/\${PROJECT_ID}?updateMask=customerProvidedConfig\` with \`{"customerProvidedConfig": {"notebooklmConfig": {"dataProtectionPolicy": {"sensitiveDataProtectionPolicy": {"policy": "projects/\${PROJECT_ID}/locations/global/contentPolicies/cepf-drive-policy"}}}}}\`.
     - **CRITICAL Dependency Version Compatibility for \`AdkApp\` on Agent Runtime**: Google Cloud Shell pre-installs \`google-cloud-aiplatform==1.165.1\` alongside an older \`google-adk==1.14.1\`. Because \`google-cloud-aiplatform>=1.165.1\` passes \`auto_create_session=True\` to \`google.adk.runners.Runner()\`, deploying with \`google-adk<1.30.0\` causes the ReasoningEngine container to crash at startup with \`TypeError: Runner.__init__() got an unexpected keyword argument 'auto_create_session'\`. Always upgrade BOTH packages (\`pip install --upgrade "google-cloud-aiplatform[agent_engines,adk]" "google-adk>=1.30.0" cloudpickle pydantic\`) before calling \`agent_engines.create(...)\` and pin the exact upgraded versions in \`requirements=[...]\`.
     - In \`config\` passed to \`client.agent_engines.create(agent=..., config=config)\`, \`"identity_type"\` MUST be the enum \`types.IdentityType.AGENT_IDENTITY\` (NEVER a list \`[types.IdentityType.AGENT_IDENTITY]\`). Many starter \`deploy.py\` files use bracketed placeholders like \`"identity_type": [IDENTITY_TYPE]\` — always replace the entire \`[IDENTITY_TYPE]\` including its brackets with \`types.IdentityType.AGENT_IDENTITY\`.
     - \`ae.api_resource\` returned by \`client.agent_engines.list()\` is a Pydantic v2 \`BaseModel\` (\`ae.api_resource.model_dump()\`), NOT a protobuf message (never call \`google.protobuf.json_format.MessageToDict(ae.api_resource)\`).

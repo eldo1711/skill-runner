@@ -1435,11 +1435,14 @@ async function runVerificationTests() {
     !mdLearnings.includes('L-016') ||
     !mdLearnings.includes('flood-zone-flagging,monthly-tax-holding,neighboring-flood-risk') ||
     !mdLearnings.includes('L-017') ||
-    !mdLearnings.includes('code_assistant-docs-engine')
+    !mdLearnings.includes('code_assistant-docs-engine') ||
+    !mdLearnings.includes('L-018') ||
+    !mdLearnings.includes('cepf-drive-policy') ||
+    !mdLearnings.includes('notebooklmConfig')
   ) {
-    throw new Error('Expected L-012..L-017, roles/iap.egressor, flood-zone-flagging,monthly-tax-holding,neighboring-flood-risk, and code_assistant-docs-engine in renderAgentLearningsMarkdown output.');
+    throw new Error('Expected L-012..L-018, roles/iap.egressor, flood-zone-flagging,monthly-tax-holding,neighboring-flood-risk, code_assistant-docs-engine, and cepf-drive-policy in renderAgentLearningsMarkdown output.');
   }
-  console.log('✓ L-012..L-017 sanitization, single-line string newline repair, Auth Provider & Agent Registry flag repair, caution-banner Check-my-progress disambiguation, and learnings verified.');
+  console.log('✓ L-012..L-018 sanitization, single-line string newline repair, Auth Provider & Agent Registry flag repair, caution-banner Check-my-progress disambiguation, and learnings verified.');
 
   await browser.close();
   console.log('✅ All verification tests passed!');

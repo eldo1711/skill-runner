@@ -661,6 +661,104 @@ res = check_challenge_pass(cap["cost_per_query"], cap["quality"], budget=BUDGET,
       'adk',
     ],
   },
+  {
+    id: 'lab-fde-add-google-drive-with-sdp-to-gemini-enterprise',
+    timestamp: '2026-10-14T17:38:00.000Z',
+    stream: 'lab_execution',
+    courseOrLabTitle:
+      '[FDE] Add Google Drive with Sensitive Data Protection to Gemini Enterprise: Challenge Lab',
+    moduleOrTaskTitle:
+      'Gemini Enterprise App with Google Identity, Federated Google Drive Connector, Cloud DLP v2 ContentPolicy with Google Drive File Label Custom InfoType, and SDP Attachment to Connector, Assistant, and Gemini Notebook (Tasks 1–6)',
+    sourceUrl: 'https://explore.qwiklabs.com/classrooms/21414/labs/115592',
+    summary:
+      'Completed all 6 tasks (100/100) of [FDE] Add Google Drive with Sensitive Data Protection to Gemini Enterprise: Challenge Lab. Configured Google Identity (GSUITE) on locations/global/aclConfig and provisioned the cymbal-ge-app Gemini Enterprise application (Task 1: 20/20), created the Federated + Actions Google Drive connector cymbal-gdrive-connector via setUpDataConnectorV2 with connectorModes=["FEDERATED", "ACTIONS"] and all 12 Drive actions (Task 2: 20/20), linked the Google Drive data store to cymbal-ge-app (Task 3: 15/15), created the Cloud DLP v2 ContentPolicy cepf-drive-policy with custom File Label infoType confidential (Google Drive label ID OiQWm4osiQYvIPl6oW6sZqALpOoNtv8zCP7RNNEbbFcb) and built-in CREDIT_CARD_NUMBER / CREDIT_CARD_DATA infoTypes with BLOCK rule verdict (Task 4: 15/15), granted roles/dlp.user to the Discovery Engine service agent and attached cepf-drive-policy to the Google Drive DataConnector (Task 5: 15/15), and attached cepf-drive-policy to both the Assistant (customerPolicy.dataProtectionPolicy) and Gemini Notebook (customerProvidedConfig.notebooklmConfig.dataProtectionPolicy) (Task 6: 15/15).',
+    conceptsAndCapabilities: [
+      'Federated Google Drive Connector vs. Data Ingestion Connector (setUpDataConnectorV2): In Discovery Engine v1alpha, top-level DataConnector.connectorModes accepts ["FEDERATED", "ACTIONS"] whereas nested bapConfig.supportedConnectorModes only accepts ["DATA_INGESTION", "ACTIONS", "END_USER_AUTHENTICATION"]. Setting top-level connectorModes: ["FEDERATED", "ACTIONS"] with entities: [{"entityName": "google_drive"}] provisions an immediately ACTIVE Federated + Actions Google Drive connector without requiring periodic Workspace ingestion sync.',
+      'Sensitive Data Protection Content Policies (dlp.googleapis.com/v2/.../contentPolicies): Inline SDP policies consumed by Gemini Enterprise live on the Cloud DLP v2 API under projects/{project}/locations/global/contentPolicies (GooglePrivacyDlpV2ContentPolicy), NOT under inspectTemplates and NOT under discoveryengine.googleapis.com.',
+      'Google Drive File Label Custom InfoType (fileLabelInfoType.googleDriveLabel): A ContentPolicy inspectConfig can define customInfoTypes targeting Google Workspace Drive sensitivity labels by labelId (e.g., OiQWm4osiQYvIPl6oW6sZqALpOoNtv8zCP7RNNEbbFcb for Cymbal Confidential) alongside built-in infoTypes (CREDIT_CARD_NUMBER, CREDIT_CARD_DATA), paired with a policy rule whose infoTypeCondition.infoTypes.infoTypeNames triggers returnVerdict: "BLOCK".',
+      'Three-Surface SDP Enforcement in Gemini Enterprise: A single Cloud DLP ContentPolicy resource (projects/{project}/locations/global/contentPolicies/cepf-drive-policy) can be attached to (1) a DataConnector (dataProtectionPolicy.sensitiveDataProtectionPolicy.policy), (2) an Engine Assistant (assistants/default_assistant customerPolicy.dataProtectionPolicy.sensitiveDataProtectionPolicy.policy), and (3) Project-wide Gemini Notebook / NotebookLM (v1alpha/projects/{project} customerProvidedConfig.notebooklmConfig.dataProtectionPolicy.sensitiveDataProtectionPolicy.policy).',
+    ],
+    agentRulesAndTakeaways: [
+      'When creating a Federated Google Drive connector in Discovery Engine (cymbal-gdrive-connector), call POST .../locations/global:setUpDataConnectorV2?collectionId=cymbal-gdrive-connector&collectionDisplayName=cymbal-gdrive-connector with top-level "connectorModes": ["FEDERATED", "ACTIONS"], "entities": [{"entityName": "google_drive"}], and "bapConfig": {"supportedConnectorModes": ["ACTIONS"], "enabledActions": [...]}. Never put "FEDERATED" inside bapConfig.supportedConnectorModes.',
+      'Create Sensitive Data Protection Content Policies via POST https://dlp.googleapis.com/v2/projects/${PROJECT_ID}/locations/global/contentPolicies with {"contentPolicyId": "cepf-drive-policy", "contentPolicy": {...}}. Inside inspectConfig.infoTypes each element is {"name": "..."}, whereas inside rules[].conditions[].infoTypeCondition.infoTypes the property is "infoTypeNames": ["confidential", "CREDIT_CARD_NUMBER", "CREDIT_CARD_DATA"].',
+      'Before attaching an SDP ContentPolicy to Discovery Engine resources, grant roles/dlp.user to service-${PROJECT_NUMBER}@gcp-sa-discoveryengine.iam.gserviceaccount.com.',
+      'Attach cepf-drive-policy to all three Gemini Enterprise surfaces using ?updateMask=dataProtectionPolicy on collections/${COLLECTION_ID}/dataConnector, ?updateMask=customerPolicy on engines/cymbal-ge-app/assistants/default_assistant, and ?updateMask=customerProvidedConfig on v1alpha/projects/${PROJECT_ID} (customerProvidedConfig.notebooklmConfig.dataProtectionPolicy).',
+    ],
+    labRecipe: {
+      servicesUsed: [
+        'discoveryengine.googleapis.com (v1alpha Engine, AclConfig, DataConnector, Assistant, Project.customerProvidedConfig.notebooklmConfig)',
+        'dlp.googleapis.com (v2 projects.locations.contentPolicies)',
+        'cloudresourcemanager.googleapis.com (roles/dlp.user on Discovery Engine Service Agent)',
+      ],
+      verifiedScriptSummary:
+        'Configured GSUITE aclConfig and cymbal-ge-app engine (Task 1: 20/20), created ACTIVE Federated + Actions Google Drive connector cymbal-gdrive-connector via setUpDataConnectorV2 (Task 2: 20/20) and linked its dataStore to cymbal-ge-app (Task 3: 15/15), created Cloud DLP v2 ContentPolicy cepf-drive-policy with custom Google Drive label infoType confidential and CREDIT_CARD_NUMBER / CREDIT_CARD_DATA BLOCK rule (Task 4: 15/15), granted roles/dlp.user to service-${PROJECT_NUMBER}@gcp-sa-discoveryengine.iam.gserviceaccount.com and patched dataProtectionPolicy on the Google Drive DataConnector (Task 5: 15/15), and patched customerPolicy on default_assistant and customerProvidedConfig.notebooklmConfig on projects/${PROJECT_ID} (Task 6: 15/15).',
+      verifiedScriptSnippet: `POLICY_NAME="projects/\${PROJECT_ID}/locations/global/contentPolicies/cepf-drive-policy"
+
+# 1. Create Cloud DLP v2 ContentPolicy (Task 4)
+curl -s -X POST "https://dlp.googleapis.com/v2/projects/\${PROJECT_ID}/locations/global/contentPolicies" \\
+  -H "Authorization: Bearer \$(gcloud auth print-access-token)" \\
+  -H "Content-Type: application/json" \\
+  -H "X-Goog-User-Project: \${PROJECT_ID}" \\
+  -d '{
+    "contentPolicyId": "cepf-drive-policy",
+    "contentPolicy": {
+      "displayName": "cepf-drive-policy",
+      "defaultAction": {"returnVerdict": "ALLOW"},
+      "inspectConfig": {
+        "infoTypes": [{"name": "CREDIT_CARD_NUMBER"}, {"name": "CREDIT_CARD_DATA"}],
+        "customInfoTypes": [{
+          "infoType": {"name": "confidential"},
+          "likelihood": "VERY_LIKELY",
+          "fileLabelInfoType": {"googleDriveLabel": {"labelId": "OiQWm4osiQYvIPl6oW6sZqALpOoNtv8zCP7RNNEbbFcb"}}
+        }]
+      },
+      "rules": [{
+        "conditions": [{"infoTypeCondition": {"infoTypes": {"infoTypeNames": ["confidential", "CREDIT_CARD_NUMBER", "CREDIT_CARD_DATA"]}}}],
+        "action": {"returnVerdict": "BLOCK"}
+      }]
+    }
+  }'
+
+# 2. Create Federated + Actions Google Drive Connector & Attach SDP Policy (Tasks 2 & 5)
+curl -s -X POST "https://discoveryengine.googleapis.com/v1alpha/projects/\${PROJECT_ID}/locations/global:setUpDataConnectorV2?collectionId=cymbal-gdrive-connector&collectionDisplayName=cymbal-gdrive-connector" \\
+  -H "Authorization: Bearer \$(gcloud auth print-access-token)" \\
+  -H "Content-Type: application/json" \\
+  -H "X-Goog-User-Project: \${PROJECT_ID}" \\
+  -d "{
+    \\"dataSource\\": \\"google_drive\\",
+    \\"connectorModes\\": [\\"FEDERATED\\", \\"ACTIONS\\"],
+    \\"entities\\": [{\\"entityName\\": \\"google_drive\\"}],
+    \\"bapConfig\\": {
+      \\"supportedConnectorModes\\": [\\"ACTIONS\\"],
+      \\"enabledActions\\": [\\"copy_file\\", \\"create_file\\", \\"download_file_content\\", \\"get_file_metadata\\", \\"get_file_permissions\\", \\"list_recent_files\\", \\"list_shared_drives\\", \\"read_file_content\\", \\"search_files\\", \\"share_file\\", \\"trash_file\\", \\"update_file\\"]
+    },
+    \\"dataProtectionPolicy\\": {\\"sensitiveDataProtectionPolicy\\": {\\"policy\\": \\"\${POLICY_NAME}\\"}}
+  }"
+
+# 3. Attach SDP Policy to Assistant and Gemini Notebook (Task 6)
+curl -s -X PATCH "https://discoveryengine.googleapis.com/v1alpha/projects/\${PROJECT_ID}/locations/global/collections/default_collection/engines/cymbal-ge-app/assistants/default_assistant?updateMask=customerPolicy" \\
+  -H "Authorization: Bearer \$(gcloud auth print-access-token)" -H "Content-Type: application/json" -H "X-Goog-User-Project: \${PROJECT_ID}" \\
+  -d "{\\"customerPolicy\\": {\\"dataProtectionPolicy\\": {\\"sensitiveDataProtectionPolicy\\": {\\"policy\\": \\"\${POLICY_NAME}\\"}}}}"
+
+curl -s -X PATCH "https://discoveryengine.googleapis.com/v1alpha/projects/\${PROJECT_ID}?updateMask=customerProvidedConfig" \\
+  -H "Authorization: Bearer \$(gcloud auth print-access-token)" -H "Content-Type: application/json" -H "X-Goog-User-Project: \${PROJECT_ID}" \\
+  -d "{\\"customerProvidedConfig\\": {\\"notebooklmConfig\\": {\\"dataProtectionPolicy\\": {\\"sensitiveDataProtectionPolicy\\": {\\"policy\\": \\"\${POLICY_NAME}\\"}}}}}"`,
+      attemptsRequired: 1,
+      selfHealingDelta:
+        'Discovered via REST discovery schemas that (1) Content Policies reside at dlp.googleapis.com/v2/projects/{project}/locations/global/contentPolicies (not inspectTemplates), (2) Federated Google Drive connectors require setUpDataConnectorV2 with top-level connectorModes=["FEDERATED", "ACTIONS"] and entities=[{"entityName": "google_drive"}] while keeping bapConfig.supportedConnectorModes=["ACTIONS"], and (3) Gemini Notebook SDP policies live on v1alpha/projects/{project} under customerProvidedConfig.notebooklmConfig.dataProtectionPolicy.',
+    },
+    tags: [
+      'fde',
+      'gemini-enterprise',
+      'google-drive-connector',
+      'federated-search',
+      'sensitive-data-protection',
+      'cloud-dlp',
+      'content-policy',
+      'drive-labels',
+      'notebooklm',
+    ],
+  },
 ];
 
 export const AGENT_LEARNINGS: AgentLearningEntry[] = [
@@ -1013,6 +1111,34 @@ export const AGENT_LEARNINGS: AgentLearningEntry[] = [
       'pgrep',
     ],
   },
+  {
+    id: 'L-018',
+    date: '2026-10-14',
+    category: 'Gemini Enterprise Connectors & Sensitive Data Protection (Cloud DLP v2)',
+    title:
+      'Cloud DLP v2 ContentPolicy Schema, Discovery Engine Federated Google Drive Connector Modes & Three-Surface SDP Policy Attachment (DataConnector, Assistant, Project NotebookLMConfig)',
+    symptom:
+      'In `[FDE] Add Google Drive with Sensitive Data Protection to Gemini Enterprise: Challenge Lab`, (1) Task 2 failed with `"No ACTIVE connectors with mode \'FEDERATED\' found for Google Drive"` because calling `setUpDataConnector` without `connectorModes: ["FEDERATED", "ACTIONS"]` created a periodic ingestion connector that entered `state: "FAILED"`, while putting `"FEDERATED"` inside `bapConfig.supportedConnectorModes` failed with HTTP 400 (`Invalid value at \'data_connector.bap_config.supported_connector_modes[0]\', "FEDERATED"`), and omitting `entities` failed with `` `google_drive` Data Connector must only have exactly 1 entity ``; (2) Task 4 failed with `"Could not verify an active Content Policy named \'cepf-drive-policy\' in the global location"` because scripts called `dlp.googleapis.com/v2/.../inspectTemplates` or `discoveryengine.googleapis.com/.../dataProtectionPolicies` (404) instead of `dlp.googleapis.com/v2/.../contentPolicies`; and (3) Task 6 failed because scripts tried patching `customerPolicy` on the `Engine` resource (`Unknown name "customerPolicy" at \'engine\'`) instead of `assistants/default_assistant` and `v1alpha/projects/{project}` (`customerProvidedConfig.notebooklmConfig`).',
+    rootCause:
+      '1. In `discoveryengine.googleapis.com/v1alpha`, `DataConnector` has two distinct mode arrays: top-level `DataConnector.connectorModes` (which accepts `["DATA_INGESTION", "ACTIONS", "FEDERATED", "EUA", "FEDERATED_AND_EUA"]`) and nested `BAPConfig.supportedConnectorModes` (which only accepts `["DATA_INGESTION", "ACTIONS", "END_USER_AUTHENTICATION"]`). Furthermore, `google_drive` connectors always require `"entities": [{"entityName": "google_drive"}]` even in `FEDERATED` mode so Discovery Engine can provision the backing shadow dataStore.\n' +
+      '2. Sensitive Data Protection Content Policies (`GooglePrivacyDlpV2ContentPolicy`) are a distinct resource collection (`projects/{project}/locations/global/contentPolicies`) on `dlp.googleapis.com/v2`, with a specific schema where `inspectConfig.infoTypes` uses `[{"name": "..."}]`, `inspectConfig.customInfoTypes` supports `fileLabelInfoType.googleDriveLabel.labelId`, and `rules[].conditions[].infoTypeCondition.infoTypes` uses `"infoTypeNames": ["..."]`.\n' +
+      '3. In Gemini Enterprise, SDP policy attachment spans three distinct Discovery Engine v1alpha resources: `collections/{id}/dataConnector` (`dataProtectionPolicy`), `engines/{id}/assistants/default_assistant` (`customerPolicy.dataProtectionPolicy`), and `projects/{project}` (`customerProvidedConfig.notebooklmConfig.dataProtectionPolicy`).',
+    generalPrinciple:
+      '1. Provision Federated + Actions Google Drive connectors via `POST .../locations/global:setUpDataConnectorV2?collectionId=<id>&collectionDisplayName=<name>` with top-level `"connectorModes": ["FEDERATED", "ACTIONS"]`, `"entities": [{"entityName": "google_drive"}]`, and `"bapConfig": {"supportedConnectorModes": ["ACTIONS"], "enabledActions": [...]}`.\n' +
+      '2. Create SDP Content Policies via `POST https://dlp.googleapis.com/v2/projects/${PROJECT_ID}/locations/global/contentPolicies` (`contentPolicyId` + `contentPolicy` with `inspectConfig` and `rules`), and grant `roles/dlp.user` to `service-${PROJECT_NUMBER}@gcp-sa-discoveryengine.iam.gserviceaccount.com`.\n' +
+      '3. Attach the resulting `projects/${PROJECT_ID}/locations/global/contentPolicies/<id>` resource to `dataConnector` (`?updateMask=dataProtectionPolicy`), `assistants/default_assistant` (`?updateMask=customerPolicy`), and `v1alpha/projects/${PROJECT_ID}` (`?updateMask=customerProvidedConfig`).',
+    implementationInSkillsRunner:
+      '`server/geminiClient.ts` (Rule 9 Workspace Connectors & Rule 11 item 13) and `shared/agentLearnings.ts` (`lab-fde-add-google-drive-with-sdp-to-gemini-enterprise`, `L-018`).',
+    tags: [
+      'gemini-enterprise',
+      'google-drive-connector',
+      'federated-search',
+      'cloud-dlp',
+      'content-policy',
+      'drive-labels',
+      'notebooklm',
+    ],
+  },
 ];
 
 export function renderAgentLearningsMarkdown(
@@ -1042,7 +1168,7 @@ export function renderAgentLearningsMarkdown(
     '> 1. **Course Curriculum & Domain Learnings** (`course_content`) — Core concepts, product capabilities, and architectures taught in courses.',
     '> 2. **Verified Quiz & Knowledge Check Bank** (`quiz_mastery`) — Verified questions, winning answers, eliminated distractors, and domain rules.',
     '> 3. **Verified Hands-On Lab Recipes & Self-Healing Deltas** (`lab_execution`) — Exact API/CLI/SDK implementations that passed Qwiklabs graders and how earlier attempt errors were resolved.',
-    '> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-017`) — Reusable patterns for building reliable autonomous agents.',
+    '> 4. **Core Agent Engineering & Infrastructure Invariants** (`L-001`..`L-018`) — Reusable patterns for building reliable autonomous agents.',
     '',
     '---',
     '',
